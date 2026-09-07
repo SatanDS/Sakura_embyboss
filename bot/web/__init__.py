@@ -57,7 +57,17 @@ class Web:
 
         self.init_api()
         self.web_api = uvicorn.Server(
-            config=uvicorn.Config(self.app, host=config_api.http_url, port=config_api.http_port)
+            # The API is used by the local Caddy gateway.  Do not trust
+            # X-Forwarded-* headers here: accepting them lets an external
+            # client change ``request.client`` and makes the internal-only
+            # line enforcement endpoints reject (or, if allow-listed, expose)
+            # requests based on a spoofable address.
+            config=uvicorn.Config(
+                self.app,
+                host=config_api.http_url,
+                port=config_api.http_port,
+                proxy_headers=False,
+            )
         )
         server_config = self.web_api.config
         if not server_config.loaded:
