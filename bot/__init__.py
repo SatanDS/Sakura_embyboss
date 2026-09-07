@@ -144,6 +144,10 @@ with contextlib.suppress(ImportError):
     import uvloop
 
     uvloop.install()
+from .func_helper.pyrogram_compat import patch_large_channel_ids
+
+patch_large_channel_ids()
+
 from pyrogram import enums
 from pyromod import Client
 
