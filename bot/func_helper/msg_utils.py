@@ -153,7 +153,35 @@ async def editMessage(message, text: str, buttons=None, timer=None, parse_mode: 
     if isinstance(message, CallbackQuery):
         message = message.message
     try:
-        edt = await message.edit(text=text, disable_web_page_preview=True, reply_markup=buttons, parse_mode=parse_mode)
+        # ``Message.edit`` is an alias for ``edit_message_text``.  It cannot
+        # edit a photo/video message, which is exactly what the configuration
+        # panel uses (the panel is initially sent by ``sendPhoto``).  Telegram
+        # then rejects every button that tries to redraw that panel, making
+        # the callback look broken even though the callback handler ran.
+        # Use the caption endpoint for media messages and the text endpoint
+        # for ordinary messages.
+        media = getattr(message, "media", None)
+        caption_media = {
+            enums.MessageMediaType.AUDIO,
+            enums.MessageMediaType.DOCUMENT,
+            enums.MessageMediaType.PHOTO,
+            enums.MessageMediaType.VIDEO,
+            enums.MessageMediaType.ANIMATION,
+            enums.MessageMediaType.VOICE,
+        }
+        if media in caption_media and hasattr(message, "edit_caption"):
+            edt = await message.edit_caption(
+                caption=text,
+                parse_mode=parse_mode,
+                reply_markup=buttons,
+            )
+        else:
+            edt = await message.edit(
+                text=text,
+                disable_web_page_preview=True,
+                reply_markup=buttons,
+                parse_mode=parse_mode,
+            )
         if timer is not None:
             return await deleteMessage(edt, timer)
         return True
@@ -302,7 +330,17 @@ async def callAnswer(callbackquery: CallbackQuery, query, show_alert=False):
 
 async def callListen(callbackquery, timer: int = 120, buttons=None):
     try:
-        return await callbackquery.message.chat.listen(filters.text, timeout=timer)
+        # Scope the pending input to the user who opened the panel.  The old
+        # chat-only listener also treated a later button click as an
+        # "unallowed" callback.  A button should be able to navigate away
+        # from an input prompt, so do not let the stale listener block it.
+        user_id = getattr(callbackquery.from_user, "id", None)
+        return await callbackquery.message.chat.listen(
+            filters.text,
+            timeout=timer,
+            user_id=user_id,
+            unallowed_click_alert=False,
+        )
     except ListenerTimeout:
         await editMessage(callbackquery, '💦 __没有获取到您的输入__ **会话状态自动取消！**', buttons=buttons)
         return False
