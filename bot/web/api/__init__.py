@@ -28,7 +28,7 @@ async def verify_token(request: Request):
             raise HTTPException(status_code=401, detail="No token provided")
         # 验证token是否与bot token匹配
         if token != bot_token:
-            LOGGER.warning(f"Invalid token attempt: {token[:10]}...")
+            LOGGER.warning("Invalid API token attempt")
             raise HTTPException(status_code=403, detail="Invalid token")
         return True
     except HTTPException:
@@ -37,8 +37,18 @@ async def verify_token(request: Request):
         LOGGER.error(f"Token verification error: {str(e)}")
         raise HTTPException(status_code=500, detail="Token verification failed")
 
+
+async def verify_internal_request(request: Request):
+    """Only allow Nginx/internal callers to invoke enforcement endpoints."""
+    client_host = request.client.host if request.client else ""
+    allowed_hosts = {"127.0.0.1", "::1", "::ffff:127.0.0.1", "localhost"}
+    if client_host not in allowed_hosts:
+        raise HTTPException(status_code=403, detail="Internal endpoint")
+    return True
+
 emby_api_route.include_router(
     ban_playlist_route,
+    dependencies=[Depends(verify_internal_request)],
 )
 emby_api_route.include_router(
     favorites_router,
@@ -54,6 +64,7 @@ emby_api_route.include_router(
 )
 emby_api_route.include_router(
     line_report_router,
+    dependencies=[Depends(verify_internal_request)],
 )
 user_api_route.include_router(
     user_info_route,

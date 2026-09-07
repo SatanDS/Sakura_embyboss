@@ -1,6 +1,6 @@
 import json
 import os
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, AliasChoices, ConfigDict
 from typing import Dict, List, Optional, Union
 
 # 嵌套式的数据设计，规范数据 config.json
@@ -107,8 +107,9 @@ class Proxy(BaseModel):
 
 
 class MP(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
     status: bool = False
-    url: Optional[str] = ""
+    url: Optional[str] = Field("", validation_alias=AliasChoices("url", "host"))
     username: Optional[str] = ""
     password: Optional[str] = ""
     access_token: Optional[str] = ""
@@ -139,6 +140,7 @@ class RedEnvelope(BaseModel):
     allow_private: bool = True # 是否允许专属红包
 
 class Config(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
     bot_name: str
     bot_token: str
     owner_api: int
@@ -149,7 +151,7 @@ class Config(BaseModel):
     chanel: str
     bot_photo: str
     open: Open
-    admins: Optional[List[int]] = []
+    admins: List[int] = Field(default_factory=list)
     money: str
     emby_api: str
     emby_url: str
@@ -176,8 +178,11 @@ class Config(BaseModel):
     # another_line: Optional[List[str]] = []
     # 如果使用的是 Python 3.10+ ，|运算符能用
     # w_anti_channel_ids: Optional[List[str | int]] = []
-    w_anti_channel_ids: Optional[List[Union[str, int]]] = []
-    proxy: Optional[Proxy] = Proxy()
+    w_anti_channel_ids: Optional[List[Union[str, int]]] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("w_anti_channel_ids", "w_anti_chanel_ids"),
+    )
+    proxy: Proxy = Field(default_factory=Proxy)
     # kk指令中赠送资格的天数
     kk_gift_days: int = 30
     # 是否狙杀皮套人
@@ -213,7 +218,7 @@ class Config(BaseModel):
 
     def __init__(self, **data):
         super().__init__(**data)
-        if self.owner in self.admins:
+        if self.admins and self.owner in self.admins:
             self.admins.remove(self.owner)
 
     @classmethod

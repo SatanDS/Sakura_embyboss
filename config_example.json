@@ -1,11 +1,11 @@
 {
   "bot_name": "xxxbot",
-  "bot_token": "5701:AAEvAHzsg30",
-  "owner_api": 73711,
-  "owner_hash": "",
-  "owner": xxxxxxx,
+  "bot_token": "replace-with-bot-token",
+  "owner_api": 123456,
+  "owner_hash": "replace-with-api-hash",
+  "owner": 123456789,
   "group": [
-    -100xxxxxx
+    -1001234567890
   ],
   "main_group": "Aaaaa_su",
   "chanel": "su_yxfy",
@@ -94,7 +94,7 @@
   "db_docker_name": "mysql",
   "db_backup_dir": "./db_backup",
   "db_backup_maxcount": 7,
-  "w_anti_chanel_ids": [],
+  "w_anti_channel_ids": [],
   "proxy": {
     "scheme": "",
     "hostname": "",
@@ -104,7 +104,7 @@
   },
   "moviepilot": {
     "status": false,
-    "host": null,
+    "url": "",
     "username": null,
     "password": null,
     "access_token": null,

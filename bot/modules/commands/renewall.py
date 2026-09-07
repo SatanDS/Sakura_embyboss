@@ -194,9 +194,11 @@ async def call_all(_, msg):
     if not call or call.text == '/cancel':
         return await msg.reply('好的,您已取消操作.')
     elif call.text == '2':
-        chat_members = get_all_emby(Emby.tg is not None)
+        chat_members = get_all_emby(Emby.tg.isnot(None))
     elif call.text == '1':
-        chat_members = get_all_emby(Emby.embyid is not None)
+        chat_members = get_all_emby(Emby.embyid.isnot(None))
+    else:
+        return await msg.reply('请输入 1 或 2。')
     reply = await msg.reply('开始执行发送......')
     a = 0
     start = time.perf_counter()

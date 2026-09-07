@@ -11,7 +11,7 @@ async def sync_favorites():
     LOGGER.info("开始同步用户Emby收藏记录...")
     try:
         # 获取所有Emby用户
-        users = get_all_emby(Emby.embyid is not None)
+        users = get_all_emby(Emby.embyid.isnot(None))
         if not users:
             LOGGER.warning("没有找到Emby用户")
             return

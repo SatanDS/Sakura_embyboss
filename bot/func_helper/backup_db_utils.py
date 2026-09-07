@@ -16,20 +16,32 @@ class BackupDBUtils:
             os.makedirs(backup_dir)
         # 根据时间创建当前备份文件
         backup_file = os.path.join(backup_dir, f'{database_name}-{datetime.now().strftime("%Y-%m-%d-%H-%M-%S")}.sql')
-        command = f"mysqldump -h{host} --no-tablespaces -P{port} -u{user} -p\'{password}\' {database_name} > {backup_file}"
-        skip_ssl_command = f"mysqldump -h{host} --skip-ssl --no-tablespaces -P{port} -u{user} -p\'{password}\' {database_name} > {backup_file}"
         return_code = -1
         try:
-            process = await asyncio.create_subprocess_shell(command)
-            await process.communicate()
+            mysql_env = os.environ.copy()
+            mysql_env["MYSQL_PWD"] = password
+            with open(backup_file, "wb") as output:
+                process = await asyncio.create_subprocess_exec(
+                    "mysqldump", f"-h{host}", f"-P{port}", f"-u{user}",
+                    "--no-tablespaces", database_name, env=mysql_env,
+                    stdout=output,
+                )
+                await process.communicate()
             return_code = process.returncode
             if return_code != 0:
                 LOGGER.warning(f"BOT数据库备份失败，使用 skip-ssl方式尝试备份")
-                process = await asyncio.create_subprocess_shell(skip_ssl_command)
-                await process.communicate()
+                with open(backup_file, "wb") as output:
+                    process = await asyncio.create_subprocess_exec(
+                        "mysqldump", f"-h{host}", f"-P{port}", f"-u{user}",
+                        "--skip-ssl", "--no-tablespaces", database_name, env=mysql_env,
+                        stdout=output,
+                    )
+                    await process.communicate()
                 return_code = process.returncode
             if return_code != 0:
                 LOGGER.error(f"BOT数据库备份失败, error code: {return_code}")
+                if os.path.exists(backup_file):
+                    os.remove(backup_file)
                 return None
             LOGGER.info(f"BOT数据库备份成功,文件保存为 {backup_file}")
             # 获取所有备份文件，并且通过时间进行排序
@@ -50,35 +62,42 @@ class BackupDBUtils:
         if not os.path.exists(backup_dir):
             os.makedirs(backup_dir)
         # 根据当前时间创建备份文件
-        backup_file_in_container = f'{database_name}-{datetime.now().strftime("%Y-%m-%d-%H-%M-%S")}.sql'
-        backup_file_on_host = os.path.join(backup_dir, backup_file_in_container)
+        backup_file_on_host = os.path.join(
+            backup_dir,
+            f'{database_name}-{datetime.now().strftime("%Y-%m-%d-%H-%M-%S")}.sql',
+        )
         # 进入容器，使用mysqldump备份文件
-        command = f'docker exec {container_name} sh -c "mysqldump  --no-tablespaces -u{user} -p\'{password}\' {database_name} > {backup_file_in_container}"'
-        skip_ssl_command = f'docker exec {container_name} sh -c "mysqldump --skip-ssl --no-tablespaces -u{user} -p\'{password}\' {database_name} > {backup_file_in_container}"'
         return_code = -1
         try:
-            process = await asyncio.create_subprocess_shell(command)
-            await process.communicate()
+            docker_mysql_env = ["-e", f"MYSQL_PWD={password}"]
+            with open(backup_file_on_host, "wb") as output:
+                process = await asyncio.create_subprocess_exec(
+                    "docker", "exec", *docker_mysql_env, container_name, "mysqldump",
+                    "--no-tablespaces", f"-u{user}", database_name,
+                    stdout=output,
+                )
+                await process.communicate()
             return_code = process.returncode
             if return_code != 0:
                 LOGGER.warning(f"BOT数据库备份失败，使用 skip-ssl方式尝试备份")
-                process = await asyncio.create_subprocess_shell(skip_ssl_command)
-                await process.communicate()
+                with open(backup_file_on_host, "wb") as output:
+                    process = await asyncio.create_subprocess_exec(
+                        "docker", "exec", *docker_mysql_env, container_name, "mysqldump", "--skip-ssl",
+                        "--no-tablespaces", f"-u{user}", database_name,
+                        stdout=output,
+                    )
+                    await process.communicate()
                 return_code = process.returncode
             if return_code != 0:
                 LOGGER.error(f"BOT数据库备份失败, error code: {return_code}")
+                if os.path.exists(backup_file_on_host):
+                    os.remove(backup_file_on_host)
                 return None
-            # 将容器中的备份文件复制到本地
-            command = f'docker cp {container_name}:{backup_file_in_container} {backup_file_on_host}'
-            process = await asyncio.create_subprocess_shell(command)
-            await process.communicate()
         except Exception as e:
             LOGGER.error(f"BOT数据库备份失败, error: {str(e)}")
-        finally:
-            # 删除容器中文件
-            command = f'docker exec {container_name} rm {backup_file_in_container}'
-            process = await asyncio.create_subprocess_shell(command)
-            await process.communicate()
+            if os.path.exists(backup_file_on_host):
+                os.remove(backup_file_on_host)
+            return None
         LOGGER.info(f"BOT数据库备份成功,文件保存为 {backup_file_on_host}")
         # 获取所有备份文件，并且通过时间进行排序
         all_backups = sorted(glob.glob(os.path.join(backup_dir, f'{database_name}-*.sql')))

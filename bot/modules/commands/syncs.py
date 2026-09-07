@@ -248,7 +248,7 @@ async def kick_not_emby(_, msg):
     if open_kick == 'true':
         sign_name = f'{msg.sender_chat.title}' if msg.sender_chat else f'{msg.from_user.first_name}'
         LOGGER.info(f"{sign_name} 执行了踢出非emby用户的操作")
-        embyusers = get_all_emby(Emby.embyid is not None and Emby.embyid != '')
+        embyusers = get_all_emby(Emby.embyid.isnot(None) & (Emby.embyid != ''))
         # get tgid
         embytgs = []
         if embyusers:
@@ -276,7 +276,7 @@ async def restore_from_db(_, msg):
         sign_name = f'{msg.sender_chat.title}' if msg.sender_chat else f'{msg.from_user.first_name}'    
         LOGGER.info(
             f"{sign_name} 执行了从数据库中恢复用户到Emby中的操作")
-        embyusers = get_all_emby(Emby.embyid is not None and Emby.embyid != '')
+        embyusers = get_all_emby(Emby.embyid.isnot(None) & (Emby.embyid != ''))
         group_id = group[0]
         # 获取当前执行命令的群组成员
         chat_members = [member.user.id async for member in bot.get_chat_members(chat_id=group_id)]
@@ -348,7 +348,7 @@ async def scan_embyname(_, msg):
         f"{sign_name} 执行了扫描重复用户名操作")
 
     # 获取所有有效的emby用户
-    emby_users = get_all_emby(Emby.name is not None)
+    emby_users = get_all_emby(Emby.name.isnot(None))
     if not emby_users:
         return await send.edit("⚡扫描重复用户名任务\n\n结束！数据库中没有用户。")
 
@@ -405,7 +405,7 @@ async def unban_all_users(_, msg):
         success, allusers = await emby.users()
         if not success or allusers is None:
             return await send.edit("⚡解除禁用任务\n\n结束！获取 Emby 用户列表失败。")
-        allusers_in_db = get_all_emby(Emby.name is not None)
+        allusers_in_db = get_all_emby(Emby.name.isnot(None))
         
         unban_user_in_bot_count = unban_user_in_emby_count = index = 0
         text = ''
@@ -498,7 +498,7 @@ async def ban_all_users(_, msg):
         success, allusers = await emby.users()
         if not success or allusers is None:
             return await send.edit("⚡禁用所有用户任务\n\n结束！获取 Emby 用户列表失败。")
-        allusers_in_db = get_all_emby(Emby.name is not None)
+        allusers_in_db = get_all_emby(Emby.name.isnot(None))
         ban_user_in_bot_count = ban_user_in_emby_count = index = 0
         text = ''
         start = time.perf_counter()
@@ -588,7 +588,7 @@ async def delete_all_users(_, msg):
         success, allusers = await emby.users()
         if not success or allusers is None:
             return await send.edit("⚡跑路命令任务\n\n结束！获取 Emby 用户列表失败。")
-        allusers_in_db = get_all_emby(Emby.name is not None)
+        allusers_in_db = get_all_emby(Emby.name.isnot(None))
         
         delete_user_in_emby_count = delete_user_in_bot_count = index = 0
         text = ''

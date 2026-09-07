@@ -8,13 +8,11 @@ services:
     restart: always
     network_mode: host
     environment:
-      MYSQL_ROOT_PASSWORD: 123456 # root管理员用户密码
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-change-me-root} # root管理员用户密码
       MYSQL_USER: susu   # 创建需要连接的用户
       MYSQL_DATABASE: embyboss # 数据库名字
-      MYSQL_PASSWORD: 1234  # 设置普通用户的密码
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-change-me-user}  # 设置普通用户的密码
       MYSQL_ROOT_HOST: "%" # 所有ip可连接
-    ports:
-      - '3306:3306'  # host物理直接映射端口为
     volumes:
       - /root/Sakura_embyboss/db:/var/lib/mysql
 

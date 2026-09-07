@@ -30,7 +30,7 @@ class Uplaysinfo:
             result = session.query(Emby).filter(Emby.name.isnot(None)).all()
 
             if not result:
-                return None, 1
+                return None, 1, []
 
             total_pages = math.ceil(len(play_list) / 10)
             members = await get_users()

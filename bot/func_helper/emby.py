@@ -14,7 +14,7 @@ from bot.sql_helper.sql_emby import sql_update_emby, Emby
 from bot.func_helper.utils import pwd_create, convert_runtime, cache, Singleton
 
 
-def create_policy(admin=False, disable=False, limit: int = 2, block: list = None):
+def create_policy(admin=False, disable=False, limit: int = 2, block: Optional[List[str]] = None):
     """
     创建用户策略
     :param admin: bool 是否开启管理员
@@ -54,7 +54,7 @@ def create_policy(admin=False, disable=False, limit: int = 2, block: list = None
     return policy
 
 
-def pwd_policy(embyid: str, stats: bool = False, new: str = None) -> Dict[str, Any]:
+def pwd_policy(embyid: str, stats: bool = False, new: Optional[str] = None) -> Dict[str, Any]:
     """
     创建密码策略
     :param embyid: str 修改的emby_id
@@ -77,7 +77,7 @@ def pwd_policy(embyid: str, stats: bool = False, new: str = None) -> Dict[str, A
 
 class EmbyApiResult:
     """API 结果统一封装"""
-    def __init__(self, success: bool, data: Any = None, error: str = None):
+    def __init__(self, success: bool, data: Any = None, error: Optional[str] = None):
         self.success = success
         self.data = data
         self.error = error
@@ -248,6 +248,7 @@ class Embyservice(metaclass=Singleton):
             result = await self._request('POST', f'/emby/Users/{user_id}/Password', json=pwd_data)
             if not result.success:
                 LOGGER.error(f"设置密码失败: {result.error}")
+                await self.emby_del(user_id)
                 return False
             
             # 3. 设置策略
@@ -255,12 +256,13 @@ class Embyservice(metaclass=Singleton):
             result = await self._request('POST', f'/emby/Users/{user_id}/Policy', json=policy)
             if not result.success:
                 LOGGER.error(f"设置策略失败: {result.error}")
+                await self.emby_del(user_id)
                 return False
             
             # 4. 隐藏 emby_block 和 extra_emby_libs 媒体库
             try:
                 # 使用封装的隐藏方法
-                block_libs = emby_block + extra_emby_libs
+                block_libs = (emby_block or []) + (extra_emby_libs or [])
                 result = await self.hide_folders_by_names(user_id, block_libs)
                 if not result:
                     LOGGER.warning(f"设置媒体库权限失败: {user_id}，但用户已创建成功")
@@ -462,7 +464,12 @@ class Embyservice(metaclass=Singleton):
                 LOGGER.error(f"获取用户信息失败: {emby_id}")
                 return [], False, []
             
+            if not isinstance(rep, dict):
+                LOGGER.error(f"获取用户策略失败，响应格式错误: {emby_id}")
+                return [], False, []
             policy = rep.get("Policy", {})
+            if not isinstance(policy, dict):
+                return [], False, []
             enable_all_folders = policy.get("EnableAllFolders", False)
             blocked_media_folders = policy.get("BlockedMediaFolders", [])
             
@@ -1445,7 +1452,7 @@ class Embyservice(metaclass=Singleton):
             LOGGER.error(f"搜索电影异常: {title} - {str(e)}")
             return []
 
-    async def get_device_by_deviceid(self, deviceid: str) -> Tuple[bool, Union[Dict, Dict[str, str]]]:
+    async def get_device_by_deviceid(self, deviceid: str) -> Tuple[bool, Union[Dict[str, Any], str]]:
         """
         通过设备ID获取设备信息
         :param deviceid: 设备ID

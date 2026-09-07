@@ -415,7 +415,7 @@ async def cr_kk_ikb(uid, first):
             keyboard = [[ban, f'user_ban-{uid}'], ['⚠️ 删除账户', f'closeemby-{uid}']]
             if len(extra_emby_libs) > 0:
                 success, rep = await emby.user(emby_id=embyid)
-                if success:
+                if success and isinstance(rep, dict):
                     try:
                         # 新版本API：使用EnabledFolders控制访问
                         policy = rep.get("Policy", {})

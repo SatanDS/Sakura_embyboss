@@ -214,6 +214,7 @@ def sql_update_emby(condition, **kwargs):
             return True
         except Exception as e:
             LOGGER.error(e)
+            session.rollback()
             return False
 
 

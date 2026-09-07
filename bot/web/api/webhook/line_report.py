@@ -93,14 +93,12 @@ def is_whitelist_line(session_server_address: str) -> bool:
     lines = whitelist_line if isinstance(whitelist_line, list) else [whitelist_line]
     for line in lines:
         whitelist_normalized = normalize_line_url(line)
-        if whitelist_normalized and (
-            whitelist_normalized in session_normalized or session_normalized in whitelist_normalized
-        ):
+        if whitelist_normalized and session_normalized == whitelist_normalized:
             return True
     return False
 
 
-def is_user_whitelisted(user_details: Emby) -> bool:
+def is_user_whitelisted(user_details: Optional[Emby]) -> bool:
     """
     检查用户是否是白名单用户
     :param user_details: 用户详情
@@ -125,7 +123,7 @@ async def get_session_server_address(session_id: str) -> Optional[str]:
         for session in result.data:
             if session.get("Id") == session_id:
                 LOGGER.debug(f"Session详情: {json.dumps(session, ensure_ascii=False, indent=2)}")
-                return None
+                return session.get("ServerId") or session.get("ServerAddress")
         return None
     except Exception as e:
         LOGGER.error(f"获取会话服务器地址异常: {str(e)}")
@@ -233,9 +231,17 @@ def find_matching_session(
             _match_value(play_state.get("PlaySessionId"), normalized_play_session_id),
             _match_value(session.get("AccessToken"), normalized_token),
         )
+        if normalized_user_id:
+            # A trusted userId must never be combined with another user's
+            # device/session identifier. Prefer sessions belonging to it.
+            return candidates[0] and any(candidates[1:])
         return any(candidates)
 
     matched_sessions = [session for session in sessions if _session_matches(session)]
+    if normalized_user_id and not matched_sessions:
+        # A valid userId without a matching session is still preferable to
+        # accidentally selecting a different user's device.
+        return None
     if not matched_sessions:
         return None
 
@@ -319,6 +325,7 @@ async def resolve_user_context(
     # 如果 query 里的 userId 明显是错的，不要让它阻断 token / device / session 的正确匹配。
     if (
         (not matched_session or (direct_user_id and not direct_user_exists))
+        and not direct_user_exists
         and any([resolved_device_id, resolved_session_id, resolved_play_session_id, resolved_token])
     ):
         retry_session = find_matching_session(
@@ -369,13 +376,13 @@ async def resolve_user_context(
 
 
 async def log_line_violation(
-    user_id: str = None,
-    user_name: str = None,
-    session_id: str = None,
-    client_name: str = None,
-    tg_id: int = None,
-    user_lv: str = None,
-    action_taken: str = None,
+    user_id: Optional[str] = None,
+    user_name: Optional[str] = None,
+    session_id: Optional[str] = None,
+    client_name: Optional[str] = None,
+    tg_id: Optional[int] = None,
+    user_lv: Optional[str] = None,
+    action_taken: Optional[str] = None,
 ):
     """记录线路权限违规"""
     try:
@@ -415,7 +422,7 @@ async def handle_line_violation(
     user_name: str,
     session_id: str,
     client_name: str,
-    user_details: Emby,
+    user_details: Optional[Emby],
 ) -> dict:
     """
     处理线路权限违规
@@ -428,7 +435,7 @@ async def handle_line_violation(
     terminate_session_enabled = getattr(config, "line_filter_terminate_session", True)
     block_user_enabled = getattr(config, "line_filter_block_user", False)
 
-    if terminate_session_enabled:
+    if terminate_session_enabled and session_id:
         reason = "您使用的线路与您的账户等级不匹配，请使用正确的线路"
         terminate_success = await emby.terminate_session(session_id, reason)
         if terminate_success:
@@ -437,6 +444,8 @@ async def handle_line_violation(
         else:
             action_taken_list.append("❌ 终止会话失败")
             LOGGER.error(f"终止违规会话失败 {session_id}")
+    elif terminate_session_enabled:
+        action_taken_list.append("❌ 缺少会话 ID，无法终止")
 
     if block_user_enabled:
         block_success = await emby.emby_change_policy(emby_id=emby_id, disable=True)
