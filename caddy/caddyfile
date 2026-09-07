@@ -16,6 +16,12 @@
 		# 这里只要命中 /emby/Sessions/Playing 开头的请求，都会先走 line_report，再反代到 Emby。
 		@line_audit_play path /emby/Sessions/Playing /emby/Sessions/Playing/*
 
+		# A Playing/Progress report can arrive after the media connection has
+		# already been opened. Audit the actual media endpoints as well so a
+		# denied VIP request cannot keep receiving video/audio or HLS segments.
+		@line_audit_media path_regexp line_audit_media (?i)^/emby/(Videos|Audio)/[^/]+/(stream|universal|hls|master\.m3u8|original)(/|\.|$)
+		@line_audit_download path_regexp line_audit_download (?i)^/emby/Items/[^/]+/(Download|File)(/|$)
+
 		# 播放列表创建：直接重定向到 bot 的 ban_playlist 接口。
 		@playlist_create {
 			method POST
@@ -76,6 +82,33 @@
 					uri /emby/line_report?line={args[1]}&host={args[0]}
 					# The auth endpoint is local. Keep client forwarding headers out of
 					# this subrequest; Uvicorn accepts only the real socket peer.
+					header_up -X-Forwarded-For
+					header_up -X-Real-IP
+					header_up X-Original-URI {uri}
+					header_up X-Emby-Authorization {header.X-Emby-Authorization}
+					header_up X-Emby-Token {header.X-Emby-Token}
+				}
+				reverse_proxy {args[3]}
+			}
+
+			handle @line_audit_media {
+				# Keep the same synchronous authorization on stream and HLS
+				# requests; forward_auth returns 403 for a blocked line.
+				forward_auth {args[4]} {
+					uri /emby/line_report?line={args[1]}&host={args[0]}
+					header_up -X-Forwarded-For
+					header_up -X-Real-IP
+					header_up X-Original-URI {uri}
+					header_up X-Emby-Authorization {header.X-Emby-Authorization}
+					header_up X-Emby-Token {header.X-Emby-Token}
+				}
+				reverse_proxy {args[3]}
+			}
+
+			handle @line_audit_download {
+				# Downloads are media transfers too and must follow the same rule.
+				forward_auth {args[4]} {
+					uri /emby/line_report?line={args[1]}&host={args[0]}
 					header_up -X-Forwarded-For
 					header_up -X-Real-IP
 					header_up X-Original-URI {uri}
