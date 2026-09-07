@@ -175,7 +175,9 @@ async def cr_paginate(total_page: int, current_page: int, n) -> InlineKeyboardMa
     :return:
     """
     keyboard = InlineKeyboard()
-    keyboard.paginate(total_page, current_page, 'pagination_keyboard:{number}' + f'_{n}')
+    _paginate_if_nonempty(
+        keyboard, total_page, current_page, 'pagination_keyboard:{number}' + f'_{n}'
+    )
     next = InlineButton('⏭️ 后退+5', f'users_iv:{current_page + 5}-{n}')
     previous = InlineButton('⏮️ 前进-5', f'users_iv:{current_page - 5}-{n}')
     followUp = [InlineButton('❌ 关闭', f'closeit')]
@@ -196,7 +198,9 @@ async def users_iv_button(total_page: int, current_page: int, tg) -> InlineKeybo
     :return:
     """
     keyboard = InlineKeyboard()
-    keyboard.paginate(total_page, current_page, 'users_iv:{number}' + f'_{tg}')
+    _paginate_if_nonempty(
+        keyboard, total_page, current_page, 'users_iv:{number}' + f'_{tg}'
+    )
     next = InlineButton('⏭️ 后退+5', f'users_iv:{current_page + 5}_{tg}')
     previous = InlineButton('⏮️ 前进-5', f'users_iv:{current_page - 5}_{tg}')
     followUp = [InlineButton('❌ 关闭', f'closeit')]
@@ -217,7 +221,9 @@ async def plays_list_button(total_page: int, current_page: int, days) -> InlineK
     :return:
     """
     keyboard = InlineKeyboard()
-    keyboard.paginate(total_page, current_page, 'uranks:{number}' + f'_{days}')
+    _paginate_if_nonempty(
+        keyboard, total_page, current_page, 'uranks:{number}' + f'_{days}'
+    )
     # 添加按钮,前进5, 后退5
     next = InlineButton('⏭️ 后退+5', f'uranks:{current_page + 5}_{days}')
     previous = InlineButton('⏮️ 前进-5', f'uranks:{current_page - 5}_{days}')
@@ -239,7 +245,9 @@ async def store_query_page(total_page: int, current_page: int) -> InlineKeyboard
     :return:
     """
     keyboard = InlineKeyboard()
-    keyboard.paginate(total_page, current_page, 'store-query:{number}')
+    _paginate_if_nonempty(
+        keyboard, total_page, current_page, 'store-query:{number}'
+    )
     next = InlineButton('⏭️ 后退+5', f'store-query:{current_page + 5}')
     previous = InlineButton('⏮️ 前进-5', f'store-query:{current_page - 5}')
     followUp = [InlineButton('🔙 Back', 'storeall')]
@@ -253,7 +261,9 @@ async def store_query_page(total_page: int, current_page: int) -> InlineKeyboard
 
 async def whitelist_page_ikb(total_page: int, current_page: int) -> InlineKeyboardMarkup:
     keyboard = InlineKeyboard()
-    keyboard.paginate(total_page, current_page, 'whitelist:{number}')
+    _paginate_if_nonempty(
+        keyboard, total_page, current_page, 'whitelist:{number}'
+    )
     next = InlineButton('⏭️ 后退+5', f'whitelist:{current_page + 5}')
     previous = InlineButton('⏮️ 前进-5', f'whitelist:{current_page - 5}')
     followUp = [InlineButton('🔙 Back', 'manage')]
@@ -266,7 +276,9 @@ async def whitelist_page_ikb(total_page: int, current_page: int) -> InlineKeyboa
     return keyboard
 async def normaluser_page_ikb(total_page: int, current_page: int) -> InlineKeyboardMarkup:
     keyboard = InlineKeyboard()
-    keyboard.paginate(total_page, current_page, 'normaluser:{number}')
+    _paginate_if_nonempty(
+        keyboard, total_page, current_page, 'normaluser:{number}'
+    )
     next = InlineButton('⏭️ 后退+5', f'normaluser:{current_page + 5}')
     previous = InlineButton('⏮️ 前进-5', f'normaluser:{current_page - 5}')
     followUp = [InlineButton('🔙 Back', 'manage')]
@@ -294,7 +306,9 @@ def devices_page_ikb( has_prev: bool, has_next: bool, page: int) -> InlineKeyboa
     return keyboard
 async def favorites_page_ikb(total_page: int, current_page: int) -> InlineKeyboardMarkup:
     keyboard = InlineKeyboard()
-    keyboard.paginate(total_page, current_page, 'page_my_favorites:{number}')
+    _paginate_if_nonempty(
+        keyboard, total_page, current_page, 'page_my_favorites:{number}'
+    )
     next = InlineButton('⏭️ 后退+5', f'page_my_favorites:{current_page + 5}')
     previous = InlineButton('⏮️ 前进-5', f'page_my_favorites:{current_page - 5}')
     followUp = [InlineButton('🔙 Back', 'members')]
@@ -397,6 +411,24 @@ def try_set_buy(ls: list) -> InlineKeyboardMarkup:
 
 
 """ other """
+
+
+def _paginate_if_nonempty(keyboard: InlineKeyboard, total_page: int,
+                          current_page: int, callback_pattern: str) -> None:
+    """Add pagination only when the result set contains a page.
+
+    ``pykeyboard.InlineKeyboard.paginate(0, 1, ...)`` appends an empty row.
+    Telegram may render that markup but then reports a generic callback-data
+    error when a later button is pressed.  Empty result sets should render
+    only their Back/Close row.
+    """
+    if total_page <= 0:
+        return
+
+    current_page = max(1, min(current_page, total_page))
+    keyboard.paginate(total_page, current_page, callback_pattern)
+
+
 register_code_ikb = ikb([[('🎟️ 注册', 'create'), ('⭕ 取消', 'closeit')]])
 dp_g_ikb = ikb([[("🈺 ╰(￣ω￣ｏ)", "t.me/Aaaaa_su", "url")]])
 
