@@ -17,3 +17,6 @@ config.json
 db_backup/
 *.session
 *.session-journal
+.python310/
+.venv/
+python-*.exe

@@ -10,6 +10,15 @@ BOT_DIR = ROOT / "bot"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+# This test imports Emby with lightweight module stubs.  Keep those stubs
+# local to this module so unittest discovery can load the other test modules
+# against the real application package.
+_ORIGINAL_MODULES = {
+    name: module
+    for name, module in sys.modules.items()
+    if name == "aiohttp" or name == "bot" or name.startswith("bot.")
+}
+
 
 def install_test_stubs():
     aiohttp_stub = types.ModuleType("aiohttp")
@@ -78,6 +87,17 @@ def install_test_stubs():
 
 install_test_stubs()
 from bot.func_helper.emby import EmbyApiResult, Embyservice
+
+# Restore the module table immediately after importing the classes under test.
+# The imported classes retain their references to the stubs, while subsequent
+# test modules get a clean import of the real bot package.
+for _name in list(sys.modules):
+    if _name != "aiohttp" and _name != "bot" and not _name.startswith("bot."):
+        continue
+    if _name in _ORIGINAL_MODULES:
+        sys.modules[_name] = _ORIGINAL_MODULES[_name]
+    else:
+        del sys.modules[_name]
 
 
 class EmbyPolicyTests(unittest.IsolatedAsyncioTestCase):

@@ -2,21 +2,21 @@
 
 <p align="center">
 <img src="image/bot2.png" alt="bot"><br>
-<a href="https://github.com/berry8838/Sakura_embyboss/stargazers"><img src="https://img.shields.io/github/stars/berry8838/Sakura_embyboss" alt="stars"></a> 
-<a href="https://github.com/berry8838/Sakura_embyboss/forks"><img src="https://img.shields.io/github/forks/berry8838/Sakura_embyboss" alt="forks"></a> 
-<a href="https://github.com/berry8838/Sakura_embyboss/issues"><img src="https://img.shields.io/github/issues/berry8838/Sakura_embyboss" alt="issue"></a>  
-<a href="https://github.com/berry8838/Sakura_embyboss/blob/master/LICENSE"><img src="https://img.shields.io/github/license/berry8838/Sakura_embyboss" alt="license"></a> 
+<a href="https://github.com/SatanDS/Sakura_embyboss/stargazers"><img src="https://img.shields.io/github/stars/SatanDS/Sakura_embyboss" alt="stars"></a>
+<a href="https://github.com/SatanDS/Sakura_embyboss/forks"><img src="https://img.shields.io/github/forks/SatanDS/Sakura_embyboss" alt="forks"></a>
+<a href="https://github.com/SatanDS/Sakura_embyboss/issues"><img src="https://img.shields.io/github/issues/SatanDS/Sakura_embyboss" alt="issue"></a>
+<a href="https://github.com/SatanDS/Sakura_embyboss/blob/master/LICENSE"><img src="https://img.shields.io/github/license/SatanDS/Sakura_embyboss" alt="license"></a>
 <a href="https://hub.docker.com/r/jingwei520/sakura_embyboss" ><img src="https://img.shields.io/docker/v/jingwei520/sakura_embyboss/latest?logo=docker" alt="docker"></a>
 <a href="https://hub.docker.com/r/jingwei520/sakura_embyboss/tags" ><img src="https://img.shields.io/badge/platform-amd64%20arm64-pink" alt="plat"></a>
-<a href="https://github.com/berry8838/Sakura_embyboss/actions/workflows/publish-docker_on_master.yml">
-    <img src="https://img.shields.io/github/actions/workflow/status/berry8838/Sakura_embyboss/publish-docker_on_master.yml?branch=master" alt="Build status" />
+<a href="https://github.com/SatanDS/Sakura_embyboss/actions/workflows/publish-docker_on_master.yml">
+    <img src="https://img.shields.io/github/actions/workflow/status/SatanDS/Sakura_embyboss/publish-docker_on_master.yml?branch=master" alt="Build status" />
 </a>
 </p>
 <br>
 
 ## 📜 项目说明（重构中，暂停更新）
 
-- **用Telegram管理Emby用户**（开服） 安装使用 👉 [项目文档](https://berry8838.github.io/Sakura_embyboss)
+- **用Telegram管理Emby用户**（开服） 安装使用 👉 [项目文档](https://github.com/SatanDS/Sakura_embyboss#readme)
 - **推荐使用 Debian 11操作系统，AMD处理器架构。目前ARM也支持（如有问题请反馈issue）**
 - 解决不了大的技术问题（因为菜菜），如需要，请自行fork修改，~~如果能提点有意思的pr更好啦~~
 - 反馈请尽量 issue，看到会处理
@@ -26,8 +26,8 @@
 
 ## 💐 Our Contributors
 
-<a href="https://github.com/berry8838/Sakura_embyboss/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=berry8838/Sakura_embyboss" />
+<a href="https://github.com/SatanDS/Sakura_embyboss/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=SatanDS/Sakura_embyboss" />
 </a>  
 
 ## 特别感谢（排序不分先后）<img src="image/bixin.jpg" alt="比心" height=30>
@@ -44,4 +44,4 @@
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=berry8838/Sakura_embyboss&type=Date)](https://star-history.com/#berry8838/Sakura_embyboss)
+[![Star History Chart](https://api.star-history.com/svg?repos=SatanDS/Sakura_embyboss&type=Date)](https://star-history.com/#SatanDS/Sakura_embyboss)
