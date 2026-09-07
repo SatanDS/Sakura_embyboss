@@ -11,6 +11,7 @@ Date:2026/4/15
     Bot 收到后进行线路权限检查，若违规则终止会话/封禁用户。
 """
 from fastapi import APIRouter, Header
+from fastapi.responses import JSONResponse
 from bot.sql_helper.sql_emby import Emby, sql_get_emby, sql_update_emby
 from bot import LOGGER, bot, config
 from bot.func_helper.emby import emby
@@ -559,11 +560,18 @@ async def line_report(
                 f"线路违规冷却中，忽略重复上报: 用户 {resolved_user_id} "
                 f"(冷却 {cooldown_seconds}s 内)"
             )
-            return {
-                "status": "cooldown",
-                "message": "Violation already handled, in cooldown",
-                "userId": resolved_user_id,
-            }
+            # Caddy's forward_auth treats every 2xx response as authorized.
+            # Keep denying the original playback request while the violation
+            # is cooling down, otherwise a client can continue after the
+            # first report has been handled.
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "status": "cooldown",
+                    "message": "Violation already handled, in cooldown",
+                    "userId": resolved_user_id,
+                },
+            )
 
         update_cooldown(resolved_user_id)
 
@@ -596,14 +604,20 @@ async def line_report(
             user_details=user_details,
         )
 
-        return {
-            "status": "blocked",
-            "message": "Line not allowed",
-            "line": line,
-            "host": host,
-            "userId": resolved_user_id,
-            "action_result": result,
-        }
+        # This endpoint is also used as Caddy's synchronous forward_auth
+        # check. A JSON field alone is not enough: forward_auth only blocks
+        # the original request when the auth response is non-2xx.
+        return JSONResponse(
+            status_code=403,
+            content={
+                "status": "blocked",
+                "message": "Line not allowed",
+                "line": line,
+                "host": host,
+                "userId": resolved_user_id,
+                "action_result": result,
+            },
+        )
 
     LOGGER.debug(f"线路检查通过: 用户 {resolved_user_id} 使用线路 {line}")
     return {"status": "allowed", "line": line, "host": host, "userId": resolved_user_id}

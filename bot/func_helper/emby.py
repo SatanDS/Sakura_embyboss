@@ -636,13 +636,27 @@ class Embyservice(metaclass=Singleton):
             }
             message_result = await self._request('POST', f'/emby/Sessions/{session_id}/Message', json=message_data)
             
-            # 只要有一个操作成功就认为成功
-            if stop_result.success or message_result.success:
+            # A client message is only informational and must not be counted
+            # as a successful stop. Otherwise a failed Playing/Stop call
+            # would be reported as handled while playback keeps running.
+            if stop_result.success:
+                if not message_result.success:
+                    LOGGER.warning(
+                        f"会话已终止但通知发送失败: {session_id} - {message_result.error}"
+                    )
                 LOGGER.info(f"成功终止会话: {session_id}")
                 return True
+
+            LOGGER.error(
+                f"终止会话失败: {session_id} - 停止播放失败: {stop_result.error}"
+            )
+            if message_result.success:
+                LOGGER.warning(f"仅发送了终止通知，未能停止播放: {session_id}")
             else:
-                LOGGER.error(f"终止会话失败: {session_id}")
-                return False
+                LOGGER.error(
+                    f"终止通知也发送失败: {session_id} - {message_result.error}"
+                )
+            return False
                 
         except Exception as e:
             LOGGER.error(f"终止会话异常: {session_id} - {str(e)}")
