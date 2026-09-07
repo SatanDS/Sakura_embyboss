@@ -47,6 +47,10 @@ async def user_in_group_filter(client, update):
     """
     uid = update.from_user or update.sender_chat
     uid = uid.id
+    # Operators can use the private panel without waiting for Telegram to
+    # resolve the group's access hash after a bot restart.
+    if uid == owner or uid in admins:
+        return True
     for i in group:
         try:
             u = await client.get_chat_member(chat_id=int(i), user_id=uid)
@@ -74,6 +78,9 @@ async def user_in_group_on_filter(filt, client, update):
     """
     uid = update.from_user or update.sender_chat
     uid = uid.id
+    # Keep operator callbacks independent of a transient group-peer lookup.
+    if uid == owner or uid in admins:
+        return True
     if uid in group:
         return True
     for i in group:

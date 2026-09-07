@@ -170,7 +170,8 @@ async def change_for_timing(timing, tgid, call):
 @bot.on_callback_query(filters.regex('all_user_limit') & admins_on_filter)
 async def open_all_user_l(_, call):
     await callAnswer(call, '⭕ 限制人数')
-    send = await call.message.edit(
+    # The panel is sent as a photo; editMessage selects edit_caption for it.
+    send = await editMessage(call,
         "🦄 请在 120s 内发送开注总人数，本次修改不会对注册状态改动，如需要开注册请点击打开自由注册\n**注**：总人数满自动关闭注册 取消 /cancel")
     if send is False:
         return
@@ -195,7 +196,8 @@ async def open_all_user_l(_, call):
 @bot.on_callback_query(filters.regex('open_us') & admins_on_filter)
 async def open_us(_, call):
     await callAnswer(call, '🤖开放账号天数')
-    send = await call.message.edit(
+    # The panel is sent as a photo; editMessage selects edit_caption for it.
+    send = await editMessage(call,
         "🦄 请在 120s 内发送开放注册时账号的有效天数，本次修改不会对注册状态改动，如需要开注册请点击打开自由注册\n**注**：总人数满自动关闭注册 取消 /cancel")
     if send is False:
         return
@@ -516,7 +518,8 @@ async def set_renew(_, call):
 @bot.on_callback_query(filters.regex('set_freeze_days') & admins_on_filter)
 async def set_freeze_days(_, call):
     await callAnswer(call, '⭕ 设置封存天数')
-    send = await call.message.edit(
+    # The panel is sent as a photo; editMessage selects edit_caption for it.
+    send = await editMessage(call,
         "🦄 请在 120s 内发送封存账号天数，\n**注**：用户到期后被禁用，再过指定天数后会被删除 取消 /cancel")
     if send is False:
         return
