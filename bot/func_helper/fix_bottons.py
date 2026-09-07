@@ -296,7 +296,10 @@ def devices_page_ikb( has_prev: bool, has_next: bool, page: int) -> InlineKeyboa
         nav_buttons = []
         if has_prev:
             nav_buttons.append(('⬅️', f'devices:{page-1}'))
-        nav_buttons.append((f'第 {page} 页', 'none'))
+        # Keep the page indicator callback distinct from actionable commands;
+        # ``view_user`` answers it as a no-op so Telegram does not leave a
+        # callback spinner running when the indicator is tapped.
+        nav_buttons.append((f'第 {page} 页', 'devices_page_info'))
         if has_next:
             nav_buttons.append(('➡️', f'devices:{page+1}'))
         buttons.append(nav_buttons)
@@ -512,7 +515,10 @@ def uinfo_ikb(embyid, lv=None):
         row2 = [('🗑️ 删除账户', f'uinfo_delete-{embyid}')]
     row2.append(('❌ 关闭', 'closeit'))
 
-    return ikb([row1, row2])
+    # ``lv='d'`` leaves ``row1`` empty.  Do not pass empty rows to Telegram,
+    # as they can result in an invalid inline keyboard markup response.
+    rows = [row for row in (row1, row2) if row]
+    return ikb(rows)
 
 
 def uinfo_delete_confirm_ikb(embyid):
@@ -605,14 +611,18 @@ def request_record_page_ikb(has_prev: bool, has_next: bool):
         buttons.append(('< 上一页', 'request_record_prev'))
     if has_next:
         buttons.append(('下一页 >', 'request_record_next'))
-    return ikb([buttons, [('🔙 返回', 'download_center')]])
+    rows = [buttons] if buttons else []
+    rows.append([('🔙 返回', 'download_center')])
+    return ikb(rows)
 def mp_search_page_ikb(has_prev: bool, has_next: bool, page: int):
     buttons = []
     if has_prev:
         buttons.append(('< 上一页', 'mp_search_prev_page'))
     if has_next:
         buttons.append(('下一页 >', 'mp_search_next_page'))
-    return ikb([buttons, [('💾 选择下载', 'mp_search_select_download'), ('❌ 取消搜索', 'cancel_search')]])
+    rows = [buttons] if buttons else []
+    rows.append([('💾 选择下载', 'mp_search_select_download'), ('❌ 取消搜索', 'cancel_search')])
+    return ikb(rows)
 
 # 添加 MoviePilot 设置按钮
 def mp_config_ikb():

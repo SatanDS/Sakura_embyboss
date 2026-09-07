@@ -262,6 +262,7 @@ async def call_rate(_, call):
 
 @bot.on_callback_query(filters.regex('request_record_prev') & user_in_group_on_filter)
 async def request_record_prev(_, call):
+    await callAnswer(call, '正在加载上一页')
     if user_data.get(call.from_user.id) is None:
         user_data[call.from_user.id] = {'request_record_page': 1}
     page = user_data[call.from_user.id]['request_record_page'] - 1
@@ -276,6 +277,7 @@ async def request_record_prev(_, call):
 
 @bot.on_callback_query(filters.regex('request_record_next') & user_in_group_on_filter)
 async def request_record_next(_, call):
+    await callAnswer(call, '正在加载下一页')
     if user_data.get(call.from_user.id) is None:
         user_data[call.from_user.id] = {'request_record_page': 1}
     page = user_data[call.from_user.id]['request_record_page'] + 1

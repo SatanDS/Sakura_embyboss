@@ -101,3 +101,9 @@ async def user_devices(_, call):
         text += f'用户名: [{name}](https://t.me/{bot_name}?start=userip-{name}) | 设备: {device_count} | IP: {ip_count}\n'
     text += f"\n第 {page} 页"
     await editMessage(call, text, buttons=devices_page_ikb(has_prev, has_next, page))
+
+
+@bot.on_callback_query(filters.regex(r'^devices_page_info$') & admins_on_filter)
+async def devices_page_info(_, call):
+    """Answer taps on the non-actionable device-list page indicator."""
+    await callAnswer(call, '当前页不可点击')
