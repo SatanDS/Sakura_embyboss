@@ -74,6 +74,10 @@
 				# 再继续反代到 Emby。
 				forward_auth {args[4]} {
 					uri /emby/line_report?line={args[1]}&host={args[0]}
+					# The auth endpoint is local. Do not let Uvicorn's proxy-header
+					# handling turn the original CDN client into the socket peer.
+					header_up X-Forwarded-For 127.0.0.1
+					header_up X-Real-IP 127.0.0.1
 					header_up X-Original-URI {uri}
 					header_up X-Emby-Authorization {header.X-Emby-Authorization}
 					header_up X-Emby-Token {header.X-Emby-Token}
