@@ -14,7 +14,9 @@ log
 *.sql
 bot-env
 config.json
+.env
 db_backup/
+db/
 *.session
 *.session-journal
 .python310/
