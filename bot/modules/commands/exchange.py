@@ -10,6 +10,7 @@ from bot.func_helper.emby import emby
 from bot.func_helper.concurrency import get_user_lock
 from bot.func_helper.fix_bottons import register_code_ikb
 from bot.func_helper.msg_utils import sendMessage, sendPhoto
+from bot.func_helper.utils import accepted_code_prefixes
 from bot.sql_helper.sql_code import Code
 from bot.sql_helper.sql_emby import sql_get_emby, Emby
 from bot.sql_helper import Session
@@ -67,7 +68,7 @@ def _redeem_register_code_atomic(register_code: str, user_id: int):
             return {"status": "invalid_code"}
 
         code_prefix = register_code.split('-')[0]
-        if code_prefix not in ranks.logo and code_prefix != str(user_id):
+        if code_prefix.casefold() not in accepted_code_prefixes() and code_prefix != str(user_id):
             return {"status": "forbidden"}
         if code.used is not None:
             return {"status": "used", "used": code.used}

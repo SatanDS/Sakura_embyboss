@@ -70,7 +70,8 @@ class Open(BaseModel):
 
 
 class Ranks(BaseModel):
-    logo: str = "SAKURA"
+    # Prefix used in Telegram messages, invite links and all generated codes.
+    logo: str = "DuSheng"
     backdrop: bool = False
 
 
@@ -225,6 +226,12 @@ class Config(BaseModel):
     def load_config(cls):
         with open("config.json", "r", encoding="utf-8") as f:
             config = json.load(f)
+            # Migrate the former built-in branding once.  ``config.json`` is
+            # intentionally ignored by Git, so existing installations would
+            # otherwise keep generating Sakura-prefixed links forever.
+            ranks = config.get("ranks")
+            if isinstance(ranks, dict) and str(ranks.get("logo", "")).strip().casefold() == "sakura":
+                ranks["logo"] = "DuSheng"
             return cls(**config)
 
     def save_config(self):

@@ -77,7 +77,7 @@
   "tz_password": "",
   "tz_note": "tz_version 可选值: v0 (Nezha V0 Token认证), v1 (Nezha V1 用户名密码认证), komari (Komari API Key认证)",
   "ranks": {
-    "logo": "SAKURA",
+    "logo": "DuSheng",
     "backdrop": false
   },
   "schedall": {

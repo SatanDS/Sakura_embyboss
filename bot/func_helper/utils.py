@@ -8,6 +8,20 @@ from cacheout import Cache
 cache = Cache()
 
 
+def accepted_code_prefixes():
+    """Return prefixes accepted at the Telegram deep-link/code boundary.
+
+    New codes use the configured logo. Keep accepting the former Sakura
+    prefix after the default changes so already-issued codes do not suddenly
+    become unusable.
+    """
+    configured = str(ranks.logo or "").strip()
+    prefixes = {configured.casefold()} if configured else set()
+    if configured.casefold() == "dusheng":
+        prefixes.add("sakura")
+    return prefixes
+
+
 def judge_admins(uid):
     """
     判断是否admin
