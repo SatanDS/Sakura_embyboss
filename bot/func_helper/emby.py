@@ -1056,10 +1056,15 @@ class Embyservice(metaclass=Singleton):
             result = await self._request('POST', f'/emby/user_usage_stats/submit_custom_query?api_key={emby_api}', json=data)
             if result.success and result.data:
                 ret = result.data
-                if len(ret.get("colums", [])) == 0:
+                # Different versions of user_usage_stats spell this field as
+                # ``colums`` or ``columns``; the result rows are the reliable
+                # indicator and may be returned even when the metadata field
+                # is omitted.
+                results = ret.get("results") or []
+                if not results:
                     return False, ret.get("message", "无数据")
                 LOGGER.debug(f"获取用户设备信息成功: {emby_id}")
-                return True, ret.get("results", [])
+                return True, results
             else:
                 LOGGER.error(f"获取用户设备信息失败: {emby_id} - {result.error}")
                 return False, f"🤕Emby 服务器连接失败: {result.error}"

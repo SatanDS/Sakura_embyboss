@@ -796,42 +796,74 @@ async def my_favorite(_, call):
     total_pages = math.ceil(total_favorites / limit)
     keyboard = await favorites_page_ikb(total_pages, page)
     await editMessage(call, text, buttons=keyboard)
-@bot.on_callback_query(filters.regex('my_devices'))
-async def my_devices(_, call):
-    get_emby = sql_get_emby(tg=call.from_user.id)
-    if get_emby is None:
-        return await callAnswer(call, '您还没有Emby账户', True)
-    success, result = await emby.get_emby_userip(emby_id=get_emby.embyid)
-    if not success or len(result) == 0:
-        return await callAnswer(call, '您好像没播放信息吖')
-    else:
-        await callAnswer(call, '🔍 正在获取您的设备信息')
-        device_count = 0
-        ip_count = 0
-        device_list = []
-        ip_list = []
-        device_details = ""
-        ip_details = ""
-        for r in result:
-            device, client, ip = r
-            # 统计ip
-            if ip not in ip_list:
-                ip_count += 1
-                ip_list.append(ip)
-                ip_details += f'{ip_count}: `{ip}`\n'
-            # 统计设备并拼接详情
-            if device + client not in device_list:
-                device_count += 1
-                device_list.append(device + client)
-                device_details += f'{device_count}: {device} | {client}  \n'
-        text = '**🌏 以下为您播放过的设备&ip 共{}个设备，{}个ip：**\n\n'.format(device_count, ip_count) + '**设备:**\n' + device_details + '**IP:**\n'+ ip_details
+def _device_row_values(row):
+    """Normalize user_usage_stats rows from tuple/list or dict responses."""
+    if isinstance(row, dict):
+        device = row.get('DeviceName', row.get('device_name', row.get('device', '未知设备')))
+        client = row.get('ClientName', row.get('client_name', row.get('client', '未知客户端')))
+        ip = row.get('RemoteAddress', row.get('remote_address', row.get('ip', '未知 IP')))
+        return str(device or '未知设备'), str(client or '未知客户端'), str(ip or '未知 IP')
+    if isinstance(row, (list, tuple)) and len(row) >= 3:
+        return tuple(str(value or fallback) for value, fallback in zip(
+            row[:3], ('未知设备', '未知客户端', '未知 IP')
+        ))
+    return None
 
-        # 以\n分割文本，每20条发送一个消息
-        messages = text.split('\n')
-        # 每20条消息组成一组
-        for i in range(0, len(messages), 20):
-            chunk = messages[i:i+20]
-            chunk_text = '\n'.join(chunk)
-            if not chunk_text.strip():
-                continue
+
+@bot.on_callback_query(filters.regex(r'^my_devices$'))
+async def my_devices(_, call):
+    # Answer before the Emby query so Telegram does not leave the button in a
+    # spinning state while the usage-stats endpoint is waiting.
+    await callAnswer(call, '🔍 正在获取您的设备信息')
+    get_emby = sql_get_emby(tg=call.from_user.id)
+    if get_emby is None or not get_emby.embyid:
+        return await editMessage(call, '⚠️ 您还没有有效的 Emby 账户。', buttons=back_members_ikb)
+
+    try:
+        success, result = await emby.get_emby_userip(emby_id=get_emby.embyid)
+    except Exception as exc:
+        LOGGER.exception('查询用户设备信息异常: %s', exc)
+        return await editMessage(call, '❌ 查询设备信息失败，请稍后重试。', buttons=back_members_ikb)
+
+    if not success:
+        detail = str(result) if result else '暂无播放记录'
+        return await editMessage(call, f'ℹ️ 暂无可用设备记录。\n`{detail[:300]}`', buttons=back_members_ikb)
+    if not isinstance(result, (list, tuple)) or not result:
+        return await editMessage(call, 'ℹ️ 您还没有播放记录，暂无设备/IP 可显示。', buttons=back_members_ikb)
+
+    device_count = 0
+    ip_count = 0
+    device_list = []
+    ip_list = []
+    device_details = ""
+    ip_details = ""
+    for row in result:
+        values = _device_row_values(row)
+        if values is None:
+            LOGGER.warning('跳过格式异常的设备记录: %r', row)
+            continue
+        device, client, ip = values
+        if ip not in ip_list:
+            ip_count += 1
+            ip_list.append(ip)
+            ip_details += f'{ip_count}: `{ip}`\n'
+        device_key = f'{device}\x00{client}'
+        if device_key not in device_list:
+            device_count += 1
+            device_list.append(device_key)
+            device_details += f'{device_count}: {device} | {client}  \n'
+
+    if device_count == 0 and ip_count == 0:
+        return await editMessage(call, 'ℹ️ 没有可显示的设备/IP 记录。', buttons=back_members_ikb)
+
+    text = (
+        '**🌏 以下为您播放过的设备&IP（历史记录）**\n\n'
+        f'设备数：{device_count}，IP 数：{ip_count}\n\n'
+        '**设备：**\n' + device_details + '**IP：**\n' + ip_details
+    )
+    messages = text.split('\n')
+    for i in range(0, len(messages), 20):
+        chunk_text = '\n'.join(messages[i:i + 20])
+        if chunk_text.strip():
             await sendMessage(call.message, chunk_text, buttons=close_it_ikb)
+    await editMessage(call, '✅ 设备/IP 历史记录已发送到下方消息。', buttons=back_members_ikb)
