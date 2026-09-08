@@ -372,13 +372,15 @@ def _configured_auth_db_path() -> str:
 
 
 def _lookup_user_from_auth_db_sync(token: str, db_path: str) -> Tuple[str, str]:
-    """Resolve an Emby access token through the server's Tokens table.
+    """Resolve an Emby access token through its authentication token table.
 
     Emby 4.9 does not expose a safe ``/Users/Me`` endpoint and its
     ``/Users/{Id}`` endpoint accepts any authenticated user's token for an
     arbitrary path ID.  The local Tokens table is the authoritative token to
     user binding, so a read-only query is the only database fallback used
-    here.  The token itself is always passed as a bound SQL parameter.
+    here.  Some Emby migrations leave the current table as ``Tokens_2``;
+    both known names are queried using static SQL identifiers.  The token
+    itself is always passed as a bound SQL parameter.
     """
     if not db_path:
         return "", "Emby authentication database is not configured"
@@ -389,11 +391,32 @@ def _lookup_user_from_auth_db_sync(token: str, db_path: str) -> Tuple[str, str]:
         uri = f"file:{quote(os.path.abspath(db_path), safe='/')}?mode=ro"
         with sqlite3.connect(uri, uri=True, timeout=1.0) as connection:
             connection.execute("PRAGMA query_only=ON")
-            rows = connection.execute(
-                "SELECT UserId FROM Tokens "
-                "WHERE AccessToken = ? AND IsActive = 1 LIMIT 3",
-                (token,),
-            ).fetchall()
+            table_names = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type = 'table' AND name IN ('Tokens', 'Tokens_2')"
+                )
+            }
+            rows = []
+            for table_name in ("Tokens", "Tokens_2"):
+                if table_name not in table_names:
+                    continue
+                columns = {
+                    row[1]
+                    for row in connection.execute(
+                        "PRAGMA table_info(" + table_name + ")"
+                    )
+                }
+                if not {"AccessToken", "UserId", "IsActive"}.issubset(columns):
+                    continue
+                rows.extend(
+                    connection.execute(
+                        "SELECT UserId FROM " + table_name + " "
+                        "WHERE AccessToken = ? AND IsActive = 1 LIMIT 3",
+                        (token,),
+                    ).fetchall()
+                )
     except (sqlite3.Error, OSError) as exc:
         return "", f"Emby authentication database lookup failed: {type(exc).__name__}"
 
