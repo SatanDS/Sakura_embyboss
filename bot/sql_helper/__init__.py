@@ -34,7 +34,7 @@ def _legacy_create_all_tables():
     """
     在未安装 Alembic 或配置缺失时兜底建表，保证服务可启动。
     """
-    from bot.sql_helper import sql_code, sql_emby, sql_emby2, sql_favorites, sql_partition, sql_request_record  # noqa: F401
+    from bot.sql_helper import sql_code, sql_emby, sql_emby2, sql_favorites, sql_partition, sql_request_record, sql_douban  # noqa: F401
 
     Base.metadata.create_all(bind=engine, checkfirst=True)
 

@@ -63,6 +63,7 @@ def members_ikb(is_admin: bool = False, account: bool = False) -> InlineKeyboard
                     ]
         if moviepilot.status:
             normal.append([('🍿 点播中心', 'download_center')])
+            normal.append([('📚 豆瓣想看', 'douban_watch')])
         normal.append([('♻️ 主界面', 'back_start')])
         return ikb(normal)
     else:
@@ -74,6 +75,15 @@ def members_ikb(is_admin: bool = False, account: bool = False) -> InlineKeyboard
 
 back_start_ikb = ikb([[('💫 回到首页', 'back_start')]])
 back_members_ikb = ikb([[('💨 返回', 'members')]])
+
+
+def douban_watch_ikb(has_binding: bool = False) -> InlineKeyboardMarkup:
+    """Buttons for the user's DoubanSync binding panel."""
+    rows = [[('🔗 绑定/修改豆瓣 ID', 'douban_watch_bind')]]
+    if has_binding:
+        rows.append([('🗑️ 解绑豆瓣 ID', 'douban_watch_remove')])
+    rows.append([('💨 返回', 'members')])
+    return ikb(rows)
 back_manage_ikb = ikb([[('💨 返回', 'manage')]])
 re_create_ikb = ikb([[('🍥 重新输入', 'create'), ('💫 用户主页', 'members')]])
 re_changetg_ikb = ikb([[('✨ 换绑TG', 'changetg'), ('💫 用户主页', 'members')]])

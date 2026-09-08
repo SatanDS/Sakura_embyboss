@@ -406,7 +406,57 @@ line_report 回傳 403 對 Caddy 來說代表阻止原始播放請求，是預�
 
 link 是 Telegram 深連結，code 是純文字碼；F 註冊、T 續期、W 白名單。白名單碼沒有天數欄位，必須先有 Emby 帳戶和有效訂閱。
 
-## 13. 更新、備份與 Token 更換
+## 13. MoviePilot v2 豆瓣想看
+
+Bot 現在支援讓已註冊的 Emby 使用者從 Telegram 提交豆瓣使用者 ID，並自動寫入 MoviePilot v2 的 `DoubanSync` 插件使用者列表。
+
+### 13.1 MoviePilot 前置條件
+
+1. 在 MoviePilot v2 安裝並啟用 `豆瓣想看/DoubanSync` 插件。
+2. 確認插件的配置欄位為 `users`，內容是英文逗號分隔的數字 ID，例如 `294556764,297023432`。
+3. 在 `config.json` 的 `moviepilot` 中填寫 MoviePilot 地址、管理員使用者名稱和密碼，並開啟 `status`：
+
+~~~json
+"moviepilot": {
+  "status": true,
+  "url": "http://127.0.0.1:3000",
+  "username": "<MoviePilot 管理員使用者名稱>",
+  "password": "<MoviePilot 管理員密碼>",
+  "access_token": null,
+  "price": 1,
+  "lv": "b"
+}
+~~~
+
+用於 Bot 的 MoviePilot 帳號必須是管理員/超級使用者，因為插件配置接口需要管理權限。Bot 會在首次呼叫時登入並把短期 token 保存回 `config.json`，不要把該檔案提交 Git。
+
+### 13.2 Telegram 操作
+
+使用者開啟 `/start` → **使用者功能** → **📚 豆瓣想看**，再提交純數字豆瓣 ID，或個人主頁連結 `https://www.douban.com/people/<ID>`。Bot 會：
+
+- 先讀取完整的 `DoubanSync` 配置，只修改 `users`，保留 `cron`、通知、搜尋下載等其他欄位；
+- 記錄 TG 使用者目前綁定的 ID，支援修改和解除綁定；
+- 按插件原有定時任務同步豆瓣「想看」，不直接替使用者發送下載請求。
+
+`moviepilot.lv` 為 `a` 時，功能只允許 Bot 白名單使用者；為 `b` 時，有效的普通 Emby 使用者也可以使用。使用者必須已有有效 Emby 帳戶。
+
+這裡的 `users` 是 DoubanSync 的全局列表，不是 MoviePilot 的使用者密碼。若多個 TG 使用者提交同一個豆瓣 ID，Bot 會保留該 ID，直到最後一個綁定者解除綁定。
+
+### 13.3 更新部署
+
+本次版本增加了資料庫表 `moviepilot_douban_users`，Bot 啟動時會自動執行 Alembic 遷移。更新伺服器：
+
+~~~bash
+cd /opt/Tgbot
+git pull --ff-only --autostash origin master
+docker compose build embyboss
+docker compose up -d --force-recreate embyboss
+docker compose logs --tail=200 embyboss
+~~~
+
+日誌看到 `資料庫遷移完成，當前已升級到最新版本` 後，再在 Telegram 測試綁定。若提示插件不存在，請先在 MoviePilot 啟用 `DoubanSync`，並確認 Bot 使用的是管理員帳號。
+
+## 14. 更新、備份與 Token 更換
 
 更新：
 
@@ -443,7 +493,7 @@ docker compose logs --since=2m embyboss
 
 同一 Token 不可同時被其他程式、另一台伺服器或另一容器使用，否則會 Conflict、連線關閉或按鈕無反應。
 
-## 14. 故障排查
+## 15. 故障排查
 
 ### Telegram 按鈕沒有反應
 
@@ -489,7 +539,7 @@ docker run --rm \
 
 同一端口只能有一個代理程序；修改後先 validate，再 docker restart emby-line-gateway。
 
-## 15. 安全檢查
+## 16. 安全檢查
 
 - config.json、.env、*.session 權限為 600，未提交 Git。
 - 8838 只讓本機 Caddy 呼叫，不直接暴露公網。

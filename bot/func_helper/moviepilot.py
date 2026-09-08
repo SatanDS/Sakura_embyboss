@@ -1,8 +1,10 @@
 import requests
 import json
+import re
 from bot import LOGGER, moviepilot, save_config
 import aiohttp
 import asyncio
+from urllib.parse import quote, urlparse
 
 # 添加配置类
 class MoviePilot:
@@ -15,6 +17,66 @@ class MoviePilot:
 mp = MoviePilot()
 
 TIMEOUT = 30
+DOUBAN_SYNC_PLUGIN_ID = "DoubanSync"
+_douban_sync_lock = asyncio.Lock()
+
+
+def normalize_douban_user_id(value):
+    """Return a numeric Douban user id from an id or a profile URL.
+
+    DoubanSync consumes user ids (not display names and not arbitrary URLs).
+    Accepting the profile URL here makes the Telegram flow less error-prone,
+    while keeping the value written to MoviePilot strictly numeric.
+    """
+    value = str(value or "").strip()
+    if not value:
+        return None
+
+    if value.isdigit():
+        candidate = value
+    else:
+        try:
+            parsed = urlparse(value)
+        except ValueError:
+            return None
+        if parsed.scheme not in {"http", "https"}:
+            return None
+        hostname = (parsed.hostname or "").lower()
+        if hostname.startswith("www."):
+            hostname = hostname[4:]
+        if hostname != "douban.com":
+            return None
+        parts = [part for part in parsed.path.split("/") if part]
+        if len(parts) != 2 or parts[0].lower() != "people" or not parts[1].isdigit():
+            return None
+        candidate = parts[1]
+
+    # Douban IDs are currently short numeric identifiers.  The upper bound
+    # prevents accidentally sending a Telegram/Emby id or a huge payload.
+    if not re.fullmatch(r"\d{4,20}", candidate):
+        return None
+    return candidate
+
+
+def _normalise_douban_users(value):
+    """Convert a plugin users value to a de-duplicated list of strings."""
+    if isinstance(value, str):
+        values = value.split(",")
+    elif isinstance(value, (list, tuple, set)):
+        values = value
+    elif value is None:
+        values = []
+    else:
+        values = [value]
+
+    result = []
+    seen = set()
+    for item in values:
+        item = str(item).strip()
+        if item and item not in seen:
+            seen.add(item)
+            result.append(item)
+    return result
 # aiohttp重试装饰器
 def aiohttp_retry(retry_count):
     def decorator(func):
@@ -33,20 +95,32 @@ def aiohttp_retry(retry_count):
 async def _do_request(request):
     async with aiohttp.ClientSession() as session:
         async with session.request(method=request['method'], url=request['url'], headers=request['headers'], data=request.get('data')) as response:
-            if response.status == 401 or response.status == 403:
-                LOGGER.error("MP Token过期, 尝试重新登录.")
+            if response.status in (401, 403) and not request.get("_auth_retried"):
+                LOGGER.warning(f"MP 请求鉴权失败 ({response.status}), 尝试重新登录")
                 success = await login()
                 if success:
                     request['headers']['Authorization'] = mp.access_token
+                    request['_auth_retried'] = True
                     return await _do_request(request)
                 return None
             return await response.json()
 async def login():
-    url = f"{mp.url}/api/v1/login/access-token"
-    payload = f"username={mp.username}&password={mp.password}"
+    if not mp.url or not mp.username or not mp.password:
+        LOGGER.error("MP 登录失败：未配置 URL、用户名或密码")
+        return False
+    url = f"{mp.url.rstrip('/')}/api/v1/login/access-token"
     headers = {'Content-Type': 'application/x-www-form-urlencoded'}
-    response = requests.post(url, data=payload, headers=headers, timeout=TIMEOUT)
-    result = response.json()
+    try:
+        response = requests.post(
+            url,
+            data={'username': mp.username, 'password': mp.password},
+            headers=headers,
+            timeout=TIMEOUT,
+        )
+        result = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        LOGGER.error(f"MP 登录失败：{exc}")
+        return False
     if 'access_token' in result:
         mp.access_token = result['token_type'] + ' ' + result['access_token']
         moviepilot.access_token = mp.access_token # 保存到config
@@ -56,6 +130,124 @@ async def login():
     else:
         LOGGER.error(f"MP 登录失败: {result}")
         return False
+
+
+async def get_douban_sync_config():
+    """Read the complete DoubanSync configuration from MoviePilot.
+
+    MoviePilot's plugin endpoint returns the stored configuration directly;
+    keeping this helper separate ensures callers never overwrite unrelated
+    fields such as ``cron`` or ``search_download``.
+    """
+    if not mp.url:
+        return False, None, "未配置 MoviePilot 地址"
+
+    url = f"{mp.url.rstrip('/')}/api/v1/plugin/{quote(DOUBAN_SYNC_PLUGIN_ID, safe='')}"
+    request = {
+        'method': 'GET',
+        'url': url,
+        'headers': {'Authorization': mp.access_token},
+    }
+    try:
+        result = await _do_request(request)
+    except Exception as exc:
+        LOGGER.error(f"读取 MoviePilot 豆瓣想看配置失败: {exc}")
+        return False, None, "无法连接 MoviePilot"
+
+    if not isinstance(result, dict):
+        return False, None, "MoviePilot 返回了无效的插件配置"
+    if result.get("success") is False:
+        return False, None, result.get("message") or "豆瓣想看插件不存在或未启用"
+    # Some compatible MP builds wrap responses in ``data``.  Support both
+    # forms without changing the normal v2 response shape.
+    config = result.get("data") if isinstance(result.get("data"), dict) else result
+    if not isinstance(config, dict) or "users" not in config:
+        return False, None, "未找到 DoubanSync 插件或 users 配置"
+    return True, config, None
+
+
+async def update_douban_sync_users(douban_user_id, previous_user_id=None):
+    """Add a Douban ID to DoubanSync's global users list.
+
+    The GET/merge/PUT sequence is serialized because MoviePilot only exposes
+    a full-config PUT endpoint.  ``previous_user_id`` is removed only when it
+    is no longer referenced by another Telegram account; callers may omit it
+    when they only want append semantics.
+    """
+    normalized = normalize_douban_user_id(douban_user_id)
+    if not normalized:
+        return False, "豆瓣 ID 格式无效"
+    previous = normalize_douban_user_id(previous_user_id) if previous_user_id else None
+
+    async with _douban_sync_lock:
+        ok, plugin_config, error = await get_douban_sync_config()
+        if not ok:
+            return False, error
+
+        users = _normalise_douban_users(plugin_config.get("users"))
+        if previous and previous != normalized:
+            users = [item for item in users if item != previous]
+        if normalized not in users:
+            users.append(normalized)
+
+        # Preserve the plugin's existing value type (the official plugin uses
+        # a comma-separated string) and all unrelated settings.
+        plugin_config["users"] = ",".join(users)
+        url = f"{mp.url.rstrip('/')}/api/v1/plugin/{quote(DOUBAN_SYNC_PLUGIN_ID, safe='')}"
+        request = {
+            'method': 'PUT',
+            'url': url,
+            'headers': {
+                'Authorization': mp.access_token,
+                'Content-Type': 'application/json',
+            },
+            'data': json.dumps(plugin_config, ensure_ascii=False),
+        }
+        try:
+            result = await _do_request(request)
+        except Exception as exc:
+            LOGGER.error(f"更新 MoviePilot 豆瓣想看用户失败: {exc}")
+            return False, "更新 MoviePilot 插件失败"
+        if not isinstance(result, dict) or result.get("success") is False:
+            message = result.get("message") if isinstance(result, dict) else None
+            return False, message or "MoviePilot 拒绝更新插件配置"
+        return True, normalized
+
+
+async def remove_douban_sync_user(douban_user_id):
+    """Remove one id from DoubanSync while preserving every other setting."""
+    normalized = normalize_douban_user_id(douban_user_id)
+    if not normalized:
+        return False, "豆瓣 ID 格式无效"
+
+    async with _douban_sync_lock:
+        ok, plugin_config, error = await get_douban_sync_config()
+        if not ok:
+            return False, error
+        configured_users = _normalise_douban_users(plugin_config.get("users"))
+        users = [item for item in configured_users if item != normalized]
+        if len(users) == len(configured_users):
+            return True, normalized
+        plugin_config["users"] = ",".join(users)
+        url = f"{mp.url.rstrip('/')}/api/v1/plugin/{quote(DOUBAN_SYNC_PLUGIN_ID, safe='')}"
+        request = {
+            'method': 'PUT',
+            'url': url,
+            'headers': {
+                'Authorization': mp.access_token,
+                'Content-Type': 'application/json',
+            },
+            'data': json.dumps(plugin_config, ensure_ascii=False),
+        }
+        try:
+            result = await _do_request(request)
+        except Exception as exc:
+            LOGGER.error(f"移除 MoviePilot 豆瓣想看用户失败: {exc}")
+            return False, "更新 MoviePilot 插件失败"
+        if not isinstance(result, dict) or result.get("success") is False:
+            message = result.get("message") if isinstance(result, dict) else None
+            return False, message or "MoviePilot 拒绝更新插件配置"
+        return True, normalized
 
 async def search(title):
     """
