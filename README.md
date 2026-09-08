@@ -31,7 +31,7 @@ Emby 客戶端 -> DuShengCDN/NPM (HTTPS，保留 Host/認證標頭)
 ### 2.1 BotFather Token
 
 1. Telegram 搜尋官方 @BotFather，發送 /newbot。
-2. 輸入顯示名稱，再輸入以 bot 結尾的 username，例如 dusheng_emby_bot。
+2. 輸入顯示名稱，再輸入以 bot 結尾的 username，例如 `my_emby_bot`。
 3. 將 BotFather 回傳的 Token（類似 123456789:AA...）填入 config.json 的 bot_token。
 4. bot_name 填 username，不要加 @。
 5. 需要 Bot 讀取群組非命令訊息時，才在 BotFather 使用 /setprivacy → Disable。
@@ -146,8 +146,8 @@ nano config.json
   "chanel": "<頻道 username，不含@>",
   "emby_api": "<Emby API key>",
   "emby_url": "http://127.0.0.1:8096",
-  "emby_line": "https://www.dusheng.xyz",
-  "emby_whitelist_line": "https://www.xxxx.xxx",
+  "emby_line": "https://normal.example.com",
+  "emby_whitelist_line": "https://vip.example.com",
   "db_host": "127.0.0.1",
   "db_user": "dusheng",
   "db_pwd": "<與 .env 的 MYSQL_PASSWORD 相同>",
@@ -243,33 +243,79 @@ caddy/caddyfile 使用 Caddy forward_auth：
 
 模板會檢查 Sessions/Playing、影片/音訊串流、HLS 及下載端點，避免只終止 session 後串流仍繼續。
 
-### 9.0 共享密鑰（CDN 沒有固定回源 IP 時必須設定）
+### 9.0 Caddy/CDN 共享密鑰（CDN 沒有固定回源 IP 時必須設定）
 
-`/emby/line_report` 不是公開 API。因為 DuShengCDN 的回源節點 IP 可能變動，不能只用 UFW 來源 IP 或 Host 判斷來源；現在改用一個只在 CDN、Caddy 和 Bot 之間共享的隨機密鑰：
+`/emby/line_report` 不是公開 API。當 CDN 回源節點 IP 會變動時，不能只依靠 UFW 來源 IP 或 Host 判斷請求是否可信；必須讓 CDN、Caddy 和 Bot 共用同一串隨機密鑰。下列三處的值必須完全相同：
 
-1. 產生一串只保存在伺服器與 CDN 管理面的密鑰（不要提交 Git、不要使用 Bot Token/Emby API Key）：
+| 位置 | 配置名稱/標頭 | 作用 |
+| --- | --- | --- |
+| Bot `config.json` | `api.line_report_token` | 驗證 Caddy → Bot 的內部上報 |
+| 源站 Caddy 環境 | `DUSHENGCDN_ORIGIN_TOKEN` | 驗證 CDN → Caddy 的回源請求 |
+| CDN VIP 路由 | `X-DuSheng-Origin-Token` | CDN 回源時固定注入的請求頭 |
+
+這是同一個 32-byte（64 位 hex）密鑰，不是三組不同密碼。Caddy 在 `18080` 入口驗證 `X-DuSheng-Origin-Token`；通過後只在本機呼叫 Bot，並把同一值改以 `X-DuSheng-Line-Token` 傳給 Bot。兩個內部標頭都會在轉發給 Emby 前移除。未設定或不匹配時應直接回傳 HTTP 403，Bot API 仍只監聽 `127.0.0.1:8838`。
+
+1. 在源站產生密鑰。命令輸出的值只在受控終端短暫顯示；不要把真實值貼到聊天、截圖、Issue、README 或 Git：
 
 ~~~bash
 install -d -m 700 /etc/dusheng
+umask 077
 openssl rand -hex 32
 ~~~
 
-輸出的 64 位 hex 字串要同時填入 `config.json` 的 `api.line_report_token`，以及 Caddy 執行環境的 `DUSHENGCDN_ORIGIN_TOKEN`。Caddy 會在 18080 入口先驗證 `X-DuSheng-Origin-Token`，再以同一密鑰呼叫 Bot；缺少或不匹配時直接回 403。Bot API 維持只監聽 `127.0.0.1:8838`。
+把輸出的 64 位 hex 值填入 `/opt/Tgbot/config.json` 的 `api.line_report_token`。不要使用 Bot Token、Emby API key 或資料庫密碼代替它。設定後檢查 JSON 和密鑰格式（只輸出 OK，不輸出密鑰）：
 
-2. 將密鑰保存為只有 root 可讀的環境檔（把 `<TOKEN>` 換成剛剛產生的值）：
+~~~bash
+cd /opt/Tgbot
+chmod 600 config.json
+python3 -m json.tool config.json >/dev/null && echo 'config.json JSON OK'
+python3 - <<'PY'
+import json
+c = json.load(open('config.json'))
+t = c.get('api', {}).get('line_report_token', '')
+ok = len(t) == 64 and all(ch in '0123456789abcdefABCDEF' for ch in t)
+print('line_report_token:', 'OK' if ok else '缺失或格式錯誤')
+PY
+~~~
+
+2. 建立只有 root 可讀的 Caddy 環境檔（把 `<TOKEN>` 換成同一個值；`=` 後不要加引號）：
 
 ~~~bash
 printf 'DUSHENGCDN_ORIGIN_TOKEN=<TOKEN>\n' > /etc/dusheng/emby-line.env
 chmod 600 /etc/dusheng/emby-line.env
+awk -F= '$1 == "DUSHENGCDN_ORIGIN_TOKEN" { print "Caddy token length=" length($2) }' /etc/dusheng/emby-line.env
 ~~~
 
-3. 在 DuShengCDN 的「網站/代理配置 → 自定義請求頭」新增：
+輸出長度應為 `64`。此檔案不應提交 Git。Caddy 的 `--env-file` 只在建立容器時讀取；修改它後必須依 9.2 的重建命令重新建立 `emby-line-gateway`，單純 `docker restart` 不會載入新值。
+
+3. 在 DuShengCDN 的 VIP「網站/代理配置 → 自定義請求頭」新增一條固定回源標頭：
 
 ~~~text
 X-DuSheng-Origin-Token: <同一個 TOKEN>
 ~~~
 
-保存後要「發布配置」並等待所有 Agent 套用。該 Header 必須由 CDN 固定注入；不要把它透傳給 Emby，也不要允許客戶端自訂覆蓋。VIP 網站的 `/emby/*` 快取必須關閉（或至少按使用者 Token 完整隔離），否則快取命中會繞過回源檢查。
+冒號後保留一個空格，值不要加引號。保存後一定要「發布配置」並等待所有 Agent 套用；在生成的 OpenResty 配置中應能看到該 `proxy_set_header`。標頭必須由 CDN 強制注入並覆蓋客戶端同名標頭，不能讓客戶端自行提供，也不要把它透傳給 Emby。VIP `/emby/*` 快取必須關閉，或至少按完整使用者 Token 隔離，避免快取命中繞過回源檢查。
+
+此模板在 `18080` 入口統一檢查密鑰，因此凡是經由同一個 Caddy 實例的域名都必須由前置代理注入該標頭；若普通線路不經過這個 Caddy 入口，則不受此條件影響。不要為了讓登入成功而移除 `@origin_invalid`，應先檢查 CDN 是否已發布自定義請求頭。
+
+如果公網仍回 403，請在實際 DuShengCDN Agent 節點以 root 檢查「生效中的」OpenResty 配置（不要只執行默認的 `openresty -T`；Agent 可能使用自己的 `-p/-c`）：
+
+~~~bash
+ROOT=/opt/dushengcdn-agent/data/etc/nginx
+/usr/bin/openresty -T -p "$ROOT" -c "$ROOT/nginx.conf" 2>&1 |
+  awk '/X-DuSheng-Origin-Token/ { print "active config header present" }'
+
+awk '
+/proxy_set_header[[:space:]]+X-DuSheng-Origin-Token/ {
+  v=$0
+  sub(/^.*X-DuSheng-Origin-Token[[:space:]]+/, "", v)
+  sub(/;[[:space:]]*$/, "", v)
+  gsub(/^"|"$/, "", v)
+  print "line=" FNR, "value_len=" length(v)
+}' "$ROOT/conf.d/dushengcdn_routes.conf"
+~~~
+
+正常应看到配置存在且 `value_len=64`；不要把命令输出中的密钥内容贴到聊天或工单。
 
 ### 9.1 設定 VIP/普通域名
 
@@ -282,8 +328,8 @@ nano caddy/caddyfile
 刪除最後的 localhost 測試 import，換成：
 
 ~~~caddyfile
-import emby_local_config www.xxxx.xxx vip 18080 127.0.0.1:8096 127.0.0.1:8838
-import emby_local_config www.dusheng.xyz normal 18080 127.0.0.1:8096 127.0.0.1:8838
+import emby_local_config vip.example.com vip 18080 127.0.0.1:8096 127.0.0.1:8838
+import emby_local_config normal.example.com normal 18080 127.0.0.1:8096 127.0.0.1:8838
 ~~~
 
 參數順序：
@@ -299,7 +345,7 @@ bot_upstream   Bot API，例如 127.0.0.1:8838
 VIP host 必須和 config.json 的 emby_whitelist_line 相同；程式會忽略協定、尾斜線及大小寫：
 
 ~~~json
-"emby_whitelist_line": "https://www.xxxx.xxx"
+"emby_whitelist_line": "https://vip.example.com"
 ~~~
 
 ### 9.2 驗證與啟動 Caddy
@@ -340,18 +386,18 @@ ss -lntp | grep ':18080'
 ~~~bash
 # 沒有 CDN 密鑰時必須被拒絕
 curl -sS -o /dev/null -w 'No token => HTTP %{http_code}\n' \
-  -H 'Host: www.xxxx.xxx' \
+  -H 'Host: vip.example.com' \
   http://127.0.0.1:18080/emby/System/Info/Public
 
 # 帶正確密鑰才會到 Emby
 source /etc/dusheng/emby-line.env
 curl -sS -o /dev/null -w 'VIP gateway => HTTP %{http_code}\n' \
-  -H 'Host: www.xxxx.xxx' \
+  -H 'Host: vip.example.com' \
   -H "X-DuSheng-Origin-Token: $DUSHENGCDN_ORIGIN_TOKEN" \
   http://127.0.0.1:18080/emby/System/Info/Public
 
 curl -sS -o /dev/null -w 'Normal gateway => HTTP %{http_code}\n' \
-  -H 'Host: www.dusheng.xyz' \
+  -H 'Host: normal.example.com' \
   -H "X-DuSheng-Origin-Token: $DUSHENGCDN_ORIGIN_TOKEN" \
   http://127.0.0.1:18080/emby/System/Info/Public
 ~~~
@@ -385,16 +431,16 @@ VIP 網域使用自己的CDN时比如 DuShengCDN/自建權威 DNS。CDN 站點�
 1. DNS 指向 DuShengCDN 入口/邊緣位址。
 2. CDN 源站填伺服器 IP，源站 port 填 18080。
 3. 源站協定使用 HTTP（TLS 在 CDN/NPM 終止）。
-4. **保留原始 Host www.xxxx.xxx **，不可改成源站 IP，否則 Caddy 無法匹配 VIP。
+4. **保留原始 Host `vip.example.com`**，不可改成源站 IP，否則 Caddy 無法匹配 VIP。
 5. 在「自定義請求頭」固定加入 `X-DuSheng-Origin-Token: <TOKEN>`；同時轉發 X-Emby-Authorization、X-Emby-Token、Authorization、Range，啟用 WebSocket/長連線；不要快取登入、播放和 HLS。
 6. 檢查 CDN 地區防火牆源站防火墙；CDN 和UFW 自己回的 403 不會上報 Bot。
 
 如果 NPM 與 Caddy 在同一台主機，NPM 容器內不要填 127.0.0.1:18080；要填可達的主機 IP/host gateway 和 18080。NPM 公開 HTTPS 再轉到 Caddy 的 HTTP 18080。
 
 ~~~bash
-dig +short www.xxxx.xxx
+dig +short vip.example.com
 curl -sk -o /dev/null -w 'VIP public => HTTP %{http_code}\n' \
-  https://www.xxxx.xxx/emby/System/Info/Public
+  https://vip.example.com/emby/System/Info/Public
 ~~~
 
 因 CDN 回源 IP 不固定，18080 需要對 CDN 節點開放；安全性由上面的共享密鑰提供。8838 不要開公網：
@@ -420,7 +466,7 @@ docker compose logs --tail=0 -f embyboss
 普通用戶從 VIP 播放時，預期看到：
 
 ~~~text
-线路权限违规(nginx): 用户 ... 通过 www.xxxx.xxx 使用白名单线路
+线路权限违规(nginx): 用户 ... 通过 vip.example.com 使用白名单线路
 成功终止会话: ...
 GET /emby/line_report?... 403 Forbidden
 ~~~
@@ -439,7 +485,7 @@ source /etc/dusheng/emby-line.env
 curl -i -G 'http://127.0.0.1:8838/emby/line_report' \
   -H "X-DuSheng-Line-Token: $DUSHENGCDN_ORIGIN_TOKEN" \
   --data-urlencode 'line=vip' \
-  --data-urlencode 'host=www.xxxx.xxx' \
+  --data-urlencode 'host=vip.example.com' \
   --data-urlencode 'userId=<EMBY_USER_ID>' \
   -H 'X-Emby-Token: <CLIENT_EMBY_TOKEN>'
 ~~~
@@ -472,7 +518,7 @@ Bot 現在支援讓已註冊的 Emby 使用者從 Telegram 提交豆瓣使用者
 ### 13.1 MoviePilot 前置條件
 
 1. 在 MoviePilot v2 安裝並啟用 `豆瓣想看/DoubanSync` 插件。
-2. 確認插件的配置欄位為 `users`，內容是英文逗號分隔的數字 ID，並以英文逗號結尾，例如 `294556764,297023432,`。Bot 自動提交時會保持此格式。
+2. 確認插件的配置欄位為 `users`，內容是英文逗號分隔的數字 ID，並以英文逗號結尾，例如 `<DOUBAN_ID_1>,<DOUBAN_ID_2>,`（請替換成實際 ID）。Bot 自動提交時會保持此格式。
 3. 在 `config.json` 的 `moviepilot` 中填寫 MoviePilot 地址、管理員使用者名稱和密碼。`status` 是點播開關，`douban_status` 是豆瓣想看獨立開關：
 
 ~~~json
