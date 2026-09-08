@@ -45,7 +45,7 @@ async def server(_, call):
     elif data.lv == 'a':
         line = f'{emby_line}'
         if emby_whitelist_line and is_subscription_active(data.ex):
-            line += f'\n{emby_whitelist_line}'
+            line += f'\n白名单线路: {emby_whitelist_line}'
     else:
         line = ' - **无权查看**'
     try:
