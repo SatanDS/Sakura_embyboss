@@ -10,7 +10,7 @@ from bot.func_helper.emby import emby
 from bot.func_helper.concurrency import get_user_lock
 from bot.func_helper.fix_bottons import register_code_ikb
 from bot.func_helper.msg_utils import sendMessage, sendPhoto
-from bot.func_helper.utils import accepted_code_prefixes
+from bot.func_helper.utils import accepted_code_prefixes, is_subscription_active
 from bot.sql_helper.sql_code import Code
 from bot.sql_helper.sql_emby import sql_get_emby, Emby
 from bot.sql_helper import Session
@@ -35,6 +35,8 @@ def _redeem_whitelist_code_atomic(register_code: str, user_id: int):
             return {"status": "no_user"}
         if not user.embyid:
             return {"status": "no_account"}
+        if not is_subscription_active(user.ex, now):
+            return {"status": "no_active_subscription"}
 
         code = session.query(Code).filter(Code.code == register_code).with_for_update().first()
         if not code:
@@ -130,6 +132,12 @@ async def rgs_code(_, msg, register_code):
             return await sendMessage(msg, "出错了，不确定您是否有资格使用，请先 /start")
         if result["status"] == "no_account":
             return await sendMessage(msg, "🔔 白名单码需要您先拥有 Emby 账户，请先注册后再使用。", timer=60)
+        if result["status"] == "no_active_subscription":
+            return await sendMessage(
+                msg,
+                "⏳ 白名单权限跟随订阅有效期，请先开通或续期订阅后再激活白名单码。",
+                timer=60,
+            )
         if result["status"] == "invalid_code":
             return await sendMessage(msg, "⛔ **无效的白名单码，请确认后重试。**", timer=60)
         if result["status"] == "used":

@@ -542,14 +542,14 @@ async def set_freeze_days(_, call):
         await editMessage(call, f"✔️ 成功，您已设置 **封存账号天数 {a}**", buttons=back_free_ikb)
         LOGGER.info(f"【admin】：管理员 {call.from_user.first_name} 调整了封存账号天数：{a}")
 
-@bot.on_callback_query(filters.regex('set_invite_lv'))
+@bot.on_callback_query(filters.regex('set_invite_lv') & admins_on_filter)
 async def invite_lv_set(_, call):
     try:
         method = call.data
         if method.startswith('set_invite_lv-'):
             # 当选择具体等级时
             level = method.split('-')[1]
-            if level in ['a', 'b', 'c', 'd']:
+            if level in ['a', 'b', 'c', 'd', 'admin']:
                 _open.invite_lv = level
                 save_config()
                 await callAnswer(call, f'✅ 已设置邀请等级为 {level}', show_alert=True)
@@ -561,7 +561,8 @@ async def invite_lv_set(_, call):
             "🅰️ - 白名单可使用\n"
             "🅱️ - 普通用户及以上可使用\n" 
             "©️ - 已禁用用户及以上可使用\n"
-            "🅳️ - 所有用户可使用",
+            "🅳️ - 所有用户可使用\n"
+            "🛡️ - 仅所有者和管理员可使用",
             buttons=invite_lv_ikb())
         return
     except IndexError:

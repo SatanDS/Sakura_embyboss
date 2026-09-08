@@ -128,7 +128,7 @@ async def uun_info(_, msg, name = None):
     str_ex = ex
     if e.lv == 'a':
         str_lv = 'a (白名单)'
-        str_ex = '白名单用户，无到期时间'
+        str_ex = e.ex or '未设置到期时间（请联系管理员补充订阅）'
     elif e.lv == 'b':
         str_lv = 'b (普通用户)'
     elif e.lv == 'c':

@@ -17,7 +17,15 @@ from bot.func_helper.concurrency import get_user_lock
 from bot.func_helper.emby import emby
 from bot.func_helper.register_queue import get_register_queue_manager, RegisterJob
 from bot.func_helper.filters import user_in_group_on_filter
-from bot.func_helper.utils import members_info, cr_link_one, judge_admins, tem_deluser, pwd_create
+from bot.func_helper.utils import (
+    members_info,
+    cr_link_one,
+    judge_admins,
+    tem_deluser,
+    pwd_create,
+    is_subscription_active,
+    invite_policy_allows,
+)
 from bot.func_helper.fix_bottons import members_ikb, back_members_ikb, del_me_ikb, re_delme_ikb, \
     re_reset_ikb, re_changetg_ikb, emby_block_ikb, user_emby_block_ikb, user_emby_unblock_ikb, re_exchange_b_ikb, \
     store_ikb, re_bindtg_ikb, close_it_ikb, store_query_page, re_born_ikb, send_changetg_ikb, favorites_page_ikb
@@ -657,6 +665,12 @@ async def do_store_whitelist(_, call):
             return
         if not e.embyid or not e.name:
             return await callAnswer(call, '❌ 未查询到账户，不许乱点！', True)
+        if not is_subscription_active(e.ex):
+            return await callAnswer(
+                call,
+                '⏳ 白名单权限跟随订阅有效期，请先续期后再兑换白名单。',
+                True,
+            )
         if e.iv < _open.whitelist_cost or e.lv == 'a':
             return await callAnswer(call,
                                     f'🏪 兑换规则：\n当前兑换白名单需要 {_open.whitelist_cost} {sakura_b}，已有白名单无法再次消费。勉励',
@@ -678,8 +692,10 @@ async def do_store_invite(_, call):
         if not e:
             return
         # 用户等级为 a（白名单） b(普通用户) c(已禁用) d（未注册用户）
-        # 比如当 _open.invite_lv 设置为 d 时，用户等级为 小于等于d 的用户可以兑换，否则无法兑换
-        if e.lv > _open.invite_lv:
+        # a/b/c/d are thresholds; admin is an explicit owner/admin-only policy.
+        if not invite_policy_allows(call.from_user.id, e.lv, _open.invite_lv):
+            if _open.invite_lv == 'admin':
+                return await callAnswer(call, '❌ 仅所有者和管理员可以兑换邀请', True)
             return await callAnswer(call, '❌ 账号等级不足，无法兑换', True)
         if e.iv < _open.invite_cost:
             return await callAnswer(call,

@@ -15,10 +15,29 @@ from bot.sql_helper.sql_emby2 import get_all_emby2, Emby2, sql_update_emby2
 
 async def check_expired():
     # 询问 到期时间的用户，判断有无积分，有则续期，无就禁用
-    rst = get_all_emby(and_(Emby.ex < datetime.now(), Emby.lv == 'b'))
+    # Both normal and whitelist accounts are subscription-bound.  A whitelist
+    # account must therefore enter the same expiry/auto-renew flow as a normal
+    # account instead of bypassing expiry forever.
+    rst = get_all_emby(
+        and_(
+            Emby.ex.isnot(None),
+            Emby.ex < datetime.now(),
+            Emby.lv.in_(('a', 'b')),
+        )
+    )
     if rst is None:
-        return LOGGER.info('【到期检测】- 等级 b 无到期用户，跳过')
+        return LOGGER.info('【到期检测】- 等级 a/b 无到期用户，跳过')
     ext = (datetime.now() + timedelta(days=30))
+
+    # Older installations could have whitelist rows without an expiry because
+    # whitelist used to mean "permanent". Revoke only the VIP flag for those
+    # rows; the normal account remains available for renewal.
+    legacy_whitelist = get_all_emby(and_(Emby.lv == 'a', Emby.ex.is_(None)))
+    for legacy in legacy_whitelist or []:
+        if sql_update_emby(Emby.tg == legacy.tg, lv='b'):
+            LOGGER.warning(
+                f'【白名单期限迁移】账户 {legacy.tg} 没有订阅到期时间，已撤销永久白名单'
+            )
     for r in rst:
         if r.us >= 30:
             b = r.us - 30
@@ -153,7 +172,14 @@ async def check_expired():
             except Exception as e:
                 LOGGER.error(e)
 
-    rseired = get_all_emby2(and_(Emby2.lv == 'b', Emby2.expired == 0, Emby2.ex < datetime.now()))
+    rseired = get_all_emby2(
+        and_(
+            Emby2.lv.in_(('a', 'b')),
+            Emby2.expired == 0,
+            Emby2.ex.isnot(None),
+            Emby2.ex < datetime.now(),
+        )
+    )
     if rseired is None:
         return LOGGER.info(f'【封禁检测】- emby2 无数据，跳过')
     for e in rseired:
@@ -174,3 +200,14 @@ async def check_expired():
             await bot.send_message(group[0], text)
         except Exception as e:
             LOGGER.error(e)
+
+    # Non-Telegram Emby2 rows can also contain legacy permanent whitelist
+    # flags. They have no Telegram user to notify, so just downgrade them.
+    legacy_emby2_whitelist = get_all_emby2(
+        and_(Emby2.lv == 'a', Emby2.ex.is_(None))
+    )
+    for legacy in legacy_emby2_whitelist or []:
+        if sql_update_emby2(Emby2.embyid == legacy.embyid, lv='b'):
+            LOGGER.warning(
+                f'【白名单期限迁移】非TG账户 {legacy.name} 没有订阅到期时间，已撤销永久白名单'
+            )

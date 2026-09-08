@@ -103,11 +103,15 @@ def is_user_whitelisted(user_details: Optional[Emby]) -> bool:
     """
     检查用户是否是白名单用户
     :param user_details: 用户详情
-    :return: True 如果是白名单用户 (lv='a')
+    :return: True 如果是仍在订阅期内的白名单用户 (lv='a')
     """
     if not user_details:
         return False
-    return user_details.lv == 'a'
+    # Whitelist is a subscription entitlement, not a permanent override.
+    # Legacy rows without ``ex`` must not keep access to the VIP line.
+    return user_details.lv == 'a' and bool(
+        user_details.ex and user_details.ex > datetime.now()
+    )
 
 
 async def get_session_server_address(session_id: str) -> Optional[str]:

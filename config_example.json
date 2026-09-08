@@ -61,6 +61,7 @@
     "exchange": true,
     "whitelist": true,
     "invite": false,
+    "invite_lv": "b",
     "leave_ban": true,
     "uplays": true,
     "exchange_cost": 100,

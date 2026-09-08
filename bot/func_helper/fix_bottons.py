@@ -335,7 +335,8 @@ def cr_renew_ikb():
         'c': '已禁用用户',
         'd': '所有人'
     }
-    invite_lv_text = lv_dic.get(_open.invite_lv, '未知')
+    invite_lv_text = ('仅所有者/管理员' if _open.invite_lv == 'admin'
+                      else lv_dic.get(_open.invite_lv, '未知'))
     checkin_lv_text = lv_dic.get(_open.checkin_lv, '未知')
     keyboard = InlineKeyboard(row_width=2)
     keyboard.add(InlineButton(f'{checkin} 每日签到', f'set_renew-checkin'),
@@ -350,6 +351,7 @@ def cr_renew_ikb():
     return keyboard
 def invite_lv_ikb():
     keyboard = ikb([
+        [('🛡️ 仅所有者和管理员', 'set_invite_lv-admin')],
         [('🅰️ 白名单', 'set_invite_lv-a'), ('🅱️ 普通用户', 'set_invite_lv-b')],
         [('©️ 已禁用用户', 'set_invite_lv-c'), ('🅳️  所有用户', 'set_invite_lv-d')],
         [('🔙 返回', 'set_renew')]

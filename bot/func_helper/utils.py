@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import pytz
 
 from bot import bot, _open, save_config, owner, admins, bot_name, ranks, schedall, group, config
@@ -6,6 +8,20 @@ from bot.sql_helper.sql_emby import sql_get_emby
 from cacheout import Cache
 
 cache = Cache()
+
+
+def is_subscription_active(ex, now=None):
+    """Return whether a user's subscription expiry is still in the future.
+
+    Whitelist status is an entitlement layered on top of the normal
+    subscription, so it must never bypass the subscription expiry.
+    ``None`` is intentionally treated as inactive; this prevents legacy
+    whitelist rows without an expiry from granting an unlimited VIP line.
+    """
+    if ex is None:
+        return False
+    now = now or datetime.now()
+    return ex > now
 
 
 def accepted_code_prefixes():
@@ -34,6 +50,31 @@ def judge_admins(uid):
         return True
 
 
+_INVITE_ACCOUNT_LEVELS = {'a': 0, 'b': 1, 'c': 2, 'd': 3}
+
+
+def is_owner_or_admin(uid):
+    """Return True only for the configured owner or bot administrators."""
+    return uid == owner or uid in admins
+
+
+def invite_policy_allows(uid, account_level, policy):
+    """Evaluate the configured invitation policy without string ordering.
+
+    ``a``/``b``/``c``/``d`` retain the historical account-level thresholds;
+    ``admin`` is an explicit owner/administrator-only policy. Missing values
+    retain the normal-user threshold (``b``); unknown values are denied.
+    """
+    policy = str(policy or 'b').casefold()
+    if policy == 'admin':
+        return is_owner_or_admin(uid)
+    policy_rank = _INVITE_ACCOUNT_LEVELS.get(policy)
+    account_rank = _INVITE_ACCOUNT_LEVELS.get(str(account_level or '').casefold())
+    if policy_rank is None or account_rank is None:
+        return False
+    return account_rank <= policy_rank
+
+
 # @cache.memoize(ttl=60)
 async def members_info(tg=None, name=None):
     """
@@ -54,8 +95,8 @@ async def members_info(tg=None, name=None):
         iv = data.iv
         lv_dict = {'a': '白名单', 'b': '**正常**', 'c': '**已禁用**', 'd': '未注册'}  # , 'e': '**21天未活跃/无信息**'
         lv = lv_dict.get(data.lv, '未知')
-        if lv == '白名单':
-            ex = '+ ∞'
+        if data.lv == 'a':
+            ex = data.ex or '未设置到期时间'
         elif data.name is not None and schedall.low_activity and not schedall.check_ex:
             ex = f'__若{config.activity_check_days}天无观看将封禁__'
         elif data.name is not None and not schedall.low_activity and not schedall.check_ex:

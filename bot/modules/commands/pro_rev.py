@@ -1,7 +1,7 @@
 """
 对用户的等级调整
 使得其能够成为管理员
-或者白名单，免除到期机制.
+或者白名单；白名单权限跟随订阅到期时间.
 """
 import random
 import asyncio
@@ -10,6 +10,7 @@ from pyrogram.errors import BadRequest
 
 from bot import bot, prefixes, owner, admins, save_config, LOGGER
 from bot.func_helper.filters import admins_on_filter
+from bot.func_helper.utils import is_subscription_active
 from bot.func_helper.msg_utils import sendMessage, deleteMessage
 from bot.schemas import Yulv
 from bot.scheduler.bot_commands import BotCommands
@@ -85,7 +86,9 @@ async def pro_user(_, msg):
         
         # 更新emby表
         if e is not None and e.embyid is not None:
-            if sql_update_emby(Emby.name == username, lv='a'):
+            if not is_subscription_active(e.ex):
+                result_msg += "⚠️ Emby账户没有有效订阅，无法授予限时白名单；请先续期。\n"
+            elif sql_update_emby(Emby.name == username, lv='a'):
                 user_display = f'[{e.name}](tg://user?id={e.tg})' if e.tg else e.name
                 result_msg += f"🎉 恭喜：{user_display} 获得 {sign_name} 签出的白名单.\n"
             else:
@@ -93,7 +96,9 @@ async def pro_user(_, msg):
         
         # 更新emby2表
         if e2 is not None:
-            if sql_update_emby2(Emby2.name == username, lv='a'):
+            if not is_subscription_active(e2.ex):
+                result_msg += "⚠️ Emby账户没有有效订阅，无法授予限时白名单；请先续期。\n"
+            elif sql_update_emby2(Emby2.name == username, lv='a'):
                 result_msg += f"🎉 恭喜 {e2.name} 获得 {sign_name} 签出的白名单.\n"
             else:
                 result_msg += "⚠️ 错误：数据库执行错误\n"
@@ -105,6 +110,8 @@ async def pro_user(_, msg):
         e = sql_get_emby(tg=uid)
         if e is None or e.embyid is None:
             return await sendMessage(msg, f'[ta](tg://user?id={uid}) 还没有emby账户无法操作！请先注册')
+        if not is_subscription_active(e.ex):
+            return await sendMessage(msg, '⏳ 该账户没有有效订阅，无法授予限时白名单；请先续期。')
         if sql_update_emby(Emby.tg == uid, lv='a'):
             sign_name = f'{msg.sender_chat.title}' if msg.sender_chat else f'[{msg.from_user.first_name}](tg://user?id={msg.from_user.id})'
             await asyncio.gather(deleteMessage(msg), sendMessage(msg,

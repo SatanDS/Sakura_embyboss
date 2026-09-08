@@ -7,6 +7,7 @@ from pyrogram import filters
 from bot import bot, emby_line, emby_whitelist_line
 from bot.func_helper.emby import emby
 from bot.func_helper.filters import user_in_group_on_filter
+from bot.func_helper.utils import is_subscription_active
 from bot.sql_helper.sql_emby import sql_get_emby
 from bot.func_helper.fix_bottons import cr_page_server
 from bot.func_helper.msg_utils import callAnswer, editMessage
@@ -43,7 +44,7 @@ async def server(_, call):
         line = f'{emby_line}'
     elif data.lv == 'a':
         line = f'{emby_line}'
-        if emby_whitelist_line:
+        if emby_whitelist_line and is_subscription_active(data.ex):
             line += f'\n{emby_whitelist_line}'
     else:
         line = ' - **无权查看**'

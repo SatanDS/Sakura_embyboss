@@ -7,12 +7,22 @@ from bot.func_helper.fix_bottons import whitelist_page_ikb, normaluser_page_ikb,
 from bot.sql_helper.sql_emby import get_all_emby, Emby
 from bot.func_helper.msg_utils import callAnswer
 import math
+from datetime import datetime
+from sqlalchemy import and_
+
+
+def _active_whitelist_filter():
+    return and_(
+        Emby.lv == 'a',
+        Emby.ex.isnot(None),
+        Emby.ex > datetime.now(),
+    )
 
 @bot.on_callback_query(filters.regex('^whitelist$') & admins_on_filter)
 async def list_whitelist(_, call):
     await callAnswer(call, '🔍 白名单用户列表')
     page = 1
-    whitelist_users = get_all_emby(Emby.lv == 'a')
+    whitelist_users = get_all_emby(_active_whitelist_filter())
     total_users = len(whitelist_users)
     total_pages = math.ceil(total_users / 20)
 
@@ -37,7 +47,7 @@ async def list_normaluser(_, call):
 async def whitelist_page(_, call):
     page = int(call.data.split(':')[1])
     await callAnswer(call, f'🔍 打开第{page}页')
-    whitelist_users = get_all_emby(Emby.lv == 'a')
+    whitelist_users = get_all_emby(_active_whitelist_filter())
     total_users = len(whitelist_users)
     total_pages = math.ceil(total_users / 20)
 
@@ -64,7 +74,8 @@ async def create_whitelist_text(users, page):
     end = start + 20
     text = "**白名单用户列表**\n\n"
     for user in users[start:end]:
-        text += f"TGID: `{user.tg}` | Emby用户名: [{user.name}](tg://user?id={user.tg})\n"
+        expires = user.ex.strftime('%Y-%m-%d %H:%M:%S') if user.ex else '未设置'
+        text += f"TGID: `{user.tg}` | Emby用户名: [{user.name}](tg://user?id={user.tg}) | 到期: `{expires}`\n"
     text += f"第 {page} 页,共 {math.ceil(len(users) / 20)} 页, 共 {len(users)} 人"
     return text
 

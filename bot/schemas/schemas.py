@@ -54,6 +54,8 @@ class Open(BaseModel):
     whitelist: bool
     use_whitelist_code: bool = False
     invite: bool
+    # Invitation eligibility: a/b/c/d keep the historical account-level
+    # policy; ``admin`` restricts invitation-code exchange to owner/admins.
     invite_lv: Optional[str] = 'b'
     leave_ban: bool
     uplays: bool = True
