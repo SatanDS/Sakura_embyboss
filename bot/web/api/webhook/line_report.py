@@ -255,6 +255,8 @@ def parse_original_request_uri(request_uri: str) -> Dict[str, str]:
             "sessionid": "SessionId",
             "playsessionid": "PlaySessionId",
             "x-emby-token": "X-Emby-Token",
+            "x-emby-authorization": "X-Emby-Authorization",
+            "authorization": "Authorization",
             "token": "token",
             "api_key": "api_key",
         }
@@ -638,11 +640,16 @@ async def resolve_user_context(
     """
     auth_info = parse_emby_authorization(auth_header)
     original_query = parse_original_request_uri(original_request_uri)
+    original_auth_info = parse_emby_authorization(
+        original_query.get("X-Emby-Authorization", "")
+        or original_query.get("Authorization", "")
+    )
 
     # Collect untrusted user-ID claims solely for a later consistency check.
     claimed_user_ids = [
         _bounded_identifier(user_id, _MAX_USER_ID_LENGTH),
         _bounded_identifier(auth_info.get("UserId"), _MAX_USER_ID_LENGTH),
+        _bounded_identifier(original_auth_info.get("UserId"), _MAX_USER_ID_LENGTH),
         _bounded_identifier(original_query.get("userId"), _MAX_USER_ID_LENGTH),
     ]
     claimed_user_ids = list(dict.fromkeys(value for value in claimed_user_ids if value))
@@ -650,6 +657,7 @@ async def resolve_user_context(
     resolved_device_id = _bounded_identifier(
         device_id
         or auth_info.get("DeviceId")
+        or original_auth_info.get("DeviceId")
         or original_query.get("X-Emby-Device-Id")
         or original_query.get("DeviceId")
     )
@@ -667,6 +675,7 @@ async def resolve_user_context(
     token_candidates = [
         (token, "request.token"),
         (auth_info.get("Token"), "header.X-Emby-Authorization.Token"),
+        (original_auth_info.get("Token"), "header.X-Original-URI.X-Emby-Authorization.Token"),
         (original_query.get("X-Emby-Token"), "header.X-Original-URI.X-Emby-Token"),
         (original_query.get("token"), "header.X-Original-URI.token"),
     ]
@@ -701,7 +710,9 @@ async def resolve_user_context(
 
     canonical_user_id, token_error = await _get_user_from_token(
         selected_token,
-        auth_header=auth_header,
+        auth_header=auth_header
+        or original_query.get("X-Emby-Authorization", "")
+        or original_query.get("Authorization", ""),
     )
     sessions_ok = False
     sessions: List[Dict[str, Any]] = []
