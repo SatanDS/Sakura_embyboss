@@ -2,7 +2,7 @@
 
 本文件整理本專案在 Debian 12 上的完整部署流程：Telegram Bot/API、Emby、MySQL、Docker、Caddy 線路檢測，以及 DuShengCDN/NPM 前置代理。
 
-> 將 <...> 換成自己的值。
+> 將 <...> 換成自己的值。Token、API hash、Emby API key、資料庫密碼不要提交 Git 或貼到公開聊天。
 
 ## 1. 架構
 
@@ -189,7 +189,7 @@ invite_lv：
   "http_url": "127.0.0.1",
   "http_port": 8838,
   "allow_origins": ["*"],
-  "line_report_token": "<與 Caddy/CDN 相同的 64 位 hex 隨機密鑰 如果搞不懂这个什么意思就把这一行"line_report_token"删掉同时下面的9.0步骤也跳过 主要是防止伪造绕过bot验证>"
+  "line_report_token": "<與 Caddy/CDN 相同的 64 位 hex 隨機密鑰>"
 },
 "ranks": {
   "logo": "DuSheng",
@@ -197,7 +197,7 @@ invite_lv：
 }
 ~~~
 
-ranks.logo 會決定新深連結、註冊碼、續期碼、白名單碼的前綴。設成 DuSheng 後新碼會以 DuSheng- 開頭。
+ranks.logo 會決定新深連結、註冊碼、續期碼、白名單碼的前綴。設成 DuSheng 後新碼會以 DuSheng- 開頭；舊 Sakura- 碼仍可兌換。
 
 白名單是隨訂閱期限的 VIP 權限，不是永久權限：必須 lv=a 且 ex 尚未到期。續期會延長 VIP 有效期，舊資料中沒有 ex 的永久白名單會被到期檢查降級。
 
