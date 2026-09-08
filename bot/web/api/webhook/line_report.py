@@ -645,14 +645,9 @@ async def resolve_user_context(
         or original_query.get("Authorization", "")
     )
 
-    # Collect untrusted user-ID claims solely for a later consistency check.
-    claimed_user_ids = [
-        _bounded_identifier(user_id, _MAX_USER_ID_LENGTH),
-        _bounded_identifier(auth_info.get("UserId"), _MAX_USER_ID_LENGTH),
-        _bounded_identifier(original_auth_info.get("UserId"), _MAX_USER_ID_LENGTH),
-        _bounded_identifier(original_query.get("userId"), _MAX_USER_ID_LENGTH),
-    ]
-    claimed_user_ids = list(dict.fromkeys(value for value in claimed_user_ids if value))
+    # UserId values in URLs and authorization metadata are client-controlled
+    # hints.  They are intentionally not used for authentication: clients may
+    # send stale IDs, while the validated access token remains authoritative.
 
     resolved_device_id = _bounded_identifier(
         device_id
@@ -721,9 +716,7 @@ async def resolve_user_context(
 
     if canonical_user_id:
         # The token database or Users/Me is authoritative for identity. Query
-        # sessions on a best-effort basis to locate the session to terminate,
-        # and reject an impossible token/session user mismatch if Emby exposes
-        # one.
+        # sessions on a best-effort basis to locate the session to terminate.
         sessions_ok, sessions, sessions_error = await _fetch_active_sessions_result()
         if sessions_ok:
             token_session_users = {
@@ -745,11 +738,6 @@ async def resolve_user_context(
                 play_session_id=resolved_play_session_id,
             )
 
-        # Every supplied UserId claim must agree with the authenticated
-        # canonical ID.  In particular, never let a known whitelist row in the
-        # local database override this check.
-        if any(claim != canonical_user_id for claim in claimed_user_ids):
-            return "", None, "userId claim does not match authenticated Emby user"
         return canonical_user_id, matched_session, f"emby.identity:{token_error or 'emby.users.me'}:{selected_token_source}"
 
     # If the configured auth database and Users/Me are unavailable, the only
@@ -767,8 +755,6 @@ async def resolve_user_context(
     if not fallback_user_id:
         detail = fallback_reason or token_error or "invalid Emby token"
         return "", None, f"emby.identity.invalid:{detail[:240]}"
-    if any(claim != fallback_user_id for claim in claimed_user_ids):
-        return "", None, "userId claim does not match authenticated Emby user"
     return fallback_user_id, matched_session, fallback_reason
 
 
