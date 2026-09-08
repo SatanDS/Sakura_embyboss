@@ -22,9 +22,9 @@ from bot.sql_helper.sql_emby import sql_get_emby
 
 
 def _authorized_user(tg_id):
-    """Return (Emby row, error message) using the point-request policy."""
-    if not moviepilot.status:
-        return None, "❌ 管理员未开启 MoviePilot 功能"
+    """Return (Emby row, error message) using the MoviePilot user policy."""
+    if not moviepilot.douban_status:
+        return None, "❌ 管理员未开启豆瓣想看功能"
 
     user = sql_get_emby(tg=tg_id)
     if not user or not user.embyid:

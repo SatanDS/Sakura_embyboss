@@ -63,6 +63,7 @@ def members_ikb(is_admin: bool = False, account: bool = False) -> InlineKeyboard
                     ]
         if moviepilot.status:
             normal.append([('🍿 点播中心', 'download_center')])
+        if moviepilot.douban_status:
             normal.append([('📚 豆瓣想看', 'douban_watch')])
         normal.append([('♻️ 主界面', 'back_start')])
         return ikb(normal)
@@ -640,6 +641,7 @@ def mp_search_page_ikb(has_prev: bool, has_next: bool, page: int):
 def mp_config_ikb():
     """MoviePilot 设置面板按钮"""
     mp_status = '✅' if moviepilot.status else '❎'
+    douban_status = '✅' if moviepilot.douban_status else '❎'
     lv_text = '无'
     if moviepilot.lv == 'a':
         lv_text = '白名单'
@@ -647,6 +649,7 @@ def mp_config_ikb():
         lv_text = '普通用户'
     keyboard = ikb([
         [(f'{mp_status} 点播功能', 'set_mp_status')],
+        [(f'{douban_status} 豆瓣想看', 'set_mp_douban_status')],
         [('💰 设置点播价格', 'set_mp_price'), ('👥 设置用户权限', 'set_mp_lv')],
         [('📝 设置日志频道', 'set_mp_log_channel')],
         [('🔙 返回', 'back_config')]

@@ -414,11 +414,12 @@ Bot 現在支援讓已註冊的 Emby 使用者從 Telegram 提交豆瓣使用者
 
 1. 在 MoviePilot v2 安裝並啟用 `豆瓣想看/DoubanSync` 插件。
 2. 確認插件的配置欄位為 `users`，內容是英文逗號分隔的數字 ID，例如 `294556764,297023432`。
-3. 在 `config.json` 的 `moviepilot` 中填寫 MoviePilot 地址、管理員使用者名稱和密碼，並開啟 `status`：
+3. 在 `config.json` 的 `moviepilot` 中填寫 MoviePilot 地址、管理員使用者名稱和密碼。`status` 是點播開關，`douban_status` 是豆瓣想看獨立開關：
 
 ~~~json
 "moviepilot": {
   "status": true,
+  "douban_status": true,
   "url": "http://127.0.0.1:3000",
   "username": "<MoviePilot 管理員使用者名稱>",
   "password": "<MoviePilot 管理員密碼>",
@@ -432,13 +433,13 @@ Bot 現在支援讓已註冊的 Emby 使用者從 Telegram 提交豆瓣使用者
 
 ### 13.2 Telegram 操作
 
-使用者開啟 `/start` → **使用者功能** → **📚 豆瓣想看**，再提交純數字豆瓣 ID，或個人主頁連結 `https://www.douban.com/people/<ID>`。Bot 會：
+管理員在 **配置 → MoviePilot** 分別開啟「點播功能」和「豆瓣想看」後，使用者開啟 `/start` → **使用者功能** → **📚 豆瓣想看**，再提交純數字豆瓣 ID，或個人主頁連結 `https://www.douban.com/people/<ID>`。Bot 會：
 
 - 先讀取完整的 `DoubanSync` 配置，只修改 `users`，保留 `cron`、通知、搜尋下載等其他欄位；
 - 記錄 TG 使用者目前綁定的 ID，支援修改和解除綁定；
 - 按插件原有定時任務同步豆瓣「想看」，不直接替使用者發送下載請求。
 
-`moviepilot.lv` 為 `a` 時，功能只允許 Bot 白名單使用者；為 `b` 時，有效的普通 Emby 使用者也可以使用。使用者必須已有有效 Emby 帳戶。
+`moviepilot.lv` 為 `a` 時，豆瓣想看和點播都只允許 Bot 白名單使用者；為 `b` 時，有效的普通 Emby 使用者也可以使用。使用者必須已有有效 Emby 帳戶。點播才會按 `price` 扣除資源；豆瓣想看不計費、不讀取 `price`。
 
 這裡的 `users` 是 DoubanSync 的全局列表，不是 MoviePilot 的使用者密碼。若多個 TG 使用者提交同一個豆瓣 ID，Bot 會保留該 ID，直到最後一個綁定者解除綁定。
 

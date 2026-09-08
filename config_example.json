@@ -105,6 +105,7 @@
   },
   "moviepilot": {
     "status": false,
+    "douban_status": false,
     "url": "",
     "username": null,
     "password": null,

@@ -112,6 +112,8 @@ class Proxy(BaseModel):
 class MP(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     status: bool = False
+    # 点播和豆瓣想看独立开关；豆瓣流程不消耗 price。
+    douban_status: bool = False
     url: Optional[str] = Field("", validation_alias=AliasChoices("url", "host"))
     username: Optional[str] = ""
     password: Optional[str] = ""

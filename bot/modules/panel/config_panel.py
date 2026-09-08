@@ -606,7 +606,8 @@ async def mp_config_panel(_, call):
         lv_text = '普通用户'
     await editMessage(call, 
                      "⚙️ MoviePilot 设置面板\n\n"
-                     f"当前状态：{'已开启' if moviepilot.status else '已关闭'}\n"
+                     f"点播状态：{'已开启' if moviepilot.status else '已关闭'}\n"
+                     f"豆瓣想看：{'已开启' if moviepilot.douban_status else '已关闭'}\n"
                      f"点播价格：{moviepilot.price} {sakura_b}/GB\n"
                      f"用户权限：{lv_text}可使用\n"
                      f"日志频道：{moviepilot.download_log_chatid or '未设置'}",
@@ -629,6 +630,23 @@ async def set_mp_status(_, call):
         await mp_config_panel(_, call)
     except Exception as e:
         LOGGER.error(f"设置点播状态时出错: {str(e)}")
+
+
+@bot.on_callback_query(filters.regex('^set_mp_douban_status$') & admins_on_filter)
+async def set_mp_douban_status(_, call):
+    """设置豆瓣想看功能开关；不影响点播和价格。"""
+    try:
+        moviepilot.douban_status = not moviepilot.douban_status
+        message = (
+            '👮🏻‍♂️ 您已开启 MoviePilot 豆瓣想看功能'
+            if moviepilot.douban_status
+            else '👮🏻‍♂️ 您已关闭 MoviePilot 豆瓣想看功能'
+        )
+        await callAnswer(call, message, True)
+        save_config()
+        await mp_config_panel(_, call)
+    except Exception as e:
+        LOGGER.error(f"设置豆瓣想看状态时出错: {str(e)}")
 
 @bot.on_callback_query(filters.regex('^set_mp_price$') & admins_on_filter)
 async def set_mp_price(_, call):
