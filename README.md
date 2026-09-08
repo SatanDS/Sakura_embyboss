@@ -694,3 +694,108 @@ docker compose logs --since=2m embyboss
 ~~~
 
 If the database is not configured or cannot be read, VIP requests remain non-2xx and are blocked. Do not substitute the Bot API key or trust `userId`, `DeviceId`, or `SessionId` alone.
+
+### 16.2 Current SenPlayer/Hills deployment and upgrade runbook
+
+This runbook supersedes older `Users/Me`-only instructions in this section. Emby 4.9.5.0 treats `/emby/Users/Me` as a GUID and returns `Unrecognized Guid format`; never replace it with `/emby/Users/{client_user_id}`, because a client can forge that path ID. The Bot authenticates the playback token from Emby's local SQLite data and uses only the resulting canonical Emby user ID for VIP entitlement checks.
+
+#### One-time setup
+
+1. Find the host directory mounted as Emby's `/config` (the output contains paths only):
+
+~~~bash
+docker inspect embyserver --format '{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}'
+~~~
+
+2. Back up the files before editing:
+
+~~~bash
+cd /opt/Tgbot
+backup_stamp=$(date +%Y%m%d%H%M%S)
+cp -a config.json "config.json.bak.$backup_stamp"
+cp -a docker-compose.yml "docker-compose.yml.bak.$backup_stamp"
+~~~
+
+3. Add the Emby config directory to the `embyboss` service as a read-only mount. For the common layout:
+
+~~~yaml
+services:
+  embyboss:
+    volumes:
+      - /opt/embyserver/config:/emby-auth:ro
+~~~
+
+Mount the whole directory, not only `authentication.db`, so SQLite can see `-wal` files and `users.db`.
+
+4. Add this **top-level** key to `config.json`, alongside `emby_url`, `emby_line`, and `emby_whitelist_line` (not inside `api` or `moviepilot`):
+
+~~~json
+"emby_auth_db_path": "/emby-auth/data/authentication.db"
+~~~
+
+If the mounted directory is already Emby's `data` directory, use `/emby-auth/authentication.db`. Never commit a real token, password, CDN shared key, or authentication database.
+
+5. Each Caddy `forward_auth` block must contain the following forwarding rules:
+
+~~~caddyfile
+header_up X-DuSheng-Line-Token {$DUSHENGCDN_ORIGIN_TOKEN}
+header_up X-Emby-Authorization {header.X-Emby-Authorization}
+header_up X-Emby-Token {header.X-Emby-Token}
+header_up Authorization {header.Authorization}
+~~~
+
+Do not put `header_up -X-DuSheng-Line-Token` in the same `forward_auth` block after setting the token; that removes the internal token and causes `Invalid internal token`. The `reverse_proxy` to Emby should remove the internal line token before it reaches Emby.
+
+6. Validate and reload Caddy after changing its file:
+
+~~~bash
+docker run --rm \
+  --env-file /etc/dusheng/emby-line.env \
+  -v /opt/Tgbot/caddy/caddyfile:/etc/caddy/Caddyfile:ro \
+  caddy:2-alpine \
+  caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+docker restart emby-line-gateway
+~~~
+
+7. Pull and rebuild the Bot. The current code supports both `Tokens` and migrated `Tokens_2` tables. When `Tokens_2.UserId` is an internal number, it maps that number through `users.db/LocalUsersv2` to the public GUID:
+
+~~~bash
+cd /opt/Tgbot
+git pull --ff-only --autostash
+chmod 600 config.json
+python3 -m json.tool config.json >/dev/null && echo 'JSON OK'
+docker compose config >/dev/null && echo 'COMPOSE OK'
+docker compose build embyboss
+docker compose up -d --force-recreate embyboss
+docker exec embyboss test -r /emby-auth/data/authentication.db && echo 'AUTH DB MOUNT OK'
+~~~
+
+8. Let a VIP account play through Hills or SenPlayer. A successful check contains `线路检查通过`/`Whitelist user` and `HTTP 200 OK`:
+
+~~~bash
+docker compose logs --since=2m --no-color embyboss | \
+  grep -Ei 'line_report|reason=|Unable to authenticate|线路|403|401'
+~~~
+
+#### Emby upgrade or restart
+
+A normal Emby restart does not randomly rename SQLite tables. `Tokens_2` usually comes from a database migration or table rebuild and remains stable after restart. A future Emby upgrade can still change table names, columns, database paths, or the internal user-ID representation.
+
+Before upgrading, back up the complete Emby config directory, including `authentication.db`, `authentication.db-wal`, `users.db`, and `users.db-wal` when present. After an upgrade, check the table names without printing data:
+
+~~~bash
+docker exec embyboss python3 -c 'import sqlite3;d=sqlite3.connect("file:/emby-auth/data/authentication.db?mode=ro",uri=True);print("tables:",[x[0] for x in d.execute("SELECT name FROM sqlite_master WHERE type=\"table\" ORDER BY name")]);d.close()'
+~~~
+
+If a newer Emby version introduces an unknown schema, VIP requests intentionally remain non-2xx instead of trusting a URL `userId`. Do not manually rename or edit the authentication database; add support only after verifying the new schema.
+
+#### Troubleshooting
+
+- `Unrecognized Guid format`: an old build is still using `Users/Me`; pull and rebuild the current Bot.
+- `Tokens table: False` but `Tokens_2` exists: the database is using a migrated schema; use a build that supports `Tokens_2`.
+- `reason=Emby token is not bound to one active user`: check that the whole Emby config directory, including WAL files, is mounted read-only and that `users.db` is present.
+- `reason=userId claim does not match authenticated Emby user`: this is an old build; current code ignores stale client `userId` claims and uses the validated token owner.
+- `Invalid internal token`: validate/restart `emby-line-gateway` and ensure `forward_auth` does not delete `X-DuSheng-Line-Token` after setting it.
+- Hills/SenPlayer returns 502/403 while Infuse works: verify that Caddy forwards `Authorization`, `X-Emby-Authorization`, and `X-Emby-Token`; the Bot log must not show `Unable to authenticate`.
+
+When requesting support, send only sanitized command output. Do not send `config.json`, Bot/CDN tokens, passwords, or database contents.
