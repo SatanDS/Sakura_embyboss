@@ -947,7 +947,8 @@ async def line_report(
     if not resolved_user_id:
         LOGGER.warning(
             "线路上报忽略: 无法识别用户 "
-            f"(line={line}, host={host}, deviceId={deviceId}, sessionId={sessionId}, "
+            f"(line={line}, host={host}, reason={resolved_from}, "
+            f"deviceId={deviceId}, sessionId={sessionId}, "
             f"playSessionId={playSessionId}, x_original_uri={redacted_original_request_uri or '<empty>'})"
         )
         if using_whitelist:
