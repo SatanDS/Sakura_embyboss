@@ -413,7 +413,7 @@ Bot 現在支援讓已註冊的 Emby 使用者從 Telegram 提交豆瓣使用者
 ### 13.1 MoviePilot 前置條件
 
 1. 在 MoviePilot v2 安裝並啟用 `豆瓣想看/DoubanSync` 插件。
-2. 確認插件的配置欄位為 `users`，內容是英文逗號分隔的數字 ID，例如 `294556764,297023432`。
+2. 確認插件的配置欄位為 `users`，內容是英文逗號分隔的數字 ID，並以英文逗號結尾，例如 `294556764,297023432,`。Bot 自動提交時會保持此格式。
 3. 在 `config.json` 的 `moviepilot` 中填寫 MoviePilot 地址、管理員使用者名稱和密碼。`status` 是點播開關，`douban_status` 是豆瓣想看獨立開關：
 
 ~~~json

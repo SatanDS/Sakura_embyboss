@@ -77,6 +77,14 @@ def _normalise_douban_users(value):
             seen.add(item)
             result.append(item)
     return result
+
+
+def _format_douban_users(users):
+    """Serialize DoubanSync users with the plugin-required trailing comma."""
+    users = _normalise_douban_users(users)
+    return f"{','.join(users)}," if users else ""
+
+
 # aiohttp重试装饰器
 def aiohttp_retry(retry_count):
     def decorator(func):
@@ -192,7 +200,9 @@ async def update_douban_sync_users(douban_user_id, previous_user_id=None):
 
         # Preserve the plugin's existing value type (the official plugin uses
         # a comma-separated string) and all unrelated settings.
-        plugin_config["users"] = ",".join(users)
+        # DoubanSync expects the automatically managed list to end with an
+        # ASCII comma.  Keep this delimiter even for a single submitted ID.
+        plugin_config["users"] = _format_douban_users(users)
         url = f"{mp.url.rstrip('/')}/api/v1/plugin/{quote(DOUBAN_SYNC_PLUGIN_ID, safe='')}"
         request = {
             'method': 'PUT',
@@ -228,7 +238,7 @@ async def remove_douban_sync_user(douban_user_id):
         users = [item for item in configured_users if item != normalized]
         if len(users) == len(configured_users):
             return True, normalized
-        plugin_config["users"] = ",".join(users)
+        plugin_config["users"] = _format_douban_users(users)
         url = f"{mp.url.rstrip('/')}/api/v1/plugin/{quote(DOUBAN_SYNC_PLUGIN_ID, safe='')}"
         request = {
             'method': 'PUT',
