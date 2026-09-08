@@ -24,6 +24,7 @@ import asyncio
 import os
 import re
 import sqlite3
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
 from urllib.parse import parse_qs, quote, urlparse
@@ -373,6 +374,79 @@ def _configured_auth_db_path() -> str:
     return _bounded_identifier(value, _MAX_PATH_LENGTH)
 
 
+def _map_auth_db_user_ids(raw_user_ids: List[Any], auth_db_path: str) -> set[str]:
+    """Normalize token user IDs, including Emby's internal numeric IDs.
+
+    Some Emby authentication migrations keep ``Tokens_2.UserId`` as the
+    integer ``LocalUsersv2.Id`` instead of the public GUID.  Resolve that
+    server-owned ID through the read-only users database; never use a client
+    supplied userId for this mapping.
+    """
+    mapped_ids: set[str] = set()
+    internal_ids: set[int] = set()
+
+    for raw_user_id in raw_user_ids:
+        value = _bounded_identifier(raw_user_id, _MAX_USER_ID_LENGTH)
+        if not value:
+            continue
+        try:
+            mapped_ids.add(uuid.UUID(value).hex)
+            continue
+        except (ValueError, AttributeError, TypeError):
+            pass
+        try:
+            internal_ids.add(int(value))
+        except (ValueError, TypeError):
+            continue
+
+    if not internal_ids:
+        return mapped_ids
+
+    base_dir = os.path.dirname(os.path.abspath(auth_db_path))
+    users_db_paths = (
+        os.path.join(base_dir, "users.db"),
+        os.path.join(os.path.dirname(base_dir), "users.db"),
+    )
+    users_db_path = next((path for path in users_db_paths if os.path.isfile(path)), "")
+    if not users_db_path:
+        return mapped_ids
+
+    try:
+        uri = f"file:{quote(os.path.abspath(users_db_path), safe='/')}?mode=ro"
+        with sqlite3.connect(uri, uri=True, timeout=1.0) as users_connection:
+            users_connection.execute("PRAGMA query_only=ON")
+            table_names = {
+                row[0]
+                for row in users_connection.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type = 'table' AND name IN ('LocalUsersv2', 'Users')"
+                )
+            }
+            for table_name in ("LocalUsersv2", "Users"):
+                if table_name not in table_names:
+                    continue
+                for internal_id in internal_ids:
+                    row = users_connection.execute(
+                        "SELECT guid FROM " + table_name + " "
+                        "WHERE Id = ? LIMIT 1",
+                        (internal_id,),
+                    ).fetchone()
+                    if not row or row[0] is None:
+                        continue
+                    blob = row[0]
+                    try:
+                        if isinstance(blob, (bytes, bytearray, memoryview)):
+                            mapped_ids.add(uuid.UUID(bytes_le=bytes(blob)).hex)
+                        else:
+                            mapped_ids.add(uuid.UUID(str(blob)).hex)
+                    except (ValueError, AttributeError, TypeError):
+                        continue
+    except (sqlite3.Error, OSError):
+        return mapped_ids
+
+    return mapped_ids
+
+
 def _lookup_user_from_auth_db_sync(token: str, db_path: str) -> Tuple[str, str]:
     """Resolve an Emby access token through its authentication token table.
 
@@ -422,11 +496,10 @@ def _lookup_user_from_auth_db_sync(token: str, db_path: str) -> Tuple[str, str]:
     except (sqlite3.Error, OSError) as exc:
         return "", f"Emby authentication database lookup failed: {type(exc).__name__}"
 
-    user_ids = {
-        _bounded_identifier(row[0], _MAX_USER_ID_LENGTH)
-        for row in rows
-        if row and row[0]
-    }
+    user_ids = _map_auth_db_user_ids(
+        [row[0] for row in rows if row and row[0]],
+        db_path,
+    )
     user_ids.discard("")
     if len(user_ids) != 1:
         return "", "Emby token is not bound to one active user"
