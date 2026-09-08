@@ -84,7 +84,8 @@ async def create_normaluser_text(users, page):
     end = start + 20
     text = "**普通用户列表**\n\n"
     for user in users[start:end]:
-        text += f"TGID: `{user.tg}` | Emby用户名: [{user.name}](tg://user?id={user.tg})\n"
+        expires = user.ex.strftime('%Y-%m-%d %H:%M:%S') if user.ex else '未设置'
+        text += f"TGID: `{user.tg}` | Emby用户名: [{user.name}](tg://user?id={user.tg}) | 到期: `{expires}`\n"
     text += f"第 {page} 页,共 {math.ceil(len(users) / 20)} 页, 共 {len(users)} 人"
     return text
 
