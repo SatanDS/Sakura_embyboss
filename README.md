@@ -1,47 +1,499 @@
-# 🌸 Sakura_embyboss 初学练习版（重构中）
+# DuSheng Emby 管理 Bot 部署指南
 
-<p align="center">
-<img src="image/bot2.png" alt="bot"><br>
-<a href="https://github.com/SatanDS/Sakura_embyboss/stargazers"><img src="https://img.shields.io/github/stars/SatanDS/Sakura_embyboss" alt="stars"></a>
-<a href="https://github.com/SatanDS/Sakura_embyboss/forks"><img src="https://img.shields.io/github/forks/SatanDS/Sakura_embyboss" alt="forks"></a>
-<a href="https://github.com/SatanDS/Sakura_embyboss/issues"><img src="https://img.shields.io/github/issues/SatanDS/Sakura_embyboss" alt="issue"></a>
-<a href="https://github.com/SatanDS/Sakura_embyboss/blob/master/LICENSE"><img src="https://img.shields.io/github/license/SatanDS/Sakura_embyboss" alt="license"></a>
-<a href="https://hub.docker.com/r/jingwei520/sakura_embyboss" ><img src="https://img.shields.io/docker/v/jingwei520/sakura_embyboss/latest?logo=docker" alt="docker"></a>
-<a href="https://hub.docker.com/r/jingwei520/sakura_embyboss/tags" ><img src="https://img.shields.io/badge/platform-amd64%20arm64-pink" alt="plat"></a>
-<a href="https://github.com/SatanDS/Sakura_embyboss/actions/workflows/publish-docker_on_master.yml">
-    <img src="https://img.shields.io/github/actions/workflow/status/SatanDS/Sakura_embyboss/publish-docker_on_master.yml?branch=master" alt="Build status" />
-</a>
-</p>
-<br>
+本文件整理本專案在 Debian 12 上的完整部署流程：Telegram Bot/API、Emby、MySQL、Docker、Caddy 線路檢測，以及 DuShengCDN/NPM 前置代理。
 
-## 📜 项目说明（重构中，暂停更新）
+> 將 <...> 換成自己的值。Token、API hash、Emby API key、資料庫密碼不要提交 Git 或貼到公開聊天。
 
-- **用Telegram管理Emby用户**（开服） 安装使用 👉 [项目文档](https://github.com/SatanDS/Sakura_embyboss#readme)
-- **推荐使用 Debian 11操作系统，AMD处理器架构。目前ARM也支持（如有问题请反馈issue）**
-- 解决不了大的技术问题（因为菜菜），如需要，请自行fork修改，~~如果能提点有意思的pr更好啦~~
-- 反馈请尽量 issue，看到会处理
+## 1. 架構
 
-> **声明：本项目仅供学习交流使用，仅作为辅助工具借助tg平台方便用户管理自己的媒体库成员，对用户的其他行为及内容毫不知情**
-<br>
+~~~text
+Telegram 使用者 -> Telegram -> embyboss
 
-## 💐 Our Contributors
+Emby 客戶端 -> DuShengCDN/NPM (HTTPS，保留 Host/認證標頭)
+             -> Caddy :18080
+                -> Bot API :8838/emby/line_report
+                -> Emby :8096
+~~~
 
-<a href="https://github.com/SatanDS/Sakura_embyboss/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=SatanDS/Sakura_embyboss" />
-</a>  
+本專案的 Docker Compose 使用 host network：
 
-## 特别感谢（排序不分先后）<img src="image/bixin.jpg" alt="比心" height=30>
+| 服務 | 預設位址 | 用途 |
+| --- | --- | --- |
+| Emby | 127.0.0.1:8096 | Emby 源站 |
+| Bot API | 127.0.0.1:8838 | 內部 API、線路檢測 |
+| Caddy | *:18080 | VIP/普通線路入口 |
+| MySQL | 127.0.0.1:3306 | Bot 資料庫 |
 
-- [Pyrogram • 一个现代、优雅和异步的MTProto API框架](https://github.com/pyrogram/pyrogram)
-- [Nezha探针 • 自托管、轻量级、服务器和网站监控运维工具](https://github.com/naiba/nezha)
-- [小宝 • 按钮风格](https://t.me/EmbyClubBot)
-- [MisakaF_Emby • 启发](https://github.com/MisakaFxxk/MisakaF_Emby)
-  以及  [EMBY API官方文档](https://swagger.emby.media/?staticview=true#/UserService)
-- [Nolovenodie • 播放榜单海报推送借鉴](https://github.com/Nolovenodie/EmbyTools)
-- [罗宝 • 提供的代码援助](https://github.com/dddddluo)
-- [折花 • 日榜周榜推送设计图](https://github.com/U41ovo)<br>
+8838 不應透過 CDN 公開；Caddy 必須使用 host network，才能以 127.0.0.1 呼叫 Bot 的內部端點。
 
+## 2. 申請 Telegram Bot 與 API
 
-## Star History
+### 2.1 BotFather Token
 
-[![Star History Chart](https://api.star-history.com/svg?repos=SatanDS/Sakura_embyboss&type=Date)](https://star-history.com/#SatanDS/Sakura_embyboss)
+1. Telegram 搜尋官方 @BotFather，發送 /newbot。
+2. 輸入顯示名稱，再輸入以 bot 結尾的 username，例如 dusheng_emby_bot。
+3. 將 BotFather 回傳的 Token（類似 123456789:AA...）填入 config.json 的 bot_token。
+4. bot_name 填 username，不要加 @。
+5. 需要 Bot 讀取群組非命令訊息時，才在 BotFather 使用 /setprivacy → Disable。
+
+### 2.2 Telegram API ID/API hash
+
+這不是 BotFather Token，而是 Pyrogram 啟動所需的 MTProto 應用資料。
+
+1. 開啟 https://my.telegram.org，以自己的 Telegram 帳號登入。
+2. 進入 API development tools，建立應用程式。
+3. 取得數字 api_id 和字串 api_hash。
+4. 分別填入 owner_api 和 owner_hash。
+
+不要把 api_hash 或 Bot Token 發到 GitHub、Issue 或群組。
+
+### 2.3 取得 Telegram ID
+
+- 個人 ID：私聊 @userinfobot 或可信的 ID 查詢 Bot。
+- 群組 ID：將本 Bot 加入目標群並設為管理員，再用 ID 查詢工具，或把群組訊息轉發給查詢 Bot。
+- 私密群組不需要把 @RawDataBot 拉進群；若禁止轉發，可暫時加入 @getidsbot 後移除。
+- 超級群 ID 通常是 -100...，例如 -1001234567890。
+
+把自己的數字 ID 填到 owner，群組 ID 填到 group 陣列。main_group、chanel 填公開群/頻道 username（不要加 @）；私密群不要把 -100... 當 username。
+
+## 3. Emby API key
+
+在 Emby Dashboard → Advanced → API Keys 建立 key，填入 emby_api。
+
+emby_url 填 Bot 可直接連線的管理源站，例如 http://127.0.0.1:8096。它不是使用者公開網址；公開普通線路和 VIP 線路分別填 emby_line、emby_whitelist_line。
+
+## 4. 安裝 Debian 12 與 Docker
+
+確認環境：
+
+~~~bash
+cat /etc/os-release
+uname -m
+docker --version
+docker compose version
+~~~
+
+未安裝 Docker 時：
+
+~~~bash
+apt-get update
+apt-get install -y git docker.io docker-compose-plugin
+systemctl enable --now docker
+docker --version
+docker compose version
+~~~
+
+## 5. 下載程式
+
+~~~bash
+mkdir -p /opt
+git clone https://github.com/SatanDS/Sakura_embyboss.git /opt/Tgbot
+cd /opt/Tgbot
+git remote -v
+~~~
+
+如果使用自己的 fork：
+
+~~~bash
+git remote set-url origin https://github.com/<your-owner>/<your-repo>.git
+~~~
+
+auto_update.git_repo 只填 OWNER/REPO，例如 SatanDS/Sakura_embyboss，不要填完整 URL。
+
+## 6. 設定 MySQL
+
+~~~bash
+cd /opt/Tgbot
+cp .env.example .env
+nano .env
+~~~
+
+至少填入：
+
+~~~dotenv
+MYSQL_IMAGE=mysql:5.7
+MYSQL_ROOT_PASSWORD=<長隨機 root 密碼>
+MYSQL_USER=dusheng
+MYSQL_DATABASE=embyboss
+MYSQL_PASSWORD=<長隨機資料庫密碼>
+~~~
+
+MYSQL_USER、MYSQL_DATABASE、MYSQL_PASSWORD 必須與 config.json 的 db_user、db_name、db_pwd 相同：
+
+~~~bash
+chmod 600 .env
+~~~
+
+## 7. 設定 config.json
+
+~~~bash
+cd /opt/Tgbot
+cp config_example.json config.json
+nano config.json
+~~~
+
+不要用以下片段覆蓋整份檔案；它只列出要修改的主要值，其他欄位保留 config_example.json：
+
+~~~json
+{
+  "bot_name": "<Bot username，不含@>",
+  "bot_token": "<BotFather token>",
+  "owner_api": 12345678,
+  "owner_hash": "<my.telegram.org 的 api_hash>",
+  "owner": 123456789,
+  "group": [-1001234567890],
+  "main_group": "<群 username，不含@>",
+  "chanel": "<頻道 username，不含@>",
+  "emby_api": "<Emby API key>",
+  "emby_url": "http://127.0.0.1:8096",
+  "emby_line": "https://www.dusheng.xyz",
+  "emby_whitelist_line": "https://www.dusheng.lol",
+  "db_host": "127.0.0.1",
+  "db_user": "dusheng",
+  "db_pwd": "<與 .env 的 MYSQL_PASSWORD 相同>",
+  "db_name": "embyboss",
+  "db_port": 3306,
+  "db_is_docker": true,
+  "db_docker_name": "mysql"
+}
+~~~
+
+db_port: 3306 在 config.json 根層級，和 db_host、db_user、db_name 同一層，不是在 .env 裡。
+
+確認 open 區塊：
+
+~~~json
+"open": {
+  "stat": false,
+  "checkin": true,
+  "exchange": true,
+  "whitelist": true,
+  "use_whitelist_code": true,
+  "invite": true,
+  "invite_lv": "admin"
+}
+~~~
+
+invite_lv：
+
+- admin：只有 owner 和 admins 可兌換邀請。
+- a、b、c、d：依既有 Emby 帳戶等級判斷。
+
+線路和 API 建議：
+
+~~~json
+"line_filter_terminate_session": true,
+"line_filter_block_user": false,
+"api": {
+  "status": true,
+  "http_url": "127.0.0.1",
+  "http_port": 8838,
+  "allow_origins": ["*"]
+},
+"ranks": {
+  "logo": "DuSheng",
+  "backdrop": false
+}
+~~~
+
+ranks.logo 會決定新深連結、註冊碼、續期碼、白名單碼的前綴。設成 DuSheng 後新碼會以 DuSheng- 開頭；舊 Sakura- 碼仍可兌換。
+
+白名單是隨訂閱期限的 VIP 權限，不是永久權限：必須 lv=a 且 ex 尚未到期。續期會延長 VIP 有效期，舊資料中沒有 ex 的永久白名單會被到期檢查降級。
+
+~~~bash
+chmod 600 config.json
+python3 -m json.tool config.json >/dev/null && echo 'config.json JSON OK'
+~~~
+
+## 8. 啟動 MySQL 與 Bot
+
+~~~bash
+cd /opt/Tgbot
+mkdir -p db db_backup log
+docker compose config >/dev/null && echo 'Compose config OK'
+docker compose up -d mysql
+docker compose ps
+~~~
+
+首次初始化可能需幾十秒，確認：
+
+~~~bash
+docker exec -it mysql mysqladmin ping -h127.0.0.1 -uroot -p
+~~~
+
+看到 mysqld is alive 後：
+
+~~~bash
+docker compose build embyboss
+docker compose up -d --force-recreate embyboss
+docker compose ps
+docker compose logs --tail=200 embyboss
+~~~
+
+正常日誌會有資料庫遷移完成、排程建立和 Uvicorn 8838 啟動。不要用 GitHub 範例檔覆蓋正式 config.json。
+
+## 9. Caddy 線路檢測
+
+caddy/caddyfile 使用 Caddy forward_auth：
+
+1. Caddy 把 line、Host、原始 URI、Emby Authorization/Token 傳給 Bot 的 /emby/line_report。
+2. Bot 檢查帳戶是否有 VIP 權限。
+3. 允許時 Caddy 反代給 Emby；拒絕時回傳 HTTP 403，並依設定終止 session。
+
+模板會檢查 Sessions/Playing、影片/音訊串流、HLS 及下載端點，避免只終止 session 後串流仍繼續。
+
+### 9.1 設定 VIP/普通域名
+
+~~~bash
+cd /opt/Tgbot
+cp -a caddy/caddyfile "caddy/caddyfile.bak.$(date +%Y%m%d%H%M%S)"
+nano caddy/caddyfile
+~~~
+
+刪除最後的 localhost 測試 import，換成：
+
+~~~caddyfile
+import emby_local_config www.dusheng.lol vip 18080 127.0.0.1:8096 127.0.0.1:8838
+import emby_local_config www.dusheng.xyz normal 18080 127.0.0.1:8096 127.0.0.1:8838
+~~~
+
+參數順序：
+
+~~~text
+server_name    公開域名，必須與請求 Host 相同
+line_name      上報給 Bot 的標籤，例如 vip、normal
+caddy_port     Caddy 監聽埠，例如 18080
+emby_upstream  Emby 源站，例如 127.0.0.1:8096
+bot_upstream   Bot API，例如 127.0.0.1:8838
+~~~
+
+VIP host 必須和 config.json 的 emby_whitelist_line 相同；程式會忽略協定、尾斜線及大小寫：
+
+~~~json
+"emby_whitelist_line": "https://www.dusheng.lol"
+~~~
+
+### 9.2 驗證與啟動 Caddy
+
+~~~bash
+cd /opt/Tgbot
+mkdir -p caddy/data caddy/config
+
+docker run --rm \
+  -v /opt/Tgbot/caddy/caddyfile:/etc/caddy/Caddyfile:ro \
+  caddy:2-alpine \
+  caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+~~~
+
+看到 Valid configuration 後：
+
+~~~bash
+docker rm -f emby-line-gateway 2>/dev/null || true
+docker run -d \
+  --name emby-line-gateway \
+  --restart unless-stopped \
+  --network host \
+  -v /opt/Tgbot/caddy/caddyfile:/etc/caddy/Caddyfile:ro \
+  -v /opt/Tgbot/caddy/data:/data \
+  -v /opt/Tgbot/caddy/config:/config \
+  caddy:2-alpine \
+  caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+
+docker ps --filter name=emby-line-gateway
+docker logs --tail=100 emby-line-gateway
+ss -lntp | grep ':18080'
+~~~
+
+本機 Host 分流測試：
+
+~~~bash
+curl -sS -o /dev/null -w 'VIP gateway => HTTP %{http_code}\n' \
+  -H 'Host: www.dusheng.lol' \
+  http://127.0.0.1:18080/emby/System/Info/Public
+
+curl -sS -o /dev/null -w 'Normal gateway => HTTP %{http_code}\n' \
+  -H 'Host: www.dusheng.xyz' \
+  http://127.0.0.1:18080/emby/System/Info/Public
+~~~
+
+兩個通常都應得到 200。修改 Caddyfile 後先 validate，再：
+
+~~~bash
+docker restart emby-line-gateway
+~~~
+
+## 10. DuShengCDN、NPM、DNS 與防火牆
+
+VIP 網域使用自己的 DuShengCDN/權威 DNS。CDN 站點設定：
+
+1. DNS 指向 DuShengCDN 入口/邊緣位址。
+2. CDN 源站填伺服器 IP，源站 port 填 18080。
+3. 源站協定使用 HTTP（TLS 在 CDN/NPM 終止）。
+4. **保留原始 Host www.dusheng.lol**，不可改成源站 IP，否則 Caddy 無法匹配 VIP。
+5. 轉發 X-Emby-Authorization、X-Emby-Token、Authorization、Range，啟用 WebSocket/長連線；不要快取登入、播放和 HLS。
+6. 檢查 CDN 地區防火牆；CDN 自己回的 403 不會上報 Bot。
+
+如果 NPM 與 Caddy 在同一台主機，NPM 容器內不要填 127.0.0.1:18080；要填可達的主機 IP/host gateway 和 18080。NPM 公開 HTTPS 再轉到 Caddy 的 HTTP 18080。
+
+~~~bash
+dig +short www.dusheng.lol
+curl -sk -o /dev/null -w 'VIP public => HTTP %{http_code}\n' \
+  https://www.dusheng.lol/emby/System/Info/Public
+~~~
+
+外部 CDN/NPM 需要連 Caddy 時才開 18080；8838 通常不要開公網：
+
+~~~bash
+ufw allow 18080/tcp
+ufw status
+~~~
+
+如果 CDN 有固定源站 IP，優先使用來源限制：
+
+~~~bash
+ufw allow from <CDN_IP> to any port 18080 proto tcp
+~~~
+
+## 11. 驗證 VIP 攔截
+
+~~~bash
+cd /opt/Tgbot
+docker compose logs --tail=0 -f embyboss
+~~~
+
+普通用戶從 VIP 播放時，預期看到：
+
+~~~text
+线路权限违规(nginx): 用户 ... 通过 www.dusheng.lol 使用白名单线路
+成功终止会话: ...
+GET /emby/line_report?... 403 Forbidden
+~~~
+
+過濾日誌：
+
+~~~bash
+docker compose logs --since=5m embyboss | \
+  grep -Ei 'line_report|线路权限违规|成功终止|Missing user identity|403 Forbidden'
+~~~
+
+內部端點只能由本機呼叫；測試需使用真實 Emby user ID 或認證標頭：
+
+~~~bash
+curl -i -G 'http://127.0.0.1:8838/emby/line_report' \
+  --data-urlencode 'line=vip' \
+  --data-urlencode 'host=www.dusheng.lol' \
+  --data-urlencode 'userId=<EMBY_USER_ID>'
+~~~
+
+line_report 回傳 403 對 Caddy 來說代表阻止原始播放請求，是預期行為。若直接測試沒有身份，可能得到 Missing user identity。
+
+## 12. Bot 日常操作
+
+- admins: [] 代表只有 owner 是管理員；不需要把 owner 再放入 admins。
+- Owner 對 Bot 使用 /proadmin <TG_ID> 新增管理員，/revadmin <TG_ID> 移除。
+- 管理員面板可設定邀請等級、建立註冊碼/續期碼/白名單碼、查看使用者。
+- /prouser <TG_ID 或 username> 可把已有有效訂閱的 Emby 帳戶設成白名單；白名單會隨 ex 到期。
+- 產生兌換碼格式：
+
+~~~text
+30 1 code F   一個 30 天註冊碼
+30 1 link F   一條 30 天註冊深連結
+90 2 code T   兩個 90 天續期碼
+90 2 link T   兩條 90 天續期深連結
+5 code W      五個白名單碼
+5 link W      五條白名單深連結
+~~~
+
+link 是 Telegram 深連結，code 是純文字碼；F 註冊、T 續期、W 白名單。白名單碼沒有天數欄位，必須先有 Emby 帳戶和有效訂閱。
+
+## 13. 更新、備份與 Token 更換
+
+更新：
+
+~~~bash
+cd /opt/Tgbot
+git status --short --branch
+git pull --ff-only --autostash origin master
+docker compose build embyboss
+docker compose up -d --force-recreate embyboss
+docker compose ps
+~~~
+
+config.json、.env、資料庫和 session 被 .gitignore 忽略；不要用範例檔覆蓋正式設定。若出現 Applied autostash，檢查 git status 和 git stash list。
+
+備份：
+
+~~~bash
+cd /opt/Tgbot
+mkdir -p db_backup
+docker exec mysql mysqldump -uroot -p embyboss > "db_backup/embyboss-$(date +%Y%m%d-%H%M%S).sql"
+cp -a config.json "db_backup/config-$(date +%Y%m%d-%H%M%S).json"
+chmod 600 db_backup/*.sql db_backup/*.json
+~~~
+
+更換 Bot Token：
+
+~~~bash
+cd /opt/Tgbot
+chmod 600 config.json
+python3 -m json.tool config.json >/dev/null && echo 'JSON OK'
+docker compose up -d --force-recreate embyboss
+docker compose logs --since=2m embyboss
+~~~
+
+同一 Token 不可同時被其他程式、另一台伺服器或另一容器使用，否則會 Conflict、連線關閉或按鈕無反應。
+
+## 14. 故障排查
+
+### Telegram 按鈕沒有反應
+
+~~~bash
+cd /opt/Tgbot
+docker compose logs --tail=0 -f embyboss
+~~~
+
+從 Telegram 發送 /start 並點擊一次。若 Bot 啟動與探針正常但完全沒有 callback 日誌，常見原因是 Telegram/DC 暫時故障或 Token 被其他程式使用；服務恢復後：
+
+~~~bash
+docker compose restart embyboss
+~~~
+
+若看到 Traceback、Exception、Conflict、callback 或 ERROR，保留完整日誌再排查，不要先刪資料庫。
+
+### MySQL 連不上
+
+~~~bash
+docker compose ps -a
+docker logs --tail=200 mysql
+docker exec -it mysql mysqladmin ping -h127.0.0.1 -uroot -p
+~~~
+
+首次啟動要等待初始化；確認 .env 和 config.json 的資料庫使用者、資料庫名、密碼完全一致。初始化後不要任意更改 MYSQL_*，因為既有資料庫帳戶不會自動更新。
+
+### VIP 公開網址 403
+
+- System/Info/Public 就 403：檢查 DuShengCDN/NPM 地區規則、源站 port、TLS 協定和 Host。
+- 只有普通用戶播放 VIP 會 403：這是預期的線路攔截。
+- Missing user identity：前置代理刪了 Emby Authorization/Token、原始 query 或 Range，檢查轉發規則。
+- Caddy/Bot 一直 403：確認 Caddy 用 --network host，Bot upstream 是 127.0.0.1:8838。
+
+### Caddy 啟動失敗或端口被占用
+
+~~~bash
+docker logs --tail=200 emby-line-gateway
+ss -lntp | grep -E ':(18080|8838|8096)\b'
+docker run --rm \
+  -v /opt/Tgbot/caddy/caddyfile:/etc/caddy/Caddyfile:ro \
+  caddy:2-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+~~~
+
+同一端口只能有一個代理程序；修改後先 validate，再 docker restart emby-line-gateway。
+
+## 15. 安全檢查
+
+- config.json、.env、*.session 權限為 600，未提交 Git。
+- 8838 只讓本機 Caddy 呼叫，不直接暴露公網。
+- Caddy/CDN 保留 Host、Emby 認證標頭和 Range，不快取登入/串流。
+- MySQL 使用強密碼，定期備份 db、db_backup、config.json。
+- Bot Token 只在一個執行個體使用；更換後使用 --force-recreate。
+- 每次更新後檢查 git status、容器狀態及日誌。
