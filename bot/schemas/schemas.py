@@ -168,6 +168,10 @@ class Config(BaseModel):
     emby_url: str
     emby_block: Optional[List[str]] = []
     emby_line: str
+    # Optional read-only mount of Emby's data/authentication.db.  Emby 4.9
+    # does not provide a safe Users/Me endpoint, so this is required to map a
+    # client access token to its canonical user without trusting URL claims.
+    emby_auth_db_path: Optional[str] = None
     extra_emby_libs: Optional[List[str]] = []
     db_host: str
     db_user: str

@@ -20,10 +20,13 @@ from bot.sql_helper.sql_emby import (
 from bot import LOGGER, bot, config
 from bot.func_helper.emby import emby
 import json
+import asyncio
+import os
 import re
+import sqlite3
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 router = APIRouter()
 
@@ -39,7 +42,7 @@ _MAX_IDENTIFIER_LENGTH = 512
 _MAX_TOKEN_LENGTH = 4096
 _MAX_AUTH_HEADER_LENGTH = 8192
 _MAX_REQUEST_URI_LENGTH = 16384
-
+_MAX_PATH_LENGTH = 4096
 
 def is_in_cooldown(user_id: str) -> bool:
     """检查用户是否在冷却期内（冷却期内的重复上报直接忽略）"""
@@ -356,37 +359,128 @@ async def _fetch_active_sessions_result() -> Tuple[bool, List[Dict[str, Any]], s
         return False, [], f"Emby sessions lookup error: {type(e).__name__}"
 
 
-async def _get_user_from_token(token: str) -> Tuple[str, str]:
-    """Authenticate a client token through Emby's ``Users/Me`` endpoint.
+def _configured_auth_db_path() -> str:
+    """Return the optional read-only Emby token database path.
 
-    The bot's Emby service normally sends its own API key.  Passing the
-    per-request ``X-Emby-Token`` header here is intentional: this request must
-    be authorized as the playback client, not as the bot service account.
+    The path must point to a file mounted into the Bot container.  It is
+    deliberately operator-configured; never infer it from a client request.
+    """
+    value = getattr(config, "emby_auth_db_path", None) or os.getenv(
+        "EMBY_AUTH_DB_PATH", ""
+    )
+    return _bounded_identifier(value, _MAX_PATH_LENGTH)
+
+
+def _lookup_user_from_auth_db_sync(token: str, db_path: str) -> Tuple[str, str]:
+    """Resolve an Emby access token through the server's Tokens table.
+
+    Emby 4.9 does not expose a safe ``/Users/Me`` endpoint and its
+    ``/Users/{Id}`` endpoint accepts any authenticated user's token for an
+    arbitrary path ID.  The local Tokens table is the authoritative token to
+    user binding, so a read-only query is the only database fallback used
+    here.  The token itself is always passed as a bound SQL parameter.
+    """
+    if not db_path:
+        return "", "Emby authentication database is not configured"
+    if not os.path.isfile(db_path):
+        return "", "Emby authentication database is unavailable"
+
+    try:
+        uri = f"file:{quote(os.path.abspath(db_path), safe='/')}?mode=ro"
+        with sqlite3.connect(uri, uri=True, timeout=1.0) as connection:
+            connection.execute("PRAGMA query_only=ON")
+            rows = connection.execute(
+                "SELECT UserId FROM Tokens "
+                "WHERE AccessToken = ? AND IsActive = 1 LIMIT 3",
+                (token,),
+            ).fetchall()
+    except (sqlite3.Error, OSError) as exc:
+        return "", f"Emby authentication database lookup failed: {type(exc).__name__}"
+
+    user_ids = {
+        _bounded_identifier(row[0], _MAX_USER_ID_LENGTH)
+        for row in rows
+        if row and row[0]
+    }
+    user_ids.discard("")
+    if len(user_ids) != 1:
+        return "", "Emby token is not bound to one active user"
+    return next(iter(user_ids)), "emby.authentication_db"
+
+
+async def _get_user_from_auth_db(token: str) -> Tuple[str, str]:
+    """Run the local SQLite lookup off the event loop."""
+    db_path = _configured_auth_db_path()
+    if not db_path:
+        return "", "Emby authentication database is not configured"
+    return await asyncio.to_thread(_lookup_user_from_auth_db_sync, token, db_path)
+
+
+async def _get_user_from_token(
+    token: str,
+    auth_header: str = "",
+) -> Tuple[str, str]:
+    """Authenticate a client token as the playback user.
+
+    Emby 4.9 treats ``/Users/Me`` as a GUID and returns
+    ``Unrecognized Guid format``.  If the optional read-only Tokens database
+    is mounted, it supplies the canonical token owner.  Older Emby versions
+    may still answer ``/Users/Me`` and remain supported as a compatibility
+    path.  A client-provided UserId is never used as an identity source.
     """
     bounded_token = _bounded_identifier(token, _MAX_TOKEN_LENGTH)
     if not bounded_token:
         return "", "missing token"
 
+    # Once an authentication DB path is configured it is authoritative.  A
+    # missing/unreadable DB or an unknown token must not fall back to the Bot's
+    # API key or to a client supplied UserId; doing so would reintroduce the
+    # VIP bypass this lookup is intended to prevent.
+    if _configured_auth_db_path():
+        db_user_id, db_reason = await _get_user_from_auth_db(bounded_token)
+        return db_user_id, db_reason
+
+    safe_auth_header = normalize_identifier(auth_header)
+    if (
+        len(safe_auth_header) > _MAX_AUTH_HEADER_LENGTH
+        or "\r" in safe_auth_header
+        or "\n" in safe_auth_header
+    ):
+        safe_auth_header = ""
+
+    # Embyservice's session has the Bot API key as a default header.  An empty
+    # override prevents that service credential from being used for this
+    # user-authentication request.
+    user_request_headers = (
+        {
+            "X-Emby-Token": "",
+            "X-Emby-Authorization": safe_auth_header,
+        }
+        if safe_auth_header
+        else {"X-Emby-Token": bounded_token}
+    )
+
+    last_error = ""
     try:
         result = await emby._request(
             "GET",
             "/emby/Users/Me",
-            headers={"X-Emby-Token": bounded_token},
+            headers=user_request_headers,
         )
     except Exception as e:
-        LOGGER.error(f"通过 Emby token 查询用户异常: {type(e).__name__}")
-        return "", f"Emby Users/Me lookup error: {type(e).__name__}"
+        last_error = f"Emby Users/Me lookup error: {type(e).__name__}"
+    else:
+        if result.success and isinstance(result.data, dict):
+            resolved_id = _bounded_identifier(result.data.get("Id"), _MAX_USER_ID_LENGTH)
+            if resolved_id:
+                return resolved_id, "emby.users.me"
+            last_error = "Emby Users/Me returned no user ID"
+        elif not result.success:
+            last_error = normalize_identifier(getattr(result, "error", "")) or "Emby Users/Me rejected token"
+        else:
+            last_error = "Invalid Emby Users/Me response"
 
-    if not result.success:
-        error = normalize_identifier(getattr(result, "error", "")) or "Emby Users/Me rejected token"
-        return "", error[:300]
-    if not isinstance(result.data, dict):
-        return "", "Invalid Emby Users/Me response"
-
-    resolved_id = _bounded_identifier(result.data.get("Id"), _MAX_USER_ID_LENGTH)
-    if not resolved_id:
-        return "", "Emby Users/Me returned no user ID"
-    return resolved_id, ""
+    return "", (last_error or "Emby user lookup failed")[:300]
 
 
 def _session_user_for_token(
@@ -509,10 +603,11 @@ async def resolve_user_context(
 
     ``userId`` in a playback URL and ``UserId`` in an authorization header are
     client-controlled claims.  They are deliberately never used as the
-    identity source.  A token is authenticated with ``/Users/Me``; if that
-    endpoint is unavailable, the only fallback is an exact
-    ``Sessions.AccessToken`` match.  This prevents a normal user from adding a
-    known whitelist user's ID to a URL and bypassing the VIP-line check.
+    identity source.  A token is authenticated through the optional read-only
+    Emby Tokens database or the legacy ``/Users/Me`` endpoint; if neither is
+    available, the only fallback is an exact ``Sessions.AccessToken`` match.
+    This prevents a normal user from adding a known whitelist user's ID to a
+    URL and bypassing the VIP-line check.
 
     The three-item return value is kept for callers: ``(canonical_user_id,
     matched_session, source_or_failure_reason)``.  An empty user ID means that
@@ -581,16 +676,20 @@ async def resolve_user_context(
     if not selected_token:
         return "", None, "missing Emby token"
 
-    canonical_user_id, token_error = await _get_user_from_token(selected_token)
+    canonical_user_id, token_error = await _get_user_from_token(
+        selected_token,
+        auth_header=auth_header,
+    )
     sessions_ok = False
     sessions: List[Dict[str, Any]] = []
     sessions_error = ""
     matched_session: Optional[Dict[str, Any]] = None
 
     if canonical_user_id:
-        # Users/Me is authoritative for identity.  Query sessions on a
-        # best-effort basis to locate the session to terminate, and reject an
-        # impossible token/session user mismatch if Emby exposes one.
+        # The token database or Users/Me is authoritative for identity. Query
+        # sessions on a best-effort basis to locate the session to terminate,
+        # and reject an impossible token/session user mismatch if Emby exposes
+        # one.
         sessions_ok, sessions, sessions_error = await _fetch_active_sessions_result()
         if sessions_ok:
             token_session_users = {
@@ -617,12 +716,12 @@ async def resolve_user_context(
         # local database override this check.
         if any(claim != canonical_user_id for claim in claimed_user_ids):
             return "", None, "userId claim does not match authenticated Emby user"
-        return canonical_user_id, matched_session, f"emby.users.me:{selected_token_source}"
+        return canonical_user_id, matched_session, f"emby.identity:{token_error or 'emby.users.me'}:{selected_token_source}"
 
-    # ``Users/Me`` can be unavailable on older Emby builds or during a
-    # transient error.  The only permitted fallback is an exact token match in
-    # the active Sessions response; device/session IDs alone are insufficient
-    # to establish an identity.
+    # If the configured auth database and Users/Me are unavailable, the only
+    # permitted fallback is an exact token match in the active Sessions
+    # response; device/session IDs alone are insufficient to establish an
+    # identity.
     sessions_ok, sessions, sessions_error = await _fetch_active_sessions_result()
     if not sessions_ok:
         detail = sessions_error or token_error or "Emby identity lookup failed"
@@ -751,6 +850,7 @@ async def line_report(
     playSessionId: str = "",
     token: str = "",
     x_emby_authorization: Optional[str] = Header(default=None, alias="X-Emby-Authorization"),
+    authorization: Optional[str] = Header(default=None, alias="Authorization"),
     x_emby_token: Optional[str] = Header(default=None, alias="X-Emby-Token"),
     x_original_uri: Optional[str] = Header(default=None, alias="X-Original-URI"),
 ):
@@ -806,7 +906,7 @@ async def line_report(
         session_id=sessionId,
         play_session_id=playSessionId,
         token=token or (x_emby_token or ""),
-        auth_header=x_emby_authorization or "",
+        auth_header=x_emby_authorization or authorization or "",
         original_request_uri=x_original_uri or "",
     )
 

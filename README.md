@@ -654,3 +654,43 @@ docker run --rm \
 - MySQL 使用強密碼，定期備份 db、db_backup、config.json。
 - Bot Token 只在一個執行個體使用；更換後使用 --force-recreate。
 - 每次更新後檢查 git status、容器狀態及日誌。
+
+### 16.1 Emby 4.9 + SenPlayer identity mapping
+
+Emby 4.9.5.0 does not provide a usable `/emby/Users/Me` route; `Me` is parsed as a GUID and returns `Unrecognized Guid format`. Never use a client-supplied `userId` as the identity source by calling `/emby/Users/{id}`: that endpoint does not bind the path ID to the token.
+
+For SenPlayer, keep VIP enforcement fail-closed and mount Emby's authentication database read-only so the Bot can resolve the authoritative `Tokens(AccessToken, UserId, IsActive)` binding.
+
+Find the host directory mounted as `/config` (do not print tokens):
+
+~~~bash
+docker inspect embyserver --format '{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}'
+~~~
+
+Add the corresponding host directory to the `embyboss` service in `docker-compose.yml`:
+
+~~~yaml
+volumes:
+  - /host/path/to/emby-config:/emby-auth:ro
+~~~
+
+Set the matching container path in `config.json`:
+
+~~~json
+"emby_auth_db_path": "/emby-auth/data/authentication.db"
+~~~
+
+If the mounted directory is already Emby's `data` directory, use `/emby-auth/authentication.db` instead. Mount the directory containing SQLite `-wal` files; do not use a stale copied database.
+
+Deploy:
+
+~~~bash
+cd /opt/Tgbot
+chmod 600 config.json
+python3 -m json.tool config.json >/dev/null && echo 'JSON OK'
+docker compose build embyboss
+docker compose up -d --force-recreate embyboss
+docker compose logs --since=2m embyboss
+~~~
+
+If the database is not configured or cannot be read, VIP requests remain non-2xx and are blocked. Do not substitute the Bot API key or trust `userId`, `DeviceId`, or `SessionId` alone.

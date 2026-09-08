@@ -28,3 +28,7 @@ services:
       - ./config.json:/app/config.json
       - ./log:/app/log
       - ./db_backup:/app/db_backup
+      # Emby 4.9/SenPlayer: uncomment and replace with the host directory
+      # that contains Emby's data/authentication.db, then set
+      # emby_auth_db_path in config.json to the matching /emby-auth path.
+      # - /host/path/to/emby-config:/emby-auth:ro

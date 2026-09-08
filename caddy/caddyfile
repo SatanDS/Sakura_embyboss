@@ -98,11 +98,11 @@
 					header_up -X-Forwarded-For
 					header_up -X-Real-IP
 					header_up -X-DuSheng-Origin-Token
-					header_up -X-DuSheng-Line-Token
 					header_up X-DuSheng-Line-Token {$DUSHENGCDN_ORIGIN_TOKEN}
 					header_up X-Original-URI {uri}
 					header_up X-Emby-Authorization {header.X-Emby-Authorization}
 					header_up X-Emby-Token {header.X-Emby-Token}
+					header_up Authorization {header.Authorization}
 				}
 				reverse_proxy {args[3]} {
 					header_up -X-DuSheng-Origin-Token
@@ -118,11 +118,11 @@
 					header_up -X-Forwarded-For
 					header_up -X-Real-IP
 					header_up -X-DuSheng-Origin-Token
-					header_up -X-DuSheng-Line-Token
 					header_up X-DuSheng-Line-Token {$DUSHENGCDN_ORIGIN_TOKEN}
 					header_up X-Original-URI {uri}
 					header_up X-Emby-Authorization {header.X-Emby-Authorization}
 					header_up X-Emby-Token {header.X-Emby-Token}
+					header_up Authorization {header.Authorization}
 				}
 				reverse_proxy {args[3]} {
 					header_up -X-DuSheng-Origin-Token
@@ -137,11 +137,11 @@
 					header_up -X-Forwarded-For
 					header_up -X-Real-IP
 					header_up -X-DuSheng-Origin-Token
-					header_up -X-DuSheng-Line-Token
 					header_up X-DuSheng-Line-Token {$DUSHENGCDN_ORIGIN_TOKEN}
 					header_up X-Original-URI {uri}
 					header_up X-Emby-Authorization {header.X-Emby-Authorization}
 					header_up X-Emby-Token {header.X-Emby-Token}
+					header_up Authorization {header.Authorization}
 				}
 				reverse_proxy {args[3]} {
 					header_up -X-DuSheng-Origin-Token
