@@ -394,7 +394,7 @@ def config_preparation() -> InlineKeyboardMarkup:
          [('💠 普通用户线路', 'set_line'),('🌟 白名单线路', 'set_whitelist_line')],
          [('📡 客户端过滤', 'set_client_filter')],
          [(f'{leave_ban} 退群封禁', 'leave_ban'), (f'{uplays} 观影奖励结算', 'set_uplays')],
-         [(f'{auto_up} 自动更新bot', 'set_update'), (f'{mp_set} Moviepilot点播', 'set_mp')],
+         [(f'{auto_up} 自动更新bot', 'set_update'), (f'{mp_set} 点播', 'set_mp')],
          [(f'{red_envelope_status} 红包', 'set_red_envelope_status'), (f'{allow_private} 专属红包', 'set_red_envelope_allow_private')],
             [('🎟️ 分区通行码', 'partition_code_panel')],
          [(f'设置赠送资格天数({config.kk_gift_days}天)', 'set_kk_gift_days'), (f'设置活跃检测天数({config.activity_check_days}天)', 'set_activity_check_days')],
