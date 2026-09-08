@@ -131,9 +131,15 @@ class AutoUpdate(BaseModel):
 
 class API(BaseModel):
     status: bool = False  # 默认关闭
-    http_url: Optional[str] = "0.0.0.0"
+    # The API is consumed by the same-host Caddy gateway. Keep it on loopback
+    # by default so line-enforcement endpoints are not Internet-facing.
+    http_url: Optional[str] = "127.0.0.1"
     http_port: Optional[int] = 8838
     allow_origins: Optional[List[Union[str, int]]] = None
+    # Shared secret used by the local Caddy/CDN gateway when it calls the
+    # internal line-enforcement endpoints.  This intentionally has no
+    # default value: an unset secret must fail closed in the API dependency.
+    line_report_token: Optional[str] = None
 
     def __init__(self, **data):
         super().__init__(**data)

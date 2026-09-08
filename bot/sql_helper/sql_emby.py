@@ -165,6 +165,23 @@ def sql_get_emby(tg):
             return None
 
 
+def sql_get_emby_by_embyid(embyid):
+    """Look up a record by the canonical Emby user ID only.
+
+    ``sql_get_emby`` intentionally supports Telegram ID/name lookups for the
+    bot UI. Line authorization must not use that broad lookup: a value that
+    happens to equal a Telegram ID or account name must never grant the
+    corresponding Emby entitlement.
+    """
+    if embyid is None:
+        return None
+    with Session() as session:
+        try:
+            return session.query(Emby).filter(Emby.embyid == str(embyid)).first()
+        except Exception:
+            return None
+
+
 # def sql_get_emby_by_embyid(embyid):
 #     """
 #     Retrieve an Emby object from the database based on the provided Emby ID.

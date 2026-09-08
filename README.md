@@ -188,7 +188,8 @@ invite_lv：
   "status": true,
   "http_url": "127.0.0.1",
   "http_port": 8838,
-  "allow_origins": ["*"]
+  "allow_origins": ["*"],
+  "line_report_token": "<與 Caddy/CDN 相同的 64 位 hex 隨機密鑰>"
 },
 "ranks": {
   "logo": "DuSheng",
@@ -242,6 +243,34 @@ caddy/caddyfile 使用 Caddy forward_auth：
 
 模板會檢查 Sessions/Playing、影片/音訊串流、HLS 及下載端點，避免只終止 session 後串流仍繼續。
 
+### 9.0 共享密鑰（CDN 沒有固定回源 IP 時必須設定）
+
+`/emby/line_report` 不是公開 API。因為 DuShengCDN 的回源節點 IP 可能變動，不能只用 UFW 來源 IP 或 Host 判斷來源；現在改用一個只在 CDN、Caddy 和 Bot 之間共享的隨機密鑰：
+
+1. 產生一串只保存在伺服器與 CDN 管理面的密鑰（不要提交 Git、不要使用 Bot Token/Emby API Key）：
+
+~~~bash
+install -d -m 700 /etc/dusheng
+openssl rand -hex 32
+~~~
+
+輸出的 64 位 hex 字串要同時填入 `config.json` 的 `api.line_report_token`，以及 Caddy 執行環境的 `DUSHENGCDN_ORIGIN_TOKEN`。Caddy 會在 18080 入口先驗證 `X-DuSheng-Origin-Token`，再以同一密鑰呼叫 Bot；缺少或不匹配時直接回 403。Bot API 維持只監聽 `127.0.0.1:8838`。
+
+2. 將密鑰保存為只有 root 可讀的環境檔（把 `<TOKEN>` 換成剛剛產生的值）：
+
+~~~bash
+printf 'DUSHENGCDN_ORIGIN_TOKEN=<TOKEN>\n' > /etc/dusheng/emby-line.env
+chmod 600 /etc/dusheng/emby-line.env
+~~~
+
+3. 在 DuShengCDN 的「網站/代理配置 → 自定義請求頭」新增：
+
+~~~text
+X-DuSheng-Origin-Token: <同一個 TOKEN>
+~~~
+
+保存後要「發布配置」並等待所有 Agent 套用。該 Header 必須由 CDN 固定注入；不要把它透傳給 Emby，也不要允許客戶端自訂覆蓋。VIP 網站的 `/emby/*` 快取必須關閉（或至少按使用者 Token 完整隔離），否則快取命中會繞過回源檢查。
+
 ### 9.1 設定 VIP/普通域名
 
 ~~~bash
@@ -280,6 +309,7 @@ cd /opt/Tgbot
 mkdir -p caddy/data caddy/config
 
 docker run --rm \
+  --env-file /etc/dusheng/emby-line.env \
   -v /opt/Tgbot/caddy/caddyfile:/etc/caddy/Caddyfile:ro \
   caddy:2-alpine \
   caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
@@ -293,6 +323,7 @@ docker run -d \
   --name emby-line-gateway \
   --restart unless-stopped \
   --network host \
+  --env-file /etc/dusheng/emby-line.env \
   -v /opt/Tgbot/caddy/caddyfile:/etc/caddy/Caddyfile:ro \
   -v /opt/Tgbot/caddy/data:/data \
   -v /opt/Tgbot/caddy/config:/config \
@@ -307,19 +338,44 @@ ss -lntp | grep ':18080'
 本機 Host 分流測試：
 
 ~~~bash
+# 沒有 CDN 密鑰時必須被拒絕
+curl -sS -o /dev/null -w 'No token => HTTP %{http_code}\n' \
+  -H 'Host: www.xxxx.xxx' \
+  http://127.0.0.1:18080/emby/System/Info/Public
+
+# 帶正確密鑰才會到 Emby
+source /etc/dusheng/emby-line.env
 curl -sS -o /dev/null -w 'VIP gateway => HTTP %{http_code}\n' \
   -H 'Host: www.xxxx.xxx' \
+  -H "X-DuSheng-Origin-Token: $DUSHENGCDN_ORIGIN_TOKEN" \
   http://127.0.0.1:18080/emby/System/Info/Public
 
 curl -sS -o /dev/null -w 'Normal gateway => HTTP %{http_code}\n' \
   -H 'Host: www.dusheng.xyz' \
+  -H "X-DuSheng-Origin-Token: $DUSHENGCDN_ORIGIN_TOKEN" \
   http://127.0.0.1:18080/emby/System/Info/Public
 ~~~
 
-兩個通常都應得到 200。修改 Caddyfile 後先 validate，再：
+第一個應得到 403，後兩個才應得到 200。修改 Caddyfile 後先 validate，再重啟 Caddy：
 
 ~~~bash
 docker restart emby-line-gateway
+~~~
+
+如果修改了 `/etc/dusheng/emby-line.env` 裡的密鑰，必須重建容器讓 Docker 重新讀取 `--env-file`；單純 `restart` 不會更新容器環境：
+
+~~~bash
+docker rm -f emby-line-gateway
+docker run -d \
+  --name emby-line-gateway \
+  --restart unless-stopped \
+  --network host \
+  --env-file /etc/dusheng/emby-line.env \
+  -v /opt/Tgbot/caddy/caddyfile:/etc/caddy/Caddyfile:ro \
+  -v /opt/Tgbot/caddy/data:/data \
+  -v /opt/Tgbot/caddy/config:/config \
+  caddy:2-alpine \
+  caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
 ~~~
 
 ## 10. DuShengCDN、NPM、DNS 與防火牆
@@ -330,7 +386,7 @@ VIP 網域使用自己的CDN时比如 DuShengCDN/自建權威 DNS。CDN 站點�
 2. CDN 源站填伺服器 IP，源站 port 填 18080。
 3. 源站協定使用 HTTP（TLS 在 CDN/NPM 終止）。
 4. **保留原始 Host www.xxxx.xxx **，不可改成源站 IP，否則 Caddy 無法匹配 VIP。
-5. 轉發 X-Emby-Authorization、X-Emby-Token、Authorization、Range，啟用 WebSocket/長連線；不要快取登入、播放和 HLS。
+5. 在「自定義請求頭」固定加入 `X-DuSheng-Origin-Token: <TOKEN>`；同時轉發 X-Emby-Authorization、X-Emby-Token、Authorization、Range，啟用 WebSocket/長連線；不要快取登入、播放和 HLS。
 6. 檢查 CDN 地區防火牆源站防火墙；CDN 和UFW 自己回的 403 不會上報 Bot。
 
 如果 NPM 與 Caddy 在同一台主機，NPM 容器內不要填 127.0.0.1:18080；要填可達的主機 IP/host gateway 和 18080。NPM 公開 HTTPS 再轉到 Caddy 的 HTTP 18080。
@@ -341,14 +397,14 @@ curl -sk -o /dev/null -w 'VIP public => HTTP %{http_code}\n' \
   https://www.xxxx.xxx/emby/System/Info/Public
 ~~~
 
-外部 CDN/NPM 需要連 Caddy 時才開 18080；8838 通常不要開公網：
+因 CDN 回源 IP 不固定，18080 需要對 CDN 節點開放；安全性由上面的共享密鑰提供。8838 不要開公網：
 
 ~~~bash
 ufw allow 18080/tcp
 ufw status
 ~~~
 
-如果 CDN 有固定源站 IP，優先使用來源限制：
+若將來 CDN 能提供固定且可信的回源 IP，可再疊加來源限制（不是共享密鑰的替代品）：
 
 ~~~bash
 ufw allow from <CDN_IP> to any port 18080 proto tcp
@@ -376,16 +432,19 @@ docker compose logs --since=5m embyboss | \
   grep -Ei 'line_report|线路权限违规|成功终止|Missing user identity|403 Forbidden'
 ~~~
 
-內部端點只能由本機呼叫；測試需使用真實 Emby user ID 或認證標頭：
+內部端點只能由本機且帶共享密鑰呼叫；測試需使用真實 Emby user ID 或認證標頭：
 
 ~~~bash
+source /etc/dusheng/emby-line.env
 curl -i -G 'http://127.0.0.1:8838/emby/line_report' \
+  -H "X-DuSheng-Line-Token: $DUSHENGCDN_ORIGIN_TOKEN" \
   --data-urlencode 'line=vip' \
   --data-urlencode 'host=www.xxxx.xxx' \
-  --data-urlencode 'userId=<EMBY_USER_ID>'
+  --data-urlencode 'userId=<EMBY_USER_ID>' \
+  -H 'X-Emby-Token: <CLIENT_EMBY_TOKEN>'
 ~~~
 
-line_report 回傳 403 對 Caddy 來說代表阻止原始播放請求，是預期行為。若直接測試沒有身份，可能得到 Missing user identity。
+line_report 回傳 403 對 Caddy 來說代表阻止原始播放請求，是預期行為。沒有共享密鑰、沒有有效 Emby Token 或身份不一致時都應是非 2xx（安全失敗）。
 
 ## 12. Bot 日常操作
 
@@ -534,11 +593,12 @@ docker exec -it mysql mysqladmin ping -h127.0.0.1 -uroot -p
 docker logs --tail=200 emby-line-gateway
 ss -lntp | grep -E ':(18080|8838|8096)\b'
 docker run --rm \
+  --env-file /etc/dusheng/emby-line.env \
   -v /opt/Tgbot/caddy/caddyfile:/etc/caddy/Caddyfile:ro \
   caddy:2-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 ~~~
 
-同一端口只能有一個代理程序；修改後先 validate，再 docker restart emby-line-gateway。
+同一端口只能有一個代理程序；修改 Caddyfile 後先 validate，再 `docker restart emby-line-gateway`；修改密鑰環境檔後要依上面的指令重建容器。
 
 ## 16. 安全檢查
 

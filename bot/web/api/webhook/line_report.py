@@ -1,18 +1,22 @@
 #! /usr/bin/python3
 # -*- coding: utf-8 -*-
 """
-line_report - 接收 nginx mirror 转发的线路访问信息，用于检测用户的播放线路
+line_report - 接收网关转发的线路访问信息，用于检测用户的播放线路
 Author: dddddluo
 Date:2026/4/15
 
 使用方式：
-    nginx 中在每条线路的 server 块中，对播放相关的 location 使用 mirror 指令，
-    将请求的 userId 和对应的线路名称转发到此端点。
-    Bot 收到后进行线路权限检查，若违规则终止会话/封禁用户。
+    推荐由 Caddy forward_auth 同步调用；旧版 nginx mirror 也可调用，但必须
+    在请求中带 X-DuSheng-Line-Token。Bot 收到后进行线路权限检查，若违规则
+    终止会话/封禁用户。
 """
 from fastapi import APIRouter, Header
 from fastapi.responses import JSONResponse
-from bot.sql_helper.sql_emby import Emby, sql_get_emby, sql_update_emby
+from bot.sql_helper.sql_emby import (
+    Emby,
+    sql_get_emby_by_embyid,
+    sql_update_emby,
+)
 from bot import LOGGER, bot, config
 from bot.func_helper.emby import emby
 import json
@@ -25,6 +29,16 @@ router = APIRouter()
 
 # 违规冷却缓存: {user_id: last_violation_time}
 _violation_cooldown: Dict[str, datetime] = {}
+
+# Values received through a reverse-proxy request are untrusted.  Keep the
+# parser bounded so a malformed URI/header cannot cause excessive work or end
+# up in a log message.  Emby user IDs are normally short UUIDs and access
+# tokens are well below this limit.
+_MAX_USER_ID_LENGTH = 255
+_MAX_IDENTIFIER_LENGTH = 512
+_MAX_TOKEN_LENGTH = 4096
+_MAX_AUTH_HEADER_LENGTH = 8192
+_MAX_REQUEST_URI_LENGTH = 16384
 
 
 def is_in_cooldown(user_id: str) -> bool:
@@ -99,6 +113,63 @@ def is_whitelist_line(session_server_address: str) -> bool:
     return False
 
 
+_NORMAL_LINE_NAMES = {
+    "normal",
+    "normal_line",
+    "normalline",
+    "public",
+    "default",
+}
+_VIP_LINE_NAMES = {
+    "vip",
+    "vip_line",
+    "vipline",
+    "whitelist",
+    "whitelist_line",
+    "whitelistline",
+    "white",
+}
+
+
+def classify_line_request(host: str, line: str) -> Optional[str]:
+    """Return ``normal``/``vip`` for a configured gateway endpoint.
+
+    ``host`` is the authoritative value supplied by the gateway route.  The
+    line label is checked as a second, independent invariant so a malformed
+    or misconfigured proxy cannot silently turn an unknown endpoint into a
+    normal (allowed) line.  Missing/unknown hosts and labels fail closed.
+    """
+    host_normalized = normalize_line_url(host)
+    line_normalized = normalize_line_url(line)
+    normal_configured = normalize_line_url(getattr(config, "emby_line", ""))
+    vip_configured = normalize_line_url(getattr(config, "emby_whitelist_line", ""))
+
+    if not host_normalized:
+        return None
+
+    if vip_configured and host_normalized == vip_configured:
+        host_role = "vip"
+    elif normal_configured and host_normalized == normal_configured:
+        host_role = "normal"
+    else:
+        return None
+
+    # Caddy's template uses ``normal`` and ``vip``.  Keep a few explicit
+    # aliases for existing deployments, but never accept an arbitrary label.
+    if line_normalized in _VIP_LINE_NAMES:
+        line_role = "vip"
+    elif line_normalized in _NORMAL_LINE_NAMES:
+        line_role = "normal"
+    elif line_normalized == vip_configured:
+        line_role = "vip"
+    elif line_normalized == normal_configured:
+        line_role = "normal"
+    else:
+        return None
+
+    return host_role if line_role == host_role else None
+
+
 def is_user_whitelisted(user_details: Optional[Emby]) -> bool:
     """
     检查用户是否是白名单用户
@@ -137,24 +208,66 @@ async def get_session_server_address(session_id: str) -> Optional[str]:
 
 def parse_emby_authorization(auth_header: str) -> Dict[str, str]:
     """解析 Emby Authorization/X-Emby-Authorization 头"""
-    if not auth_header:
+    if not auth_header or len(auth_header) > _MAX_AUTH_HEADER_LENGTH:
         return {}
 
-    matches = re.findall(r'([A-Za-z][A-Za-z0-9]*)="([^"]*)"', auth_header)
-    return {key: value for key, value in matches if value}
+    # Emby normally sends quoted values, but some clients omit the quotes.
+    # Accept both forms while keeping the accepted grammar deliberately
+    # narrow.  Canonicalise known field names so casing cannot bypass the
+    # consistency checks below.
+    aliases = {
+        "userid": "UserId",
+        "deviceid": "DeviceId",
+        "client": "Client",
+        "device": "Device",
+        "version": "Version",
+        "token": "Token",
+    }
+    result: Dict[str, str] = {}
+    pattern = re.compile(
+        r'([A-Za-z][A-Za-z0-9_-]*)\s*=\s*(?:"([^"]*)"|([^,\s]+))'
+    )
+    for match in pattern.finditer(auth_header):
+        raw_key = match.group(1)
+        value = match.group(2) if match.group(2) is not None else match.group(3)
+        if not value:
+            continue
+        key = aliases.get(raw_key.lower(), raw_key)
+        result[key] = value
+    return result
 
 
 def parse_original_request_uri(request_uri: str) -> Dict[str, str]:
     """从 nginx 转发的原始 request_uri 中提取查询参数"""
-    if not request_uri:
+    if not request_uri or len(request_uri) > _MAX_REQUEST_URI_LENGTH:
         return {}
 
     try:
         parsed = urlparse(request_uri)
         query = parse_qs(parsed.query, keep_blank_values=False)
-        return {key: values[0] for key, values in query.items() if values and values[0]}
+        aliases = {
+            "userid": "userId",
+            "deviceid": "DeviceId",
+            "x-emby-device-id": "X-Emby-Device-Id",
+            "sessionid": "SessionId",
+            "playsessionid": "PlaySessionId",
+            "x-emby-token": "X-Emby-Token",
+            "token": "token",
+            "api_key": "api_key",
+        }
+        result: Dict[str, str] = {}
+        for key, values in query.items():
+            if not values or not values[0]:
+                continue
+            canonical_key = aliases.get(key.lower(), key)
+            # Keep the first value, matching the old parse_qs behaviour and
+            # avoiding ambiguity when a client repeats a credential field.
+            result.setdefault(canonical_key, values[0])
+        return result
     except Exception as e:
-        LOGGER.error(f"解析原始 request_uri 失败: {request_uri} - {e}")
+        # Never include the URI itself in logs: it may contain api_key or a
+        # user token.  The caller can still diagnose the failure by type.
+        LOGGER.error(f"解析原始 request_uri 失败 ({type(e).__name__})")
         return {}
 
 
@@ -163,14 +276,23 @@ def redact_request_uri(request_uri: str) -> str:
     if not request_uri:
         return ""
 
+    if len(request_uri) > _MAX_REQUEST_URI_LENGTH:
+        return "<redacted>"
+
     try:
         parsed = urlparse(request_uri)
         query = parse_qs(parsed.query, keep_blank_values=True)
-        sensitive_keys = {"api_key", "X-Emby-Token", "x-emby-token", "token"}
+        sensitive_keys = {
+            "api_key",
+            "x-emby-token",
+            "token",
+            "authorization",
+            "x-emby-authorization",
+        }
 
         redacted_query = []
         for key, values in query.items():
-            if key in sensitive_keys:
+            if key.lower() in sensitive_keys:
                 redacted_query.extend((key, "***") for _ in values)
             else:
                 redacted_query.extend((key, value) for value in values)
@@ -183,7 +305,8 @@ def redact_request_uri(request_uri: str) -> str:
             redacted_uri = f"{redacted_uri}#{parsed.fragment}"
         return redacted_uri
     except Exception as e:
-        LOGGER.error(f"脱敏原始 request_uri 失败: {request_uri} - {e}")
+        # Do not log the malformed URI; it may contain a credential.
+        LOGGER.error(f"脱敏原始 request_uri 失败 ({type(e).__name__})")
         return "<redacted>"
 
 
@@ -194,17 +317,160 @@ def normalize_identifier(value: Optional[str]) -> str:
     return str(value).strip()
 
 
+def _bounded_identifier(value: Optional[str], limit: int = _MAX_IDENTIFIER_LENGTH) -> str:
+    """Return a trimmed identifier, or an empty value when it is oversized."""
+    normalized = normalize_identifier(value)
+    if not normalized or len(normalized) > limit:
+        return ""
+    return normalized
+
+
 async def fetch_active_sessions() -> List[Dict[str, Any]]:
     """获取当前活跃会话列表"""
+    ok, sessions, _ = await _fetch_active_sessions_result()
+    return sessions if ok else []
+
+
+async def _fetch_active_sessions_result() -> Tuple[bool, List[Dict[str, Any]], str]:
+    """Fetch active sessions while preserving whether the lookup failed.
+
+    ``[]`` is a valid result (there may simply be no active sessions), but it
+    must not be confused with a transport/API failure when deciding whether a
+    VIP request can be authorized.
+    """
     try:
         result = await emby._request("GET", "/emby/Sessions")
-        if result.success and isinstance(result.data, list):
-            return result.data
-        LOGGER.error(f"获取活跃会话失败: {result.error}")
-        return []
+        if not result.success:
+            error = normalize_identifier(getattr(result, "error", "")) or "Emby sessions request failed"
+            LOGGER.error(f"获取活跃会话失败: {error[:300]}")
+            return False, [], error[:300]
+        if not isinstance(result.data, list):
+            LOGGER.error("获取活跃会话失败: Emby 返回格式不是列表")
+            return False, [], "Invalid Emby sessions response"
+        # Ignore malformed entries rather than letting a client-controlled
+        # request trigger an exception while matching sessions.
+        sessions = [item for item in result.data if isinstance(item, dict)]
+        return True, sessions, ""
     except Exception as e:
-        LOGGER.error(f"获取活跃会话异常: {e}")
-        return []
+        LOGGER.error(f"获取活跃会话异常: {type(e).__name__}")
+        return False, [], f"Emby sessions lookup error: {type(e).__name__}"
+
+
+async def _get_user_from_token(token: str) -> Tuple[str, str]:
+    """Authenticate a client token through Emby's ``Users/Me`` endpoint.
+
+    The bot's Emby service normally sends its own API key.  Passing the
+    per-request ``X-Emby-Token`` header here is intentional: this request must
+    be authorized as the playback client, not as the bot service account.
+    """
+    bounded_token = _bounded_identifier(token, _MAX_TOKEN_LENGTH)
+    if not bounded_token:
+        return "", "missing token"
+
+    try:
+        result = await emby._request(
+            "GET",
+            "/emby/Users/Me",
+            headers={"X-Emby-Token": bounded_token},
+        )
+    except Exception as e:
+        LOGGER.error(f"通过 Emby token 查询用户异常: {type(e).__name__}")
+        return "", f"Emby Users/Me lookup error: {type(e).__name__}"
+
+    if not result.success:
+        error = normalize_identifier(getattr(result, "error", "")) or "Emby Users/Me rejected token"
+        return "", error[:300]
+    if not isinstance(result.data, dict):
+        return "", "Invalid Emby Users/Me response"
+
+    resolved_id = _bounded_identifier(result.data.get("Id"), _MAX_USER_ID_LENGTH)
+    if not resolved_id:
+        return "", "Emby Users/Me returned no user ID"
+    return resolved_id, ""
+
+
+def _session_user_for_token(
+    sessions: List[Dict[str, Any]], token: str
+) -> Tuple[str, Optional[Dict[str, Any]], str]:
+    """Resolve a token only from exact ``Sessions.AccessToken`` matches."""
+    bounded_token = _bounded_identifier(token, _MAX_TOKEN_LENGTH)
+    if not bounded_token:
+        return "", None, "missing token"
+
+    matches = [
+        session
+        for session in sessions
+        if _bounded_identifier(session.get("AccessToken"), _MAX_TOKEN_LENGTH)
+        == bounded_token
+    ]
+    if not matches:
+        return "", None, "token not present in active Emby sessions"
+
+    user_ids = {
+        _bounded_identifier(session.get("UserId"), _MAX_USER_ID_LENGTH)
+        for session in matches
+    }
+    user_ids.discard("")
+    if len(user_ids) != 1:
+        return "", None, "token maps to no unique Emby user"
+
+    # Prefer the active/playing session when multiple clients share a token.
+    matched = next((s for s in matches if s.get("NowPlayingItem")), matches[0])
+    return next(iter(user_ids)), matched, "emby.sessions.AccessToken"
+
+
+def _select_session_for_user(
+    sessions: List[Dict[str, Any]],
+    *,
+    user_id: str,
+    token: str,
+    device_id: str,
+    session_id: str,
+    play_session_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Select a session already authenticated as ``user_id``.
+
+    A token match is preferred.  Device/session IDs are only used to locate a
+    session after the token (or ``Users/Me``) has established the user; they
+    can never establish an identity by themselves.
+    """
+    bounded_user = _bounded_identifier(user_id, _MAX_USER_ID_LENGTH)
+    bounded_token = _bounded_identifier(token, _MAX_TOKEN_LENGTH)
+    bounded_device = _bounded_identifier(device_id)
+    bounded_session = _bounded_identifier(session_id)
+    bounded_play = _bounded_identifier(play_session_id)
+    if not bounded_user:
+        return None
+
+    candidates = []
+    for session in sessions:
+        if _bounded_identifier(session.get("UserId"), _MAX_USER_ID_LENGTH) != bounded_user:
+            continue
+        access_token = _bounded_identifier(session.get("AccessToken"), _MAX_TOKEN_LENGTH)
+        # If a session exposes AccessToken, it must agree with the validated
+        # token.  Never use another user's session as a termination target.
+        if bounded_token and access_token and access_token != bounded_token:
+            continue
+
+        identity_match = False
+        if bounded_token and access_token == bounded_token:
+            identity_match = True
+        if bounded_device and _bounded_identifier(session.get("DeviceId")) == bounded_device:
+            identity_match = True
+        if bounded_session and _bounded_identifier(session.get("Id")) == bounded_session:
+            identity_match = True
+        play_state = session.get("PlayState") or {}
+        if bounded_play and (
+            _bounded_identifier(session.get("PlaySessionId")) == bounded_play
+            or _bounded_identifier(play_state.get("PlaySessionId")) == bounded_play
+        ):
+            identity_match = True
+        if identity_match:
+            candidates.append(session)
+
+    if not candidates:
+        return None
+    return next((s for s in candidates if s.get("NowPlayingItem")), candidates[0])
 
 
 def find_matching_session(
@@ -218,44 +484,16 @@ def find_matching_session(
 ) -> Optional[Dict[str, Any]]:
     """根据多个线索在活跃会话中匹配最可能的会话"""
     normalized_user_id = normalize_identifier(user_id)
-    normalized_device_id = normalize_identifier(device_id)
-    normalized_session_id = normalize_identifier(session_id)
-    normalized_play_session_id = normalize_identifier(play_session_id)
-    normalized_token = normalize_identifier(token)
-
-    def _match_value(session_value: Any, expected: str) -> bool:
-        return bool(expected) and normalize_identifier(session_value) == expected
-
-    def _session_matches(session: Dict[str, Any]) -> bool:
-        play_state = session.get("PlayState") or {}
-        candidates = (
-            _match_value(session.get("UserId"), normalized_user_id),
-            _match_value(session.get("DeviceId"), normalized_device_id),
-            _match_value(session.get("Id"), normalized_session_id),
-            _match_value(session.get("PlaySessionId"), normalized_play_session_id),
-            _match_value(play_state.get("PlaySessionId"), normalized_play_session_id),
-            _match_value(session.get("AccessToken"), normalized_token),
-        )
-        if normalized_user_id:
-            # A trusted userId must never be combined with another user's
-            # device/session identifier. Prefer sessions belonging to it.
-            return candidates[0] and any(candidates[1:])
-        return any(candidates)
-
-    matched_sessions = [session for session in sessions if _session_matches(session)]
-    if normalized_user_id and not matched_sessions:
-        # A valid userId without a matching session is still preferable to
-        # accidentally selecting a different user's device.
+    if not normalized_user_id:
         return None
-    if not matched_sessions:
-        return None
-
-    # 优先使用当前确实处于播放态的会话
-    for session in matched_sessions:
-        if session.get("NowPlayingItem"):
-            return session
-    return matched_sessions[0]
-
+    return _select_session_for_user(
+        sessions,
+        user_id=normalized_user_id,
+        token=token,
+        device_id=device_id,
+        session_id=session_id,
+        play_session_id=play_session_id,
+    )
 
 async def resolve_user_context(
     *,
@@ -267,117 +505,138 @@ async def resolve_user_context(
     auth_header: str = "",
     original_request_uri: str = "",
 ) -> Tuple[str, Optional[Dict[str, Any]], str]:
-    """从 userId / 认证头 / 活跃会话中尽量反查用户上下文"""
+    """Resolve an Emby user from a validated per-request credential.
+
+    ``userId`` in a playback URL and ``UserId`` in an authorization header are
+    client-controlled claims.  They are deliberately never used as the
+    identity source.  A token is authenticated with ``/Users/Me``; if that
+    endpoint is unavailable, the only fallback is an exact
+    ``Sessions.AccessToken`` match.  This prevents a normal user from adding a
+    known whitelist user's ID to a URL and bypassing the VIP-line check.
+
+    The three-item return value is kept for callers: ``(canonical_user_id,
+    matched_session, source_or_failure_reason)``.  An empty user ID means that
+    no authenticated identity was established.
+    """
     auth_info = parse_emby_authorization(auth_header)
     original_query = parse_original_request_uri(original_request_uri)
-    resolved_from = ""
 
-    direct_user_id = normalize_identifier(user_id)
-    auth_user_id = normalize_identifier(auth_info.get("UserId"))
-    original_query_user_id = normalize_identifier(original_query.get("userId"))
-    direct_user_exists = bool(sql_get_emby(direct_user_id)) if direct_user_id else False
-    auth_user_exists = bool(sql_get_emby(auth_user_id)) if auth_user_id else False
-    original_query_user_exists = bool(sql_get_emby(original_query_user_id)) if original_query_user_id else False
+    # Collect untrusted user-ID claims solely for a later consistency check.
+    claimed_user_ids = [
+        _bounded_identifier(user_id, _MAX_USER_ID_LENGTH),
+        _bounded_identifier(auth_info.get("UserId"), _MAX_USER_ID_LENGTH),
+        _bounded_identifier(original_query.get("userId"), _MAX_USER_ID_LENGTH),
+    ]
+    claimed_user_ids = list(dict.fromkeys(value for value in claimed_user_ids if value))
 
-    if direct_user_id and direct_user_exists:
-        resolved_user_id = direct_user_id
-        resolved_from = "query.userId"
-    elif auth_user_id and auth_user_exists:
-        resolved_user_id = auth_user_id
-        resolved_from = "header.X-Emby-Authorization.UserId"
-    elif original_query_user_id and original_query_user_exists:
-        resolved_user_id = original_query_user_id
-        resolved_from = "header.X-Original-URI.query.userId"
-    else:
-        resolved_user_id = auth_user_id or original_query_user_id or direct_user_id
-
-    resolved_device_id = (
-        normalize_identifier(device_id)
-        or normalize_identifier(auth_info.get("DeviceId"))
-        or normalize_identifier(original_query.get("X-Emby-Device-Id"))
-        or normalize_identifier(original_query.get("DeviceId"))
+    resolved_device_id = _bounded_identifier(
+        device_id
+        or auth_info.get("DeviceId")
+        or original_query.get("X-Emby-Device-Id")
+        or original_query.get("DeviceId")
     )
-    resolved_session_id = normalize_identifier(session_id) or normalize_identifier(original_query.get("SessionId"))
-    resolved_play_session_id = (
-        normalize_identifier(play_session_id)
-        or normalize_identifier(original_query.get("PlaySessionId"))
+    resolved_session_id = _bounded_identifier(
+        session_id or original_query.get("SessionId")
     )
-    resolved_token = (
-        normalize_identifier(token)
-        or normalize_identifier(auth_info.get("Token"))
-        or normalize_identifier(original_query.get("X-Emby-Token"))
-        or normalize_identifier(original_query.get("api_key"))
+    resolved_play_session_id = _bounded_identifier(
+        play_session_id or original_query.get("PlaySessionId")
     )
 
-    if resolved_user_id and not any([resolved_device_id, resolved_session_id, resolved_play_session_id]):
-        return resolved_user_id, None, resolved_from
+    # Prefer explicit/header tokens over a query-string api_key.  The latter
+    # is a compatibility fallback because some Emby clients put their user
+    # token in the URL.  Do not let a forged userId claim replace a validated
+    # token.  If two high-confidence token sources disagree, fail closed.
+    token_candidates = [
+        (token, "request.token"),
+        (auth_info.get("Token"), "header.X-Emby-Authorization.Token"),
+        (original_query.get("X-Emby-Token"), "header.X-Original-URI.X-Emby-Token"),
+        (original_query.get("token"), "header.X-Original-URI.token"),
+    ]
+    selected_token = ""
+    selected_token_source = ""
+    seen_tokens = set()
+    for value, source in token_candidates:
+        bounded = _bounded_identifier(value, _MAX_TOKEN_LENGTH)
+        if not bounded:
+            continue
+        seen_tokens.add(bounded)
+        if not selected_token:
+            selected_token = bounded
+            selected_token_source = source
 
-    sessions = await fetch_active_sessions()
-    if not sessions:
-        if resolved_user_id and not resolved_from:
-            resolved_from = "derived.before_session_lookup"
-        return resolved_user_id, None, resolved_from
-
-    matched_session = find_matching_session(
-        sessions,
-        user_id=resolved_user_id,
-        device_id=resolved_device_id,
-        session_id=resolved_session_id,
-        play_session_id=resolved_play_session_id,
-        token=resolved_token,
-    )
-
-    # 如果 query 里的 userId 明显是错的，不要让它阻断 token / device / session 的正确匹配。
-    if (
-        (not matched_session or (direct_user_id and not direct_user_exists))
-        and not direct_user_exists
-        and any([resolved_device_id, resolved_session_id, resolved_play_session_id, resolved_token])
-    ):
-        retry_session = find_matching_session(
-            sessions,
-            user_id="",
-            device_id=resolved_device_id,
-            session_id=resolved_session_id,
-            play_session_id=resolved_play_session_id,
-            token=resolved_token,
+    # ``api_key`` is the legacy URL spelling used by some Emby clients.  It is
+    # considered only when no explicit/header token is available, so an
+    # unrelated query parameter cannot override a real client token.
+    if not selected_token:
+        selected_token = _bounded_identifier(
+            original_query.get("api_key"), _MAX_TOKEN_LENGTH
         )
-        if retry_session:
-            matched_session = retry_session
+        if selected_token:
+            selected_token_source = "header.X-Original-URI.api_key"
 
-    if matched_session and not resolved_user_id:
-        resolved_user_id = normalize_identifier(matched_session.get("UserId"))
-        if normalize_identifier(matched_session.get("AccessToken")) == resolved_token and resolved_token:
-            resolved_from = "emby.sessions.AccessToken"
-        elif normalize_identifier(matched_session.get("DeviceId")) == resolved_device_id and resolved_device_id:
-            resolved_from = "emby.sessions.DeviceId"
-        elif normalize_identifier(matched_session.get("Id")) == resolved_session_id and resolved_session_id:
-            resolved_from = "emby.sessions.Id"
-        elif (
-            normalize_identifier(matched_session.get("PlaySessionId")) == resolved_play_session_id
-            or normalize_identifier((matched_session.get("PlayState") or {}).get("PlaySessionId")) == resolved_play_session_id
-        ) and resolved_play_session_id:
-            resolved_from = "emby.sessions.PlaySessionId"
-        else:
-            resolved_from = "emby.sessions.fallback"
-    elif matched_session and direct_user_id and not direct_user_exists:
-        session_user_id = normalize_identifier(matched_session.get("UserId"))
-        if session_user_id and session_user_id != direct_user_id:
-            resolved_user_id = session_user_id
-            if normalize_identifier(matched_session.get("AccessToken")) == resolved_token and resolved_token:
-                resolved_from = "emby.sessions.AccessToken.override_bad_query_userId"
-            elif normalize_identifier(matched_session.get("DeviceId")) == resolved_device_id and resolved_device_id:
-                resolved_from = "emby.sessions.DeviceId.override_bad_query_userId"
-            elif normalize_identifier(matched_session.get("Id")) == resolved_session_id and resolved_session_id:
-                resolved_from = "emby.sessions.Id.override_bad_query_userId"
-            elif (
-                normalize_identifier(matched_session.get("PlaySessionId")) == resolved_play_session_id
-                or normalize_identifier((matched_session.get("PlayState") or {}).get("PlaySessionId")) == resolved_play_session_id
-            ) and resolved_play_session_id:
-                resolved_from = "emby.sessions.PlaySessionId.override_bad_query_userId"
-            else:
-                resolved_from = "emby.sessions.fallback.override_bad_query_userId"
+    # Conflicting token credentials are a tampering signal.  Do not choose one
+    # arbitrarily: a caller must present one coherent Emby credential.
+    if len(seen_tokens) > 1:
+        return "", None, "conflicting Emby token credentials"
+    if not selected_token:
+        return "", None, "missing Emby token"
 
-    return resolved_user_id, matched_session, resolved_from
+    canonical_user_id, token_error = await _get_user_from_token(selected_token)
+    sessions_ok = False
+    sessions: List[Dict[str, Any]] = []
+    sessions_error = ""
+    matched_session: Optional[Dict[str, Any]] = None
+
+    if canonical_user_id:
+        # Users/Me is authoritative for identity.  Query sessions on a
+        # best-effort basis to locate the session to terminate, and reject an
+        # impossible token/session user mismatch if Emby exposes one.
+        sessions_ok, sessions, sessions_error = await _fetch_active_sessions_result()
+        if sessions_ok:
+            token_session_users = {
+                _bounded_identifier(item.get("UserId"), _MAX_USER_ID_LENGTH)
+                for item in sessions
+                if _bounded_identifier(item.get("AccessToken"), _MAX_TOKEN_LENGTH)
+                == selected_token
+            }
+            token_session_users.discard("")
+            if token_session_users and token_session_users != {canonical_user_id}:
+                return "", None, "token/session user mismatch"
+
+            matched_session = _select_session_for_user(
+                sessions,
+                user_id=canonical_user_id,
+                token=selected_token,
+                device_id=resolved_device_id,
+                session_id=resolved_session_id,
+                play_session_id=resolved_play_session_id,
+            )
+
+        # Every supplied UserId claim must agree with the authenticated
+        # canonical ID.  In particular, never let a known whitelist row in the
+        # local database override this check.
+        if any(claim != canonical_user_id for claim in claimed_user_ids):
+            return "", None, "userId claim does not match authenticated Emby user"
+        return canonical_user_id, matched_session, f"emby.users.me:{selected_token_source}"
+
+    # ``Users/Me`` can be unavailable on older Emby builds or during a
+    # transient error.  The only permitted fallback is an exact token match in
+    # the active Sessions response; device/session IDs alone are insufficient
+    # to establish an identity.
+    sessions_ok, sessions, sessions_error = await _fetch_active_sessions_result()
+    if not sessions_ok:
+        detail = sessions_error or token_error or "Emby identity lookup failed"
+        return "", None, f"emby.identity.lookup_failed:{detail[:240]}"
+
+    fallback_user_id, matched_session, fallback_reason = _session_user_for_token(
+        sessions, selected_token
+    )
+    if not fallback_user_id:
+        detail = fallback_reason or token_error or "invalid Emby token"
+        return "", None, f"emby.identity.invalid:{detail[:240]}"
+    if any(claim != fallback_user_id for claim in claimed_user_ids):
+        return "", None, "userId claim does not match authenticated Emby user"
+    return fallback_user_id, matched_session, fallback_reason
 
 
 async def log_line_violation(
@@ -496,10 +755,10 @@ async def line_report(
     x_original_uri: Optional[str] = Header(default=None, alias="X-Original-URI"),
 ):
     """
-    接收 nginx mirror 转发的线路访问通知。
+    接收网关转发的线路访问通知。
 
-    nginx 在代理播放请求时，通过 mirror 将 userId、line（线路标识）、host（域名）
-    转发到此端点。Bot 据此判断用户是否有权使用该线路。
+    网关在代理播放请求时，将 line（线路标识）、host（域名）和 Emby 客户端
+    凭据转发到此端点。Bot 据此判断用户是否有权使用该线路。
 
     :param userId: Emby 用户 ID（从 nginx $arg_userId 获取）
     :param line: 线路标识名称（在 nginx 中通过 set $line_name 定义）
@@ -508,13 +767,37 @@ async def line_report(
     :param sessionId: Emby 会话 ID（如能获取建议转发）
     :param playSessionId: Emby 播放会话 ID（如能获取建议转发）
     """
-    if not line:
-        return {"status": "ignored", "message": "Missing line"}
+    # Bound all proxy-controlled routing values before normalizing/logging
+    # them. A public endpoint must not do unbounded work on attacker input.
+    line = _bounded_identifier(line, _MAX_USER_ID_LENGTH)
+    host = _bounded_identifier(host, _MAX_IDENTIFIER_LENGTH)
+    userId = _bounded_identifier(userId, _MAX_USER_ID_LENGTH)
+    deviceId = _bounded_identifier(deviceId)
+    sessionId = _bounded_identifier(sessionId)
+    playSessionId = _bounded_identifier(playSessionId)
+    token = _bounded_identifier(token, _MAX_TOKEN_LENGTH)
+    if not line or not host:
+        return JSONResponse(
+            status_code=403,
+            content={"status": "blocked", "message": "Missing line or host"},
+        )
 
-    # 检查是否配置了白名单线路
-    whitelist_line = getattr(config, "emby_whitelist_line", None)
-    if not whitelist_line:
-        return {"status": "skipped", "message": "No whitelist line configured"}
+    # The gateway must identify both a configured host and a known line
+    # label.  Returning 403 here is important because Caddy's forward_auth
+    # treats any 2xx response as authorization; unknown/missing values must
+    # never fall through to the normal-line allow path.
+    line_role = classify_line_request(host, line)
+    if line_role is None:
+        return JSONResponse(
+            status_code=403,
+            content={
+                "status": "blocked",
+                "message": "Unknown or mismatched line/host",
+                "line": line,
+                "host": host,
+            },
+        )
+    using_whitelist = line_role == "vip"
 
     redacted_original_request_uri = redact_request_uri(x_original_uri or "")
     resolved_user_id, matched_session, resolved_from = await resolve_user_context(
@@ -533,28 +816,40 @@ async def line_report(
             f"(line={line}, host={host}, deviceId={deviceId}, sessionId={sessionId}, "
             f"playSessionId={playSessionId}, x_original_uri={redacted_original_request_uri or '<empty>'})"
         )
+        if using_whitelist:
+            # Caddy's forward_auth treats every 2xx response as authorized;
+            # a missing/failed identity therefore has to be non-2xx on VIP.
+            status_code = 401 if resolved_from == "missing Emby token" else 403
+            return JSONResponse(
+                status_code=status_code,
+                content={
+                    "status": "blocked",
+                    "message": "Unable to authenticate Emby user",
+                    "line": line,
+                    "host": host,
+                },
+            )
         return {
             "status": "ignored",
             "message": "Missing user identity",
             "line": line,
             "host": host,
             "deviceId": deviceId,
-            "resolved_from": resolved_from,
         }
 
-    # 构造 server_address 用于线路判断
-    server_address = host or line
+    # host was validated above and is the authoritative gateway endpoint.
+    server_address = host
 
     # 获取用户详情
-    user_details = sql_get_emby(resolved_user_id)
+    # The resolved ID came from Emby token authentication. Look up the local
+    # entitlement by the Emby-ID column only; the general bot lookup also
+    # matches Telegram IDs and names and is unsafe for authorization.
+    user_details = sql_get_emby_by_embyid(resolved_user_id)
 
     # 白名单用户可以用任何线路
     if is_user_whitelisted(user_details):
         LOGGER.debug(f"线路检查通过: 白名单用户 {resolved_user_id} 使用线路 {line}")
         return {"status": "allowed", "message": "Whitelist user"}
-
-    # 检查是否使用白名单线路
-    using_whitelist = is_whitelist_line(server_address)
 
     if using_whitelist:
         # 冷却期内的重复上报直接忽略（播放器不响应终止会话时会持续上报）
@@ -587,7 +882,7 @@ async def line_report(
         session = matched_session
         if not session:
             sessions = await fetch_active_sessions()
-            session = find_matching_session(
+            session = _select_session_for_user(
                 sessions,
                 user_id=resolved_user_id,
                 device_id=deviceId,

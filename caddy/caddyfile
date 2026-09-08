@@ -11,6 +11,14 @@
 			format console
 		}
 
+		# DuShengCDN does not have a stable source IP. Require its private
+		# shared origin token before accepting any request on public 18080.
+		# The value is injected at runtime; never commit it.
+		@origin_invalid {
+			not header X-DuSheng-Origin-Token {$DUSHENGCDN_ORIGIN_TOKEN}
+		}
+		@emby_response_no_store path /emby/*
+
 		# 播放线路审查：
 		# Emby Web 常见上报路径是 /emby/Sessions/Playing/Progress。
 		# 这里只要命中 /emby/Sessions/Playing 开头的请求，都会先走 line_report，再反代到 Emby。
@@ -19,7 +27,7 @@
 		# A Playing/Progress report can arrive after the media connection has
 		# already been opened. Audit the actual media endpoints as well so a
 		# denied VIP request cannot keep receiving video/audio or HLS segments.
-		@line_audit_media path_regexp line_audit_media (?i)^/emby/(Videos|Audio)/[^/]+/(stream|universal|hls|master\.m3u8|original)(/|\.|$)
+		@line_audit_media path_regexp line_audit_media (?i)^(?:/emby/(?:Videos|Audio)/[^/]+/(?:stream|universal|hls[0-9]*|master\.m3u8|original)(?:/|\.|$)|/emby/(?:Items/[^/]+/)?PlaybackInfo(?:/|$)|/emby/MediaSegments(?:/|$)|/emby/LiveTv/(?:LiveStreams|LiveStreamFiles)(?:/|$))
 		@line_audit_download path_regexp line_audit_download (?i)^/emby/Items/[^/]+/(Download|File)(/|$)
 
 		# 播放列表创建：直接重定向到 bot 的 ban_playlist 接口。
@@ -53,6 +61,11 @@
 		}
 
 		route {
+			handle @origin_invalid {
+				respond "Forbidden" 403
+			}
+			header @emby_response_no_store Cache-Control "private, no-store"
+
 			handle @playlist_create {
 				redir http://{args[4]}/emby/ban_playlist?eid={query.userId} 302
 			}
@@ -84,11 +97,17 @@
 					# this subrequest; Uvicorn accepts only the real socket peer.
 					header_up -X-Forwarded-For
 					header_up -X-Real-IP
+					header_up -X-DuSheng-Origin-Token
+					header_up -X-DuSheng-Line-Token
+					header_up X-DuSheng-Line-Token {$DUSHENGCDN_ORIGIN_TOKEN}
 					header_up X-Original-URI {uri}
 					header_up X-Emby-Authorization {header.X-Emby-Authorization}
 					header_up X-Emby-Token {header.X-Emby-Token}
 				}
-				reverse_proxy {args[3]}
+				reverse_proxy {args[3]} {
+					header_up -X-DuSheng-Origin-Token
+					header_up -X-DuSheng-Line-Token
+				}
 			}
 
 			handle @line_audit_media {
@@ -98,11 +117,17 @@
 					uri /emby/line_report?line={args[1]}&host={args[0]}
 					header_up -X-Forwarded-For
 					header_up -X-Real-IP
+					header_up -X-DuSheng-Origin-Token
+					header_up -X-DuSheng-Line-Token
+					header_up X-DuSheng-Line-Token {$DUSHENGCDN_ORIGIN_TOKEN}
 					header_up X-Original-URI {uri}
 					header_up X-Emby-Authorization {header.X-Emby-Authorization}
 					header_up X-Emby-Token {header.X-Emby-Token}
 				}
-				reverse_proxy {args[3]}
+				reverse_proxy {args[3]} {
+					header_up -X-DuSheng-Origin-Token
+					header_up -X-DuSheng-Line-Token
+				}
 			}
 
 			handle @line_audit_download {
@@ -111,16 +136,25 @@
 					uri /emby/line_report?line={args[1]}&host={args[0]}
 					header_up -X-Forwarded-For
 					header_up -X-Real-IP
+					header_up -X-DuSheng-Origin-Token
+					header_up -X-DuSheng-Line-Token
+					header_up X-DuSheng-Line-Token {$DUSHENGCDN_ORIGIN_TOKEN}
 					header_up X-Original-URI {uri}
 					header_up X-Emby-Authorization {header.X-Emby-Authorization}
 					header_up X-Emby-Token {header.X-Emby-Token}
 				}
-				reverse_proxy {args[3]}
+				reverse_proxy {args[3]} {
+					header_up -X-DuSheng-Origin-Token
+					header_up -X-DuSheng-Line-Token
+				}
 			}
 
 			# 其余请求正常反代给 Emby。
 			handle {
-				reverse_proxy {args[3]}
+				reverse_proxy {args[3]} {
+					header_up -X-DuSheng-Origin-Token
+					header_up -X-DuSheng-Line-Token
+				}
 			}
 		}
 	}

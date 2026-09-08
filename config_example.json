@@ -123,10 +123,11 @@
   },
   "api": {
     "status": true,
-    "http_url": "0.0.0.0",
+    "http_url": "127.0.0.1",
     "http_port": 8838,
     "allow_origins": [
       "*"
-    ]
+    ],
+    "line_report_token": "CHANGE_ME"
   }
 }
