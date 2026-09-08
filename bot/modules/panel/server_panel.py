@@ -41,9 +41,9 @@ async def server(_, call):
     pwd = '空' if not data.pwd else data.pwd
     line = ''
     if data.lv == 'b':
-        line = f'{emby_line}'
+        line = f'无优化线路: {emby_line}'
     elif data.lv == 'a':
-        line = f'{emby_line}'
+        line = f'无优化线路: {emby_line}'
         if emby_whitelist_line and is_subscription_active(data.ex):
             line += f'\n白名单线路: {emby_whitelist_line}'
     else:
