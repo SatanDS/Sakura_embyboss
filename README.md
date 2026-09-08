@@ -54,7 +54,7 @@ Emby 客戶端 -> DuShengCDN/NPM (HTTPS，保留 Host/認證標頭)
 - 私密群組不需要把 @RawDataBot 拉進群；若禁止轉發，可暫時加入 @getidsbot 後移除。
 - 超級群 ID 通常是 -100...，例如 -1001234567890。
 
-把自己的數字 ID 填到 owner，群組 ID 填到 group 陣列。main_group、chanel 填公開群/頻道 username（不要加 @）；私密群不要把 -100... 當 username。
+把自己的數字 ID 填到 owner，群組 ID 填到 group 陣列。main_group、chanel 可填公開群/頻道 username（不要加 @），也可填完整 Telegram 邀請網址（例如 https://t.me/+AbCd...）；私密群不要把 -100... 當 username，-100... 只填到 group 陣列。
 
 ## 3. Emby API key
 

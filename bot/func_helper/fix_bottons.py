@@ -42,12 +42,32 @@ def judge_start_ikb(is_admin: bool, account: bool) -> InlineKeyboardMarkup:
     return keyword
 
 
+def _telegram_url(target: str) -> str:
+    """Return a Telegram URL for a username or an invite link.
+
+    ``main_group`` historically accepted a bare public username.  Keeping the
+    normalisation here also lets installations use a private-group invite URL
+    (for example ``https://t.me/+AbCd...``) without producing a nested URL.
+    """
+    value = str(target or '').strip()
+    if value.startswith(('https://', 'http://', 'tg://')):
+        return value
+    if value.startswith('//'):
+        return f'https:{value}'
+    if value.startswith('t.me/'):
+        return f'https://{value}'
+    return f'https://t.me/{value.lstrip("@")}'
+
+
 # un_group_answer
-group_f = ikb([[('点击我(●ˇ∀ˇ●)', f't.me/{bot_name}', 'url')]])
+group_f = ikb([[('点击我(●ˇ∀ˇ●)', _telegram_url(bot_name), 'url')]])
 # un in group
-judge_group_ikb = ikb([[('🌟 频道入口 ', f't.me/{chanel}', 'url'),
-                        ('💫 群组入口', f't.me/{main_group}', 'url')],
+judge_group_ikb = ikb([[('🌟 频道入口 ', _telegram_url(chanel), 'url'),
+                        ('💫 群组入口', _telegram_url(main_group), 'url')],
                        [('❌ 关闭消息', 'closeit')]])
+# Registration notice: after reading the account rules, users can join the
+# group managed by the bot without leaving the private chat.
+registration_notice_ikb = ikb([[('💫 加入群组', _telegram_url(main_group), 'url')]])
 
 """members ↓"""
 

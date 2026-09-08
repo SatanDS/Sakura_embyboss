@@ -19,6 +19,7 @@ if not REAL_MODE:
     os.environ.setdefault("SAKURA_RUNNING_MIGRATIONS", "1")
 
 from bot.func_helper import register_queue as rq
+from bot.func_helper.fix_bottons import _telegram_url
 
 if REAL_MODE:
     from bot.func_helper.emby import emby
@@ -31,6 +32,12 @@ class FakeMessage:
 
 
 class RegisterQueueTests(unittest.IsolatedAsyncioTestCase):
+    def test_telegram_url_normalizes_usernames_and_preserves_invites(self):
+        self.assertEqual(_telegram_url("Aaaaa_su"), "https://t.me/Aaaaa_su")
+        self.assertEqual(_telegram_url("@Aaaaa_su"), "https://t.me/Aaaaa_su")
+        self.assertEqual(_telegram_url("t.me/Aaaaa_su"), "https://t.me/Aaaaa_su")
+        self.assertEqual(_telegram_url("https://t.me/+AbCd123"), "https://t.me/+AbCd123")
+
     async def asyncSetUp(self):
         self.old_open = {
             "all_user": rq._open.all_user,
@@ -212,6 +219,15 @@ class RegisterQueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.manager._active_jobs, 0)
         self.assertFalse(await self.manager.is_user_busy(user_id))
         self.assertTrue(any("创建用户成功" in item[1] for item in message.history))
+        notice_messages = [
+            item for item in message.history
+            if item[0] == "send" and "用户须知" in item[1]
+        ]
+        self.assertEqual(len(notice_messages), 1)
+        self.assertIsNotNone(notice_messages[0][2])
+        notice_button = notice_messages[0][2].inline_keyboard[0][0]
+        self.assertEqual(notice_button.text, "💫 加入群组")
+        self.assertTrue(notice_button.url.endswith(rq.config.main_group))
 
     async def test_worker_rolls_back_remote_account_when_state_changes_after_create(self):
         user_id = 3002
@@ -254,6 +270,7 @@ class RegisterQueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.manager._active_jobs, 0)
         self.assertFalse(await self.manager.is_user_busy(user_id))
         self.assertTrue(any("账户状态已变化" in item[1] for item in message.history))
+        self.assertFalse(any("用户须知" in item[1] for item in message.history))
 
 
 @unittest.skipUnless(REAL_MODE, "Set REGISTER_QUEUE_REAL=1 to run the real Emby registration integration test.")
