@@ -147,7 +147,7 @@ nano config.json
   "emby_api": "<Emby API key>",
   "emby_url": "http://127.0.0.1:8096",
   "emby_line": "https://www.dusheng.xyz",
-  "emby_whitelist_line": "https://www.dusheng.lol",
+  "emby_whitelist_line": "https://www.xxxx.xxx",
   "db_host": "127.0.0.1",
   "db_user": "dusheng",
   "db_pwd": "<與 .env 的 MYSQL_PASSWORD 相同>",
@@ -253,7 +253,7 @@ nano caddy/caddyfile
 刪除最後的 localhost 測試 import，換成：
 
 ~~~caddyfile
-import emby_local_config www.dusheng.lol vip 18080 127.0.0.1:8096 127.0.0.1:8838
+import emby_local_config www.xxxx.xxx vip 18080 127.0.0.1:8096 127.0.0.1:8838
 import emby_local_config www.dusheng.xyz normal 18080 127.0.0.1:8096 127.0.0.1:8838
 ~~~
 
@@ -270,7 +270,7 @@ bot_upstream   Bot API，例如 127.0.0.1:8838
 VIP host 必須和 config.json 的 emby_whitelist_line 相同；程式會忽略協定、尾斜線及大小寫：
 
 ~~~json
-"emby_whitelist_line": "https://www.dusheng.lol"
+"emby_whitelist_line": "https://www.xxxx.xxx"
 ~~~
 
 ### 9.2 驗證與啟動 Caddy
@@ -308,7 +308,7 @@ ss -lntp | grep ':18080'
 
 ~~~bash
 curl -sS -o /dev/null -w 'VIP gateway => HTTP %{http_code}\n' \
-  -H 'Host: www.dusheng.lol' \
+  -H 'Host: www.xxxx.xxx' \
   http://127.0.0.1:18080/emby/System/Info/Public
 
 curl -sS -o /dev/null -w 'Normal gateway => HTTP %{http_code}\n' \
@@ -324,21 +324,21 @@ docker restart emby-line-gateway
 
 ## 10. DuShengCDN、NPM、DNS 與防火牆
 
-VIP 網域使用自己的 DuShengCDN/權威 DNS。CDN 站點設定：
+VIP 網域使用自己的CDN时比如 DuShengCDN/自建權威 DNS。CDN 站點設定：
 
 1. DNS 指向 DuShengCDN 入口/邊緣位址。
 2. CDN 源站填伺服器 IP，源站 port 填 18080。
 3. 源站協定使用 HTTP（TLS 在 CDN/NPM 終止）。
-4. **保留原始 Host www.dusheng.lol**，不可改成源站 IP，否則 Caddy 無法匹配 VIP。
+4. **保留原始 Host www.xxxx.xxx **，不可改成源站 IP，否則 Caddy 無法匹配 VIP。
 5. 轉發 X-Emby-Authorization、X-Emby-Token、Authorization、Range，啟用 WebSocket/長連線；不要快取登入、播放和 HLS。
-6. 檢查 CDN 地區防火牆；CDN 自己回的 403 不會上報 Bot。
+6. 檢查 CDN 地區防火牆源站防火墙；CDN 和UFW 自己回的 403 不會上報 Bot。
 
 如果 NPM 與 Caddy 在同一台主機，NPM 容器內不要填 127.0.0.1:18080；要填可達的主機 IP/host gateway 和 18080。NPM 公開 HTTPS 再轉到 Caddy 的 HTTP 18080。
 
 ~~~bash
-dig +short www.dusheng.lol
+dig +short www.xxxx.xxx
 curl -sk -o /dev/null -w 'VIP public => HTTP %{http_code}\n' \
-  https://www.dusheng.lol/emby/System/Info/Public
+  https://www.xxxx.xxx/emby/System/Info/Public
 ~~~
 
 外部 CDN/NPM 需要連 Caddy 時才開 18080；8838 通常不要開公網：
@@ -364,7 +364,7 @@ docker compose logs --tail=0 -f embyboss
 普通用戶從 VIP 播放時，預期看到：
 
 ~~~text
-线路权限违规(nginx): 用户 ... 通过 www.dusheng.lol 使用白名单线路
+线路权限违规(nginx): 用户 ... 通过 www.xxxx.xxx 使用白名单线路
 成功终止会话: ...
 GET /emby/line_report?... 403 Forbidden
 ~~~
@@ -381,7 +381,7 @@ docker compose logs --since=5m embyboss | \
 ~~~bash
 curl -i -G 'http://127.0.0.1:8838/emby/line_report' \
   --data-urlencode 'line=vip' \
-  --data-urlencode 'host=www.dusheng.lol' \
+  --data-urlencode 'host=www.xxxx.xxx' \
   --data-urlencode 'userId=<EMBY_USER_ID>'
 ~~~
 
