@@ -58,24 +58,32 @@ async def renew_user(_, msg):
     start_from = ex_base if (ex_base and ex_base > Now) else Now
     ex_new = start_from + timedelta(days=days)
     lv = e.lv
-    # 无脑 允许播放
+    disable = None
     if ex_new > Now:
         lv = 'a' if e.lv == 'a' else 'b'
-        await emby.emby_change_policy(emby_id=e.embyid, disable=False)
+        disable = False
 
-    # 没有白名单就寄
-    elif ex_new < Now:
-        if e.lv == 'a':
-            pass
-        else:
-            lv = 'c'
-            await emby.emby_change_policy(emby_id=e.embyid, disable=True)
+    elif ex_new < Now and e.lv != 'a':
+        lv = 'c'
+        disable = True
+
+    if disable is not None:
+        try:
+            changed = await emby.emby_change_policy(emby_id=e.embyid, disable=disable)
+        except Exception as exc:
+            LOGGER.error(f'【admin】[renew]：Emby策略更新异常 {e.embyid}: {exc}')
+            changed = False
+        if not changed:
+            return await reply.edit('❌ Emby账户状态更新失败，未修改到期时间，请稍后重试。')
 
     if stats == 1:
         expired = 1 if lv == 'c' else 0
-        sql_update_emby2(Emby2.embyid == e.embyid, ex=ex_new, expired=expired)
+        updated = sql_update_emby2(Emby2.embyid == e.embyid, ex=ex_new, expired=expired, lv=lv)
     else:
-        sql_update_emby(Emby.tg == e.tg, ex=ex_new, lv=lv)
+        updated = sql_update_emby(Emby.tg == e.tg, ex=ex_new, lv=lv)
+    if not updated:
+        LOGGER.error(f'【admin】[renew]：数据库更新失败 {e.embyid}')
+        return await reply.edit('❌ 到期时间写入失败，请联系管理员核对数据库及Emby账户状态。')
 
     i = await reply.edit(
         f'🍒 __ {gm_name} 已调整 emby 用户 {name} 到期时间 {days} 天 (以当前时间计)__'

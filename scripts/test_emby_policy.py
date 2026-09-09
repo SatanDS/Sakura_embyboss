@@ -4,6 +4,7 @@ import sys
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 ROOT = Path(__file__).resolve().parents[1]
 BOT_DIR = ROOT / "bot"
@@ -101,12 +102,15 @@ for _name in list(sys.modules):
 
 
 class EmbyPolicyTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.service = object.__new__(Embyservice)
+        self.service.__init__("http://emby.local", "token")
+
     async def asyncTearDown(self):
-        service = Embyservice("http://emby.local", "token")
-        await service.close()
+        await self.service.close()
 
     async def test_change_policy_preserves_existing_folder_restrictions_when_enabling_user(self):
-        service = Embyservice("http://emby.local", "token")
+        service = self.service
         posted_policies = []
         existing_policy = {
             "IsAdministrator": False,
@@ -135,6 +139,64 @@ class EmbyPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(posted_policy["EnableAllFolders"])
         self.assertEqual(posted_policy["EnabledFolders"], ["movies-guid", "shows-guid"])
         self.assertEqual(posted_policy["BlockedMediaFolders"], ["播放列表", "额外库"])
+
+    async def test_failed_policy_read_never_writes_folder_permissions(self):
+        for operation in ("hide_folders_by_names", "show_folders_by_names"):
+            with self.subTest(operation=operation):
+                self.service.user = AsyncMock(return_value=(False, {}))
+                self.service.get_folder_ids_by_names = AsyncMock(return_value=["vip"])
+                self.service.update_user_enabled_folder = AsyncMock(return_value=True)
+                result = await getattr(self.service, operation)("user-1", ["VIP"])
+                self.assertFalse(result)
+                self.service.update_user_enabled_folder.assert_not_awaited()
+
+    async def test_failed_library_read_does_not_clear_all_enabled_folders(self):
+        self.service.user = AsyncMock(return_value=(True, {"Policy": {
+            "EnableAllFolders": True, "BlockedMediaFolders": [],
+        }}))
+        self.service.get_emby_libs = AsyncMock(return_value=None)
+        self.service.get_folder_ids_by_names = AsyncMock(return_value=["vip"])
+        self.service.update_user_enabled_folder = AsyncMock(return_value=True)
+        self.assertFalse(await self.service.hide_folders_by_names("user-1", ["VIP"]))
+        self.service.update_user_enabled_folder.assert_not_awaited()
+
+    async def test_failed_target_lookup_is_not_reported_as_success(self):
+        self.service.user = AsyncMock(return_value=(True, {"Policy": {
+            "EnableAllFolders": False, "EnabledFolders": ["movies", "vip"],
+            "BlockedMediaFolders": [],
+        }}))
+        self.service._request = AsyncMock(return_value=EmbyApiResult(False, error="offline"))
+        self.service.update_user_enabled_folder = AsyncMock(return_value=True)
+        self.assertFalse(await self.service.hide_folders_by_names("user-1", ["VIP"]))
+        self.service.update_user_enabled_folder.assert_not_awaited()
+
+    async def test_hiding_one_library_preserves_the_others(self):
+        self.service.user = AsyncMock(return_value=(True, {"Policy": {
+            "EnableAllFolders": False, "EnabledFolders": ["movies", "vip"],
+            "BlockedMediaFolders": ["Private"],
+        }}))
+        self.service.get_folder_ids_by_names = AsyncMock(return_value=["vip"])
+        self.service.update_user_enabled_folder = AsyncMock(return_value=True)
+        self.assertTrue(await self.service.hide_folders_by_names("user-1", ["VIP"]))
+        update = self.service.update_user_enabled_folder.await_args.kwargs
+        self.assertEqual(update["enabled_folder_ids"], ["movies"])
+        self.assertEqual(set(update["blocked_media_folders"]), {"Private", "VIP"})
+        self.assertFalse(update["enable_all_folders"])
+
+    async def test_showing_one_library_keeps_unrelated_blocks(self):
+        self.service.user = AsyncMock(return_value=(True, {"Policy": {
+            "EnableAllFolders": True, "BlockedMediaFolders": ["VIP", "Private"],
+        }}))
+        self.service.get_emby_libs = AsyncMock(return_value={"movies": "Movies", "vip": "VIP"})
+        self.service.update_user_enabled_folder = AsyncMock(return_value=True)
+        self.assertTrue(await self.service.show_folders_by_names("user-1", ["VIP"]))
+        update = self.service.update_user_enabled_folder.await_args.kwargs
+        self.assertEqual(update["blocked_media_folders"], ["Private"])
+
+    async def test_malformed_policy_does_not_write_permissions(self):
+        self.service._request = AsyncMock(return_value=EmbyApiResult(True, {}))
+        self.assertFalse(await self.service.update_user_enabled_folder("user-1", []))
+        self.assertEqual(self.service._request.await_count, 1)
 
 
 if __name__ == "__main__":

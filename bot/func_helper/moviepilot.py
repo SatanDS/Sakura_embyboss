@@ -1,4 +1,3 @@
-import requests
 import json
 import re
 from bot import LOGGER, moviepilot, save_config
@@ -119,24 +118,33 @@ async def login():
     url = f"{mp.url.rstrip('/')}/api/v1/login/access-token"
     headers = {'Content-Type': 'application/x-www-form-urlencoded'}
     try:
-        response = requests.post(
-            url,
-            data={'username': mp.username, 'password': mp.password},
-            headers=headers,
-            timeout=TIMEOUT,
-        )
-        result = response.json()
-    except (requests.RequestException, ValueError) as exc:
-        LOGGER.error(f"MP 登录失败：{exc}")
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=TIMEOUT)) as session:
+            async with session.post(
+                url,
+                data={'username': mp.username, 'password': mp.password},
+                headers=headers,
+            ) as response:
+                if response.status != 200:
+                    LOGGER.error(f"MP 登录失败：HTTP {response.status}")
+                    return False
+                result = await response.json()
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+        LOGGER.error(f"MP 登录失败：{type(exc).__name__}")
         return False
-    if 'access_token' in result:
+    if (
+        isinstance(result, dict)
+        and isinstance(result.get('access_token'), str)
+        and result['access_token'].strip()
+        and isinstance(result.get('token_type'), str)
+        and result['token_type'].strip()
+    ):
         mp.access_token = result['token_type'] + ' ' + result['access_token']
         moviepilot.access_token = mp.access_token # 保存到config
         save_config()
         LOGGER.info("MP 登录成功, token已保存")
         return True
     else:
-        LOGGER.error(f"MP 登录失败: {result}")
+        LOGGER.error("MP 登录失败：响应缺少有效的 access_token/token_type")
         return False
 
 

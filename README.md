@@ -189,7 +189,9 @@ invite_lv：
   "http_url": "127.0.0.1",
   "http_port": 8838,
   "allow_origins": ["*"],
-  "line_report_token": "<與 Caddy/CDN 相同的 64 位 hex 隨機密鑰>"
+  "line_report_token": "<與 Caddy/CDN 相同的 64 位 hex 隨機密鑰>",
+  "api_key": "<另一組獨立的 64 位 hex 隨機密鑰>",
+  "allow_legacy_bot_token": false
 },
 "ranks": {
   "logo": "DuSheng",
@@ -232,6 +234,36 @@ docker compose logs --tail=200 embyboss
 ~~~
 
 正常日誌會有資料庫遷移完成、排程建立和 Uvicorn 8838 啟動。不要用 GitHub 範例檔覆蓋正式 config.json。
+
+### 8.1 API 與播放列表保護升級
+
+一般整合 API（`/user/*`、`/auth/login`、`/emby/webhook/*`）現在要求 `X-API-Key` 請求頭。請另行產生 32-byte 隨機密鑰填入 `api.api_key`，更新所有呼叫方與 Emby Webhook 的自訂請求頭；不可重用 Telegram Bot Token 或 `api.line_report_token`。未設定新密鑰時，一般 API 不接受存取；只使用線路檢查的部署可以保留 `api_key: null`。
+
+舊版 `?token=<Bot Token>` 預設停用。無法立即更新自訂標頭的整合，可暫時明確設定 `api.allow_legacy_bot_token: true`，遷移完成後關閉；錯誤的 `X-API-Key` 不會降級改用 URL Token。Uvicorn 存取日誌與 Caddy 請求/debug 日誌已停用，Nginx 範例存取日誌省略查詢參數。啟用暫時相容模式時，前置代理也不得記錄帶 Token 的完整 URL。原有日誌可能仍含舊 Bot Token，應限制存取並在完成遷移後輪換 Bot Token。
+
+`/auth/login` 驗證 Emby 帳號密碼，只回傳帳號 ID 與名稱，不簽發使用者 Session Token；它是受 API key 保護的整合介面。失敗現在使用正確的 HTTP 400/401/404/500 狀態。
+
+播放列表保護必須同時升級 Bot 與代理模板。Caddy 現在於伺服器內部呼叫 `/emby/ban_playlist`，不再把用戶重新導向 localhost。Caddy/Nginx 會傳遞共享密鑰、原始 URI/方法與 Emby 用戶憑據；Bot 透過 Emby 驗證身份，任何偽造的 userId 都不能指定封禁對象。有效違規操作封禁後仍回傳 HTTP 403，表示原始操作已被阻擋；通知失敗不會撤銷已保存的封禁狀態。
+
+Nginx 使用者需在 `/etc/nginx/emby-line-secret.conf` 設定 `set $dusheng_line_token "<同一個 line_report_token>";`、將檔案權限設為 600，並取消模板內對應 `include` 的註解。未設定密鑰時，播放列表與線路上報均拒絕處理。Nginx 的 mirror 線路上報仍是非同步，若需要在媒體傳輸前阻擋 VIP 線路請求，使用下方 Caddy `forward_auth` 模板。
+
+### 8.2 凍結期與分區授權升級
+
+啟動時的 Alembic 遷移 `20260909_04` 會新增可為空的 `emby.disabled_at`，不刪除既有資料。上線前先備份資料庫；新封禁帳戶從實際禁用時間起計算 `freeze_days`。舊封禁帳戶若沒有可靠的禁用時間，保持 `NULL` 並跳過自動刪除，需由管理員核對，不能把註冊時間或訂閱到期時間當成禁用時間。
+
+沒有觀看記錄的新帳戶從註冊時間起計算活躍寬限期。分區撤權失敗會保留待處理記錄並重試；分區激活若已保存授權但 Emby 更新失敗，同一用戶可用同一碼重試，不會再次延長期限。請維持單一 Bot 執行個體，進程內的用戶鎖不能代替多實例協調。
+
+`.dockerignore` 已排除正式配置、環境密鑰、Session、資料庫、備份和本機虛擬環境；既有鏡像不會因此自動移除舊檔案，升級時需要重新構建。Git 中繼資料保留供原有容器內更新流程使用。
+
+### 8.3 離線回歸驗證
+
+在已安裝 `requirements.txt` 的 Python 3.10 環境執行：
+
+~~~bash
+python -B scripts/run_offline_tests.py
+~~~
+
+此入口使用範例配置、停用自動遷移並阻止外部網路連線，不讀寫正式 `config.json`。交易與遷移測試使用臨時 SQLite；真實 Emby 註冊測試不執行。Caddy/Nginx 驗證需另外指定 `CADDY_BIN` 與 `NGINX_BIN`，再獨立執行 `python -B scripts/test_proxy_templates.py`，不要透過禁止連線的離線入口執行代理測試。
 
 ## 9. Caddy 線路檢測
 
@@ -695,19 +727,21 @@ docker compose logs --since=2m embyboss
 
 If the database is not configured or cannot be read, VIP requests remain non-2xx and are blocked. Do not substitute the Bot API key or trust `userId`, `DeviceId`, or `SessionId` alone.
 
-### 16.2 Current SenPlayer/Hills deployment and upgrade runbook
+### 16.2 SenPlayer/Hills 現行部署與升級指南
 
-This runbook supersedes older `Users/Me`-only instructions in this section. Emby 4.9.5.0 treats `/emby/Users/Me` as a GUID and returns `Unrecognized Guid format`; never replace it with `/emby/Users/{client_user_id}`, because a client can forge that path ID. The Bot authenticates the playback token from Emby's local SQLite data and uses only the resulting canonical Emby user ID for VIP entitlement checks.
+本節名稱沿用最初排查時使用的客戶端。身份驗證與 VIP 權限檢查依據通訊協定，不針對客戶端名稱或 User-Agent 設定特殊規則；相同的令牌與請求頭規則也適用於其他 Emby 相容應用程式。協定測試通過，不代表已逐一實測所有客戶端和裝置。
 
-#### One-time setup
+本指南取代本節先前僅依賴 `Users/Me` 的操作說明。Emby 4.9.5.0 會將 `/emby/Users/Me` 中的 `Me` 當成 GUID，並回傳 `Unrecognized Guid format`。不要改用 `/emby/Users/{client_user_id}` 驗證身份，因為客戶端可以偽造路徑中的使用者 ID。Bot 會從 Emby 本機的 SQLite 資料驗證播放令牌，再以驗證得到的真實 Emby 使用者 ID 檢查 VIP 權限。
 
-1. Find the host directory mounted as Emby's `/config` (the output contains paths only):
+#### 首次設定
+
+1. 找出掛載至 Emby `/config` 的主機目錄，以下指令只輸出路徑：
 
 ~~~bash
 docker inspect embyserver --format '{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}'
 ~~~
 
-2. Back up the files before editing:
+2. 修改前先備份配置檔案：
 
 ~~~bash
 cd /opt/Tgbot
@@ -716,7 +750,7 @@ cp -a config.json "config.json.bak.$backup_stamp"
 cp -a docker-compose.yml "docker-compose.yml.bak.$backup_stamp"
 ~~~
 
-3. Add the Emby config directory to the `embyboss` service as a read-only mount. For the common layout:
+3. 將 Emby 配置目錄以唯讀方式掛載至 `embyboss` 服務。常見目錄配置如下：
 
 ~~~yaml
 services:
@@ -725,17 +759,17 @@ services:
       - /opt/embyserver/config:/emby-auth:ro
 ~~~
 
-Mount the whole directory, not only `authentication.db`, so SQLite can see `-wal` files and `users.db`.
+請掛載整個目錄，不要只掛載 `authentication.db`，確保 SQLite 能讀取 `-wal` 檔案和 `users.db`。
 
-4. Add this **top-level** key to `config.json`, alongside `emby_url`, `emby_line`, and `emby_whitelist_line` (not inside `api` or `moviepilot`):
+4. 在 `config.json` 的**最外層**加入以下配置項，與 `emby_url`、`emby_line`、`emby_whitelist_line` 並列，不要放進 `api` 或 `moviepilot`：
 
 ~~~json
 "emby_auth_db_path": "/emby-auth/data/authentication.db"
 ~~~
 
-If the mounted directory is already Emby's `data` directory, use `/emby-auth/authentication.db`. Never commit a real token, password, CDN shared key, or authentication database.
+如果掛載的已經是 Emby 的 `data` 目錄，請改用 `/emby-auth/authentication.db`。不要將真實令牌、密碼、CDN 共享密鑰或認證資料庫提交至 Git。
 
-5. Each Caddy `forward_auth` block must contain the following forwarding rules:
+5. 每個 Caddy `forward_auth` 區塊都必須包含以下請求頭轉發規則：
 
 ~~~caddyfile
 header_up X-DuSheng-Line-Token {$DUSHENGCDN_ORIGIN_TOKEN}
@@ -744,9 +778,9 @@ header_up X-Emby-Token {header.X-Emby-Token}
 header_up Authorization {header.Authorization}
 ~~~
 
-Do not put `header_up -X-DuSheng-Line-Token` in the same `forward_auth` block after setting the token; that removes the internal token and causes `Invalid internal token`. The `reverse_proxy` to Emby should remove the internal line token before it reaches Emby.
+不要在設定令牌的同一個 `forward_auth` 區塊中加入 `header_up -X-DuSheng-Line-Token`，無論放在哪個位置都不行；Caddy 執行請求頭刪除時可能移除剛設定的令牌，造成 `Invalid internal token`。但轉發至 Emby 的 `reverse_proxy` 應刪除這個內部線路令牌，避免傳給 Emby。請保留目前模板的媒體路徑比對規則：Emby 接受有或沒有 `/emby` 前綴的路徑，也支援不同大小寫、任意影片串流檔名、Range 分段請求、HLS、音訊、下載和直播。
 
-6. Validate and reload Caddy after changing its file:
+6. 修改 Caddy 配置後，先驗證再重新載入：
 
 ~~~bash
 docker run --rm \
@@ -757,7 +791,7 @@ docker run --rm \
 docker restart emby-line-gateway
 ~~~
 
-7. Pull and rebuild the Bot. The current code supports both `Tokens` and migrated `Tokens_2` tables. When `Tokens_2.UserId` is an internal number, it maps that number through `users.db/LocalUsersv2` to the public GUID:
+7. 拉取程式碼並重新構建 Bot。目前同時支援 `Tokens` 和遷移後的 `Tokens_2` 資料表。當 `Tokens_2.UserId` 是內部數字編號時，會透過 `users.db/LocalUsersv2` 將它轉換成對外使用的 GUID：
 
 ~~~bash
 cd /opt/Tgbot
@@ -770,32 +804,42 @@ docker compose up -d --force-recreate embyboss
 docker exec embyboss test -r /emby-auth/data/authentication.db && echo 'AUTH DB MOUNT OK'
 ~~~
 
-8. Let a VIP account play through Hills or SenPlayer. A successful check contains `线路检查通过`/`Whitelist user` and `HTTP 200 OK`:
+8. 使用 VIP 帳戶透過 Hills、SenPlayer 或其他相容客戶端實際播放。成功檢查的訊息包含 `线路检查通过`／`Whitelist user`，播放請求回傳 `HTTP 200 OK`：
 
 ~~~bash
 docker compose logs --since=2m --no-color embyboss | \
   grep -Ei 'line_report|reason=|Unable to authenticate|线路|403|401'
 ~~~
 
-#### Emby upgrade or restart
+#### HLS 分片與正向驗證
 
-A normal Emby restart does not randomly rename SQLite tables. `Tokens_2` usually comes from a database migration or table rebuild and remains stable after restart. A future Emby upgrade can still change table names, columns, database paths, or the internal user-ID representation.
+部分 Emby 版本產生的 HLS 分片網址只包含 `PlaySessionId`，不再附帶播放令牌。Bot 只會在有效 VIP 的主播放列表或子播放列表通過驗證後，暫存該播放 ID 與已驗證使用者、令牌、線路主機及媒體 ID 的關聯。後續無令牌分片必須符合這個關聯，且每次都重新驗證令牌與 VIP 有效期；不能只憑任意 `PlaySessionId` 放行。
 
-Before upgrading, back up the complete Emby config directory, including `authentication.db`, `authentication.db-wal`, `users.db`, and `users.db-wal` when present. After an upgrade, check the table names without printing data:
+此關聯只保存在單一 Bot 程序的記憶體中，最多保留 2048 筆，閒置一小時後失效，正常分片請求會延長閒置期限。Bot 重新啟動、關聯被淘汰或長時間暫停後，客戶端需要重新發起播放，讓帶令牌的播放列表請求建立關聯。不要在多個 Bot 實例之間隨機分配同一段播放的請求。`PlaySessionId` 與令牌都屬於敏感播放資訊，不要對外分享或記錄完整網址。
+
+發布前的正向測試會比較源站與 VIP 閘道有、無 `/emby` 前綴時的影片、音訊、圖片、SRT／VTT 字幕、媒體資訊、Range 分段內容，以及完整 HLS 播放列表和分片。測試使用 `requirements-test.txt` 中的 HLS 解析套件；該套件不屬於正式 Bot 執行依賴。測試通過不代表每一款客戶端或每一種編碼都已實機驗證。
+
+#### Emby 升級或重新啟動
+
+正常重新啟動 Emby 不會隨機改動 SQLite 資料表名稱。`Tokens_2` 通常來自資料庫遷移或資料表重建，重新啟動後仍會保留。未來升級 Emby 時，資料表名稱、欄位、資料庫路徑或內部使用者 ID 的儲存格式仍可能改變。
+
+升級前，請短暫停止 Emby 並備份完整配置目錄，或使用能保證資料庫一致性的備份方式。若存在 `authentication.db`、`authentication.db-wal`、`users.db` 和 `users.db-wal`，都必須納入備份；在 SQLite 運作時分別複製這些檔案，不能保證備份一致。升級後可用以下指令檢查資料表名稱，不輸出表內資料：
 
 ~~~bash
 docker exec embyboss python3 -c 'import sqlite3;d=sqlite3.connect("file:/emby-auth/data/authentication.db?mode=ro",uri=True);print("tables:",[x[0] for x in d.execute("SELECT name FROM sqlite_master WHERE type=\"table\" ORDER BY name")]);d.close()'
 ~~~
 
-If a newer Emby version introduces an unknown schema, VIP requests intentionally remain non-2xx instead of trusting a URL `userId`. Do not manually rename or edit the authentication database; add support only after verifying the new schema.
+如果新版 Emby 採用尚未支援的資料庫結構，VIP 請求會回傳非 2xx 狀態並拒絕放行，不會改為信任 URL 中的 `userId`。不要手動重新命名或修改認證資料庫；應先確認新結構，再新增相容支援。
 
-#### Troubleshooting
+#### 故障排查
 
-- `Unrecognized Guid format`: an old build is still using `Users/Me`; pull and rebuild the current Bot.
-- `Tokens table: False` but `Tokens_2` exists: the database is using a migrated schema; use a build that supports `Tokens_2`.
-- `reason=Emby token is not bound to one active user`: check that the whole Emby config directory, including WAL files, is mounted read-only and that `users.db` is present.
-- `reason=userId claim does not match authenticated Emby user`: this is an old build; current code ignores stale client `userId` claims and uses the validated token owner.
-- `Invalid internal token`: validate/restart `emby-line-gateway` and ensure `forward_auth` does not delete `X-DuSheng-Line-Token` after setting it.
-- Hills/SenPlayer returns 502/403 while Infuse works: verify that Caddy forwards `Authorization`, `X-Emby-Authorization`, and `X-Emby-Token`; the Bot log must not show `Unable to authenticate`.
+- `Unrecognized Guid format`：舊版本仍在使用 `Users/Me`；請拉取並重新構建目前版本的 Bot。
+- 顯示 `Tokens table: False`，但存在 `Tokens_2`：資料庫已使用遷移後的結構；請使用支援 `Tokens_2` 的版本。
+- `reason=Emby token is not bound to one active user`：確認整個 Emby 配置目錄已唯讀掛載，包含 WAL 檔案，且 `users.db` 存在。
+- `reason=userId claim does not match authenticated Emby user`：這是舊版本的行為；目前程式碼會忽略客戶端過期的 `userId`，改用已驗證令牌的真正持有者。
+- `Invalid internal token`：驗證配置並重新啟動 `emby-line-gateway`，確認 `forward_auth` 沒有刪除已設定的 `X-DuSheng-Line-Token`。
+- Hills／SenPlayer 回傳 502／403，但 Infuse 正常：確認 Caddy 有轉發 `Authorization`、`X-Emby-Authorization` 和 `X-Emby-Token`，並檢查 Bot 日誌是否出現 `Unable to authenticate`。
+- Bot 重新啟動後立即出現 HTTP 502：等本機 API 完成資料庫遷移並開始監聽，再測試播放。若持續失敗，檢查 Bot 程序和 Caddy 上游位址。HTTP 503 搭配 `Unable to verify line entitlement` 表示 Bot 無法查詢 MySQL；此時只拒絕目前請求，不封禁帳戶，也不終止會話。
+- 某種憑據格式回傳 401：修改閘道前，先用相同請求直連本機 Emby 源站比對。不同 Emby 版本接受的 URL 憑據欄位可能不同；閘道不能將源站不接受的憑據視為已驗證身份。
 
-When requesting support, send only sanitized command output. Do not send `config.json`, Bot/CDN tokens, passwords, or database contents.
+尋求協助時，只提供已遮蔽敏感資訊的指令輸出，不要傳送 `config.json`、Bot／CDN 令牌、密碼或資料庫內容。

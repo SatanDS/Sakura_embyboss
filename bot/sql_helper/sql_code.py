@@ -1,6 +1,7 @@
 import math
 
 from bot.sql_helper import Base, Session
+from bot.sql_helper.sql_emby import Emby
 from sqlalchemy import (
     Column,
     BigInteger,
@@ -12,6 +13,9 @@ from sqlalchemy import (
 from cacheout import Cache
 
 cache = Cache()
+
+INVITE_DURATIONS = {"mon": 30, "sea": 90, "half": 180, "year": 365}
+MAX_INVITE_CODES = 100
 
 
 class Code(Base):
@@ -37,6 +41,36 @@ def sql_add_code(code_list: list, tg: int, us: int):
         except:
             session.rollback()
             return False
+
+
+def sql_buy_invite_codes(tg: int, code_list: list, days: int, cost: int, eligible):
+    """Debit the current balance and issue the codes in one transaction."""
+    if (not 1 <= len(code_list) <= MAX_INVITE_CODES
+            or days not in INVITE_DURATIONS.values()
+            or not isinstance(cost, int) or cost < 0):
+        return {"status": "invalid"}
+    with Session() as session:
+        try:
+            user = session.query(Emby).filter(Emby.tg == tg).with_for_update().first()
+            if user is None:
+                return {"status": "no_user"}
+            if not eligible(user):
+                return {"status": "forbidden"}
+            # The conditional SQL debit also protects callers without row-lock support.
+            changed = session.query(Emby).filter(Emby.tg == tg, Emby.iv >= cost).update(
+                {Emby.iv: Emby.iv - cost}, synchronize_session=False,
+            )
+            if not changed:
+                return {"status": "insufficient"}
+            session.add_all([Code(code=code, tg=tg, us=days) for code in code_list])
+            session.flush()
+            session.refresh(user)
+            balance = user.iv
+            session.commit()
+            return {"status": "ok", "balance": balance}
+        except Exception:
+            session.rollback()
+            return {"status": "error"}
 
 
 def sql_update_code(code, used: int, usedtime):

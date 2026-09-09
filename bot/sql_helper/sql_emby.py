@@ -6,6 +6,7 @@ from sqlalchemy import Column, BigInteger, String, DateTime, Integer, case
 from sqlalchemy import func
 from sqlalchemy import or_
 from bot import LOGGER
+from datetime import datetime
 
 
 
@@ -22,6 +23,7 @@ class Emby(Base):
     lv = Column(String(1), default='d')
     cr = Column(DateTime, nullable=True)
     ex = Column(DateTime, nullable=True)
+    disabled_at = Column(DateTime, nullable=True)
     us = Column(Integer, default=0)
     iv = Column(Integer, default=0)
     ch = Column(DateTime, nullable=True)
@@ -165,13 +167,14 @@ def sql_get_emby(tg):
             return None
 
 
-def sql_get_emby_by_embyid(embyid):
+def sql_get_emby_by_embyid(embyid, *, raise_on_error=False):
     """Look up a record by the canonical Emby user ID only.
 
     ``sql_get_emby`` intentionally supports Telegram ID/name lookups for the
     bot UI. Line authorization must not use that broad lookup: a value that
     happens to equal a Telegram ID or account name must never grant the
-    corresponding Emby entitlement.
+    corresponding Emby entitlement. Enforcement callers use raise_on_error
+    to distinguish a database outage from an absent account.
     """
     if embyid is None:
         return None
@@ -179,6 +182,8 @@ def sql_get_emby_by_embyid(embyid):
         try:
             return session.query(Emby).filter(Emby.embyid == str(embyid)).first()
         except Exception:
+            if raise_on_error:
+                raise
             return None
 
 
@@ -221,9 +226,15 @@ def sql_update_emby(condition, **kwargs):
     with Session() as session:
         try:
             # 用filter来过滤，注意要加括号
-            emby = session.query(Emby).filter(condition).first()
+            emby = session.query(Emby).filter(condition).with_for_update().first()
             if emby is None:
                 return False
+            next_level = kwargs.get('lv')
+            if next_level is not None:
+                if next_level == 'c' and emby.lv != 'c':
+                    kwargs.setdefault('disabled_at', datetime.now())
+                elif next_level != 'c':
+                    kwargs['disabled_at'] = None
             # 然后用setattr方法来更新其他的字段，如果有就更新，如果没有就保持原样
             for k, v in kwargs.items():
                 setattr(emby, k, v)

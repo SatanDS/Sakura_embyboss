@@ -21,30 +21,35 @@ user_api_route = APIRouter(prefix="/user", tags=["对接用户信息的接口"])
 auth_api_route = APIRouter(prefix="/auth", tags=["用户认证接口"])
 
 async def verify_token(request: Request):
-    """验证API请求的token"""
-    try:
-        # 从URL参数中获取token
-        token = request.query_params.get("token")
-        if not token:
-            raise HTTPException(status_code=401, detail="No token provided")
-        # 验证token是否与bot token匹配
-        if token != bot_token:
-            LOGGER.warning("Invalid API token attempt")
-            raise HTTPException(status_code=403, detail="Invalid token")
+    """Authenticate integrations with a separate header-based API key."""
+    api_config = getattr(config, "api", None)
+    provided = request.headers.get("X-API-Key", "")
+    expected = str(getattr(api_config, "api_key", "") or "")
+    if provided:
+        if (
+            not 32 <= len(expected) <= 4096
+            or expected == bot_token
+            or expected == getattr(api_config, "line_report_token", None)
+        ):
+            raise HTTPException(status_code=503, detail="API key is not configured")
+        if len(provided) > 4096 or not secrets.compare_digest(
+            provided.encode("utf-8"), expected.encode("utf-8")
+        ):
+            raise HTTPException(status_code=403, detail="Invalid API key")
         return True
-    except HTTPException:
-        raise
-    except Exception as e:
-        LOGGER.error(f"Token verification error: {str(e)}")
-        raise HTTPException(status_code=500, detail="Token verification failed")
+
+    # Temporary migration path for integrations unable to send custom headers.
+    if getattr(api_config, "allow_legacy_bot_token", False):
+        legacy_token = request.query_params.get("token", "")
+        if legacy_token and len(legacy_token) <= 4096 and secrets.compare_digest(
+            legacy_token.encode("utf-8"), bot_token.encode("utf-8")
+        ):
+            return True
+    raise HTTPException(status_code=401, detail="X-API-Key header required")
 
 
 async def verify_loopback_request(request: Request):
-    """Only allow calls originating from the same host.
-
-    This dependency is kept for the legacy playlist protection endpoint,
-    whose Caddy integration predates the shared line-report secret.
-    """
+    """Only allow calls originating from the same host."""
     client_host = request.client.host if request.client else ""
     allowed_hosts = {"127.0.0.1", "::1", "::ffff:127.0.0.1", "localhost"}
     if client_host not in allowed_hosts:
@@ -74,7 +79,7 @@ async def verify_line_report_request(request: Request):
         or len(expected_token) > 4096
         or len(provided_token) > 4096
         or not provided_token
-        or not secrets.compare_digest(provided_token, expected_token)
+        or not secrets.compare_digest(provided_token.encode("utf-8"), expected_token.encode("utf-8"))
     ):
         LOGGER.warning("Invalid or missing line enforcement token")
         raise HTTPException(status_code=403, detail="Invalid internal token")
@@ -86,7 +91,7 @@ verify_internal_request = verify_loopback_request
 
 emby_api_route.include_router(
     ban_playlist_route,
-    dependencies=[Depends(verify_loopback_request)],
+    dependencies=[Depends(verify_line_report_request)],
 )
 emby_api_route.include_router(
     favorites_router,

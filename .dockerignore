@@ -1,0 +1,26 @@
+# Runtime credentials and data must never enter image layers.
+config.json
+config.json.*
+.env
+.env.*
+!.env.example
+**/*.session
+**/*.session-*
+**/*.sql
+**/authentication.db*
+**/users.db*
+db/
+db_backup/
+log/
+.venv/
+.python310/
+bot-env/
+python-*.exe
+**/__pycache__/
+**/*.py[cod]
+.tmp/
+.pytest_cache/
+.idea/
+.claude/
+
+# Keep Git metadata: the existing in-container updater uses git pull.

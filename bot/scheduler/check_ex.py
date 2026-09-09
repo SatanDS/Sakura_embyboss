@@ -80,8 +80,9 @@ async def check_expired():
 
         else:
             if await emby.emby_change_policy(emby_id=r.embyid, disable=True):
-                dead_day = r.ex + timedelta(days=config.freeze_days)
-                if sql_update_emby(Emby.tg == r.tg, lv='c'):
+                disabled_at = datetime.now()
+                dead_day = disabled_at + timedelta(days=config.freeze_days)
+                if sql_update_emby(Emby.tg == r.tg, lv='c', disabled_at=disabled_at):
                     text = f'【到期检测】\n#id{r.tg} 到期禁用 [{r.name}](tg://user?id={r.tg})\n将为您封存至 {dead_day.strftime("%Y-%m-%d")}，请及时续期'
                     LOGGER.info(text)
                 else:
@@ -149,14 +150,17 @@ async def check_expired():
                 LOGGER.error(e)
 
         else:
-            delete_day = c.ex + timedelta(days=config.freeze_days)
+            if c.disabled_at is None:
+                LOGGER.warning('跳过自动删除账户 %s：没有可确认的禁用时间', c.tg)
+                continue
+            delete_day = c.disabled_at + timedelta(days=config.freeze_days)
             if datetime.now() < delete_day:
                 continue
             if await emby.emby_del(emby_id=c.embyid):
-                sql_update_emby(Emby.embyid == c.embyid, embyid=None, name=None, pwd=None, pwd2=None, lv='d', cr=None,
-                                ex=None)
-                tem_deluser()
-                text = f'【到期检测】\n#id{c.tg} 删除账户 [{c.name}](tg://user?id={c.tg})\n已到期 {config.freeze_days} 天，执行清除任务。期待下次与你相遇'
+                if sql_update_emby(Emby.embyid == c.embyid, embyid=None, name=None, pwd=None, pwd2=None, lv='d', cr=None,
+                                   ex=None):
+                    tem_deluser()
+                text = f'【到期检测】\n#id{c.tg} 删除账户 [{c.name}](tg://user?id={c.tg})\n已冻结 {config.freeze_days} 天，执行清除任务。期待下次与你相遇'
                 LOGGER.info(text)
             else:
                 text = f'【到期检测】\n#id{c.tg} #删除账户 [{c.name}](tg://user?id={c.tg})\n到期删除失败，请检查以免无法进行后续使用'

@@ -10,7 +10,7 @@ import datetime
 import math
 import random
 from datetime import timedelta, datetime
-from bot.schemas import ExDate, Yulv
+from bot.schemas import Yulv
 from bot import bot, LOGGER, _open, emby_line, sakura_b, ranks, group, config, bot_name, schedall
 from pyrogram import filters
 from bot.func_helper.concurrency import get_user_lock
@@ -19,7 +19,6 @@ from bot.func_helper.register_queue import get_register_queue_manager, RegisterJ
 from bot.func_helper.filters import user_in_group_on_filter
 from bot.func_helper.utils import (
     members_info,
-    cr_link_one,
     judge_admins,
     tem_deluser,
     pwd_create,
@@ -33,7 +32,9 @@ from bot.func_helper.msg_utils import callAnswer, editMessage, callListen, sendM
 from bot.modules.commands import p_start
 from bot.modules.commands.partition_code import _redeem_partition_code
 from bot.modules.commands.exchange import rgs_code
-from bot.sql_helper.sql_code import sql_count_c_code
+from bot.sql_helper.sql_code import (
+    INVITE_DURATIONS, MAX_INVITE_CODES, sql_buy_invite_codes, sql_count_c_code,
+)
 from bot.sql_helper.sql_emby import sql_get_emby, sql_update_emby, Emby
 from bot.sql_helper.sql_emby2 import sql_get_emby2, sql_delete_emby2
 
@@ -685,6 +686,16 @@ async def do_store_whitelist(_, call):
         await callAnswer(call, '❌ 管理员未开启此兑换', True)
 
 
+def _parse_invite_purchase(text):
+    period, count_text, method = text.split()
+    count = int(count_text)
+    if period not in INVITE_DURATIONS or method not in ('code', 'link'):
+        raise ValueError("invalid invitation type or mode")
+    if not 1 <= count <= MAX_INVITE_CODES:
+        raise ValueError("invalid invitation quantity")
+    return INVITE_DURATIONS[period], count, method
+
+
 @bot.on_callback_query(filters.regex('store-invite'))
 async def do_store_invite(_, call):
     if _open.invite:
@@ -705,6 +716,7 @@ async def do_store_invite(_, call):
                           f'🎟️ 请回复创建 [类型] [数量] [模式]\n\n'
                           f'**类型**：月mon，季sea，半年half，年year\n'
                           f'**模式**： link -深链接 | code -码\n'
+                          f'**数量**：1 至 {MAX_INVITE_CODES}\n'
                           # f'**续期**： F - 注册码，T - 续期码\n'
                           f'**示例**：`mon 1 link` 记作 1条 月度注册链接 \n'
                           f'**示例**：`sea 1 code` 记作 1条 季度注册码\n'
@@ -717,26 +729,30 @@ async def do_store_invite(_, call):
         elif content.text == '/cancel':
             return await asyncio.gather(content.delete(), do_store(_, call))
         try:
-            times, count, method = content.text.split()
-            days = getattr(ExDate(), times)
-            count = int(count)
-            cost = math.floor((days * count / 30) * _open.invite_cost)
-            if e.iv < cost:
-                return await asyncio.gather(content.delete(),
-                                            sendMessage(call,
-                                                        f'您只有 {e.iv}{sakura_b}，而您需要花费 {cost}，超前消费是不可取的哦！？',
-                                                        timer=10),
-                                            do_store(_, call))
-            method = getattr(ExDate(), method)
-        except (AttributeError, ValueError, IndexError):
+            days, count, method = _parse_invite_purchase(content.text)
+        except (AttributeError, ValueError):
             return await asyncio.gather(sendMessage(call, f'⚠️ 检查输入，格式似乎有误\n{content.text}', timer=10),
                                         do_store(_, call),
                                         content.delete())
         else:
-            sql_update_emby(Emby.tg == call.from_user.id, iv=e.iv - cost)
-            links = await cr_link_one(call.from_user.id, days, count, days, method)
-            if links is None:
-                return await editMessage(call, '⚠️ 数据库插入失败，请检查数据库')
+            cost = days * count * _open.invite_cost // 30
+            codes = [f'{ranks.logo}-{days}-Register_{await pwd_create(10)}' for _index in range(count)]
+            result = sql_buy_invite_codes(
+                call.from_user.id, codes, days, cost,
+                lambda current: _open.invite and invite_policy_allows(
+                    call.from_user.id, current.lv, _open.invite_lv,
+                ),
+            )
+            if result['status'] == 'insufficient':
+                return await editMessage(call, f'⚠️ 当前余额不足，本次兑换需要 {cost}{sakura_b}，未扣款。')
+            if result['status'] in ('no_user', 'forbidden'):
+                return await editMessage(call, '⚠️ 兑换资格已变化，请重新打开面板，未扣款。')
+            if result['status'] != 'ok':
+                return await editMessage(call, '⚠️ 兑换失败，未扣款，请稍后重试。')
+            links = ''.join(
+                f'`{code}`\n' if method == 'code' else f't.me/{bot_name}?start={code}\n'
+                for code in codes
+            )
             links = f"🎯 {bot_name}已为您生成了 **{days}天** 注册码 {count} 个\n\n" + links
             chunks = [links[i:i + 4096] for i in range(0, len(links), 4096)]
             for chunk in chunks:

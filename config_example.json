@@ -129,6 +129,8 @@
     "allow_origins": [
       "*"
     ],
-    "line_report_token": "CHANGE_ME"
+    "line_report_token": "CHANGE_ME",
+    "api_key": null,
+    "allow_legacy_bot_token": false
   }
 }

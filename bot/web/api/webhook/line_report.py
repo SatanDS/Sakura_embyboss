@@ -19,6 +19,7 @@ from bot.sql_helper.sql_emby import (
 )
 from bot import LOGGER, bot, config
 from bot.func_helper.emby import emby
+from bot.func_helper.hls_access import HLSAccess, has_explicit_credential
 import json
 import asyncio
 import os
@@ -30,6 +31,7 @@ from datetime import datetime, timedelta
 from urllib.parse import parse_qs, quote, urlparse
 
 router = APIRouter()
+_hls_access = HLSAccess()
 
 # 违规冷却缓存: {user_id: last_violation_time}
 _violation_cooldown: Dict[str, datetime] = {}
@@ -294,6 +296,7 @@ def redact_request_uri(request_uri: str) -> str:
             "token",
             "authorization",
             "x-emby-authorization",
+            "playsessionid",
         }
 
         redacted_query = []
@@ -388,7 +391,7 @@ def _map_auth_db_user_ids(raw_user_ids: List[Any], auth_db_path: str) -> set[str
     for raw_user_id in raw_user_ids:
         value = _bounded_identifier(raw_user_id, _MAX_USER_ID_LENGTH)
         if not value:
-            continue
+            return set()
         try:
             mapped_ids.add(uuid.UUID(value).hex)
             continue
@@ -397,7 +400,7 @@ def _map_auth_db_user_ids(raw_user_ids: List[Any], auth_db_path: str) -> set[str
         try:
             internal_ids.add(int(value))
         except (ValueError, TypeError):
-            continue
+            return set()
 
     if not internal_ids:
         return mapped_ids
@@ -409,8 +412,9 @@ def _map_auth_db_user_ids(raw_user_ids: List[Any], auth_db_path: str) -> set[str
     )
     users_db_path = next((path for path in users_db_paths if os.path.isfile(path)), "")
     if not users_db_path:
-        return mapped_ids
+        return set()
 
+    resolved_internal_ids: set[int] = set()
     try:
         uri = f"file:{quote(os.path.abspath(users_db_path), safe='/')}?mode=ro"
         with sqlite3.connect(uri, uri=True, timeout=1.0) as users_connection:
@@ -439,11 +443,14 @@ def _map_auth_db_user_ids(raw_user_ids: List[Any], auth_db_path: str) -> set[str
                             mapped_ids.add(uuid.UUID(bytes_le=bytes(blob)).hex)
                         else:
                             mapped_ids.add(uuid.UUID(str(blob)).hex)
+                        resolved_internal_ids.add(internal_id)
                     except (ValueError, AttributeError, TypeError):
                         continue
     except (sqlite3.Error, OSError):
-        return mapped_ids
+        return set()
 
+    if resolved_internal_ids != internal_ids:
+        return set()
     return mapped_ids
 
 
@@ -486,18 +493,19 @@ def _lookup_user_from_auth_db_sync(token: str, db_path: str) -> Tuple[str, str]:
                 }
                 if not {"AccessToken", "UserId", "IsActive"}.issubset(columns):
                     continue
-                rows.extend(
-                    connection.execute(
-                        "SELECT UserId FROM " + table_name + " "
+                token_rows = connection.execute(
+                        "SELECT DISTINCT UserId FROM " + table_name + " "
                         "WHERE AccessToken = ? AND IsActive = 1 LIMIT 3",
                         (token,),
                     ).fetchall()
-                )
+                if len(token_rows) >= 3:
+                    return "", "Emby token has ambiguous user bindings"
+                rows.extend(token_rows)
     except (sqlite3.Error, OSError) as exc:
         return "", f"Emby authentication database lookup failed: {type(exc).__name__}"
 
     user_ids = _map_auth_db_user_ids(
-        [row[0] for row in rows if row and row[0]],
+        [row[0] for row in rows if row],
         db_path,
     )
     user_ids.discard("")
@@ -696,6 +704,7 @@ async def resolve_user_context(
     token: str = "",
     auth_header: str = "",
     original_request_uri: str = "",
+    credential_context: Optional[Dict[str, str]] = None,
 ) -> Tuple[str, Optional[Dict[str, Any]], str]:
     """Resolve an Emby user from a validated per-request credential.
 
@@ -811,7 +820,12 @@ async def resolve_user_context(
                 play_session_id=resolved_play_session_id,
             )
 
+        if credential_context is not None:
+            credential_context.update(user_id=canonical_user_id, token=selected_token)
         return canonical_user_id, matched_session, f"emby.identity:{token_error or 'emby.users.me'}:{selected_token_source}"
+
+    if _configured_auth_db_path():
+        return "", None, f"emby.identity.invalid:{token_error[:240]}"
 
     # If the configured auth database and Users/Me are unavailable, the only
     # permitted fallback is an exact token match in the active Sessions
@@ -828,6 +842,8 @@ async def resolve_user_context(
     if not fallback_user_id:
         detail = fallback_reason or token_error or "invalid Emby token"
         return "", None, f"emby.identity.invalid:{detail[:240]}"
+    if credential_context is not None:
+        credential_context.update(user_id=fallback_user_id, token=selected_token)
     return fallback_user_id, matched_session, fallback_reason
 
 
@@ -993,22 +1009,35 @@ async def line_report(
     using_whitelist = line_role == "vip"
 
     redacted_original_request_uri = redact_request_uri(x_original_uri or "")
+    request_token = token or (x_emby_token or "")
+    request_auth_header = x_emby_authorization or authorization or ""
+    hls_binding = None
+    if using_whitelist and not has_explicit_credential(request_token, request_auth_header, x_original_uri or ""):
+        hls_binding = _hls_access.lookup(host, x_original_uri or "")
+        if hls_binding:
+            request_token = hls_binding.token
+    credential_context: Dict[str, str] = {}
     resolved_user_id, matched_session, resolved_from = await resolve_user_context(
         user_id=userId,
         device_id=deviceId,
         session_id=sessionId,
         play_session_id=playSessionId,
-        token=token or (x_emby_token or ""),
-        auth_header=x_emby_authorization or authorization or "",
+        token=request_token,
+        auth_header=request_auth_header,
         original_request_uri=x_original_uri or "",
+        credential_context=credential_context,
     )
+
+    if hls_binding and resolved_user_id != hls_binding.user_id:
+        _hls_access.discard(host, x_original_uri or "")
+        resolved_user_id = ""
 
     if not resolved_user_id:
         LOGGER.warning(
             "线路上报忽略: 无法识别用户 "
             f"(line={line}, host={host}, reason={resolved_from}, "
             f"deviceId={deviceId}, sessionId={sessionId}, "
-            f"playSessionId={playSessionId}, x_original_uri={redacted_original_request_uri or '<empty>'})"
+            f"playSessionId={'<provided>' if playSessionId else ''}, x_original_uri={redacted_original_request_uri or '<empty>'})"
         )
         if using_whitelist:
             # Caddy's forward_auth treats every 2xx response as authorized;
@@ -1038,12 +1067,29 @@ async def line_report(
     # The resolved ID came from Emby token authentication. Look up the local
     # entitlement by the Emby-ID column only; the general bot lookup also
     # matches Telegram IDs and names and is unsafe for authorization.
-    user_details = sql_get_emby_by_embyid(resolved_user_id)
+    try:
+        user_details = sql_get_emby_by_embyid(resolved_user_id, raise_on_error=True)
+    except Exception as exc:
+        LOGGER.error(f"Line entitlement lookup unavailable: {type(exc).__name__}")
+        # An unknown entitlement during an outage is not a policy violation.
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unavailable", "message": "Unable to verify line entitlement"},
+        )
 
     # 白名单用户可以用任何线路
     if is_user_whitelisted(user_details):
+        if using_whitelist:
+            if hls_binding:
+                _hls_access.refresh(host, x_original_uri or "", hls_binding)
+            elif not _hls_access.register(host, x_original_uri or "", resolved_user_id, credential_context.get('token', '')):
+                return JSONResponse(status_code=403, content={"status": "blocked", "message": "Playback identity conflict"})
         LOGGER.debug(f"线路检查通过: 白名单用户 {resolved_user_id} 使用线路 {line}")
         return {"status": "allowed", "message": "Whitelist user"}
+
+    if hls_binding:
+        _hls_access.discard(host, x_original_uri or "")
+        return JSONResponse(status_code=403, content={"status": "blocked", "message": "Playback entitlement is no longer active"})
 
     if using_whitelist:
         # 冷却期内的重复上报直接忽略（播放器不响应终止会话时会持续上报）

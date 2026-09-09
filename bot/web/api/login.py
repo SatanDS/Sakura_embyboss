@@ -9,6 +9,7 @@ Date: 2025/01/06
 import json
 from typing import Optional
 from fastapi import APIRouter, Request 
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from bot.func_helper.emby import emby
@@ -31,6 +32,10 @@ class LoginResponse(BaseModel):
     data: Optional[dict] = None
 
 
+def login_error(code: int, message: str):
+    return JSONResponse(status_code=code, content=LoginResponse(code=code, message=message).model_dump())
+
+
 @router.post("/login", response_model=LoginResponse)
 async def login(request: Request):
     """
@@ -47,7 +52,6 @@ async def login(request: Request):
         "code": 200,
         "message": "登录成功",
         "data": {
-            "token": "xxxxxxxxxxxxx",
             "embyid": "user_id",
             "username": "user_name"
         }
@@ -72,19 +76,23 @@ async def login(request: Request):
             data = json.loads(form_data.get("data", "{}")) if "data" in form_data else dict(form_data)
         
         # 验证必要参数
+        if not isinstance(data, dict):
+            return login_error(400, "参数错误")
         username = data.get("username")
         password = data.get("password")
+        if not isinstance(username, str) or (password is not None and not isinstance(password, str)):
+            return login_error(400, "参数错误")
         
         if not username:
             LOGGER.warning(f"Login attempt missing credentials")
-            return LoginResponse(
+            return login_error(
                 code=400,
                 message="缺少用户名"
             )
         embyindb = sql_get_emby(username)
         if not embyindb:
             LOGGER.warning(f"Login attempt for non-existent user: {username}")
-            return LoginResponse(
+            return login_error(
                 code=404,
                 message="用户不存在"
             )
@@ -98,7 +106,7 @@ async def login(request: Request):
         
         if not success:
             LOGGER.warning(f"Login failed for user: {username}")
-            return LoginResponse(
+            return login_error(
                 code=401,
                 message="用户名或密码错误"
             )
@@ -116,13 +124,13 @@ async def login(request: Request):
         
     except json.JSONDecodeError:
         LOGGER.error(f"Invalid JSON format in login request")
-        return LoginResponse(
+        return login_error(
             code=400,
             message="无效的JSON格式"
         )
     except Exception as e:
         LOGGER.error(f"Login error: {str(e)}")
-        return LoginResponse(
+        return login_error(
             code=500,
-            message=f"服务器错误: {str(e)}"
+            message="服务器错误"
         )

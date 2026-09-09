@@ -67,6 +67,8 @@ class Web:
                 host=config_api.http_url,
                 port=config_api.http_port,
                 proxy_headers=False,
+                # Legacy integration URLs and Emby URLs can contain secrets.
+                access_log=False,
             )
         )
         server_config = self.web_api.config

@@ -140,6 +140,8 @@ class API(BaseModel):
     # internal line-enforcement endpoints.  This intentionally has no
     # default value: an unset secret must fail closed in the API dependency.
     line_report_token: Optional[str] = None
+    api_key: Optional[str] = None
+    allow_legacy_bot_token: bool = False
 
     def __init__(self, **data):
         super().__init__(**data)

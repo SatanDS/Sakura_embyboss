@@ -251,7 +251,7 @@ async def grab_red_envelope(_, call):
     amount = 0
     # 处理均分红包
     if envelope.type == "equal":
-        amount = envelope.money // envelope.members
+        amount = envelope.rest_money if envelope.rest_members == 1 else envelope.money // envelope.members
 
     # 处理专享红包
     elif envelope.type == "private":

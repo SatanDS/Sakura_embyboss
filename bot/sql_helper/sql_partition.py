@@ -47,6 +47,16 @@ def sql_get_partition_code(code: str) -> Optional[PartitionCode]:
         return session.query(PartitionCode).filter(PartitionCode.code == code).first()
 
 
+def sql_get_redeemed_partition_grant(code: str, tg: int, now: datetime) -> Optional[PartitionGrant]:
+    with Session() as session:
+        return session.query(PartitionGrant).filter(
+            PartitionGrant.code == code,
+            PartitionGrant.tg == tg,
+            PartitionGrant.status == "active",
+            PartitionGrant.expires_at > now,
+        ).first()
+
+
 def sql_delete_partition_code(code: str) -> bool:
     """使用后删除分区码，防止重复使用。"""
     with Session() as session:
@@ -84,6 +94,7 @@ def sql_upsert_partition_grant(
                     grant.expires_at = expires_at
                 grant.status = "active"
                 grant.code = code or grant.code
+                grant.embyid = embyid
                 grant.embyname = embyname or grant.embyname
                 grant.updated_at = datetime.now()
             else:
@@ -136,30 +147,39 @@ def sql_get_active_grants_for_users(user_ids: List[int], now: datetime) -> Dict[
     return result
 
 
-def sql_get_expired_grants(now: datetime) -> List[PartitionGrant]:
+def sql_get_expired_grants(now: datetime, tg: Optional[int] = None) -> List[PartitionGrant]:
     with Session() as session:
-        return (
+        query = (
             session.query(PartitionGrant)
             .filter(
                 PartitionGrant.status == "active",
                 PartitionGrant.expires_at <= now,
             )
-            .all()
         )
+        if tg is not None:
+            query = query.filter(PartitionGrant.tg == tg)
+        return query.all()
 
 
-def sql_mark_grants_expired(ids: List[int]) -> None:
+def sql_mark_grants_expired(ids: List[int], now: Optional[datetime] = None) -> bool:
     if not ids:
-        return
+        return True
+    now = now or datetime.now()
     with Session() as session:
         try:
-            session.query(PartitionGrant).filter(PartitionGrant.id.in_(ids)).update(
+            session.query(PartitionGrant).filter(
+                PartitionGrant.id.in_(ids),
+                PartitionGrant.status == "active",
+                PartitionGrant.expires_at <= now,
+            ).update(
                 {PartitionGrant.status: "expired", PartitionGrant.updated_at: datetime.now()},
                 synchronize_session=False,
             )
             session.commit()
+            return True
         except Exception:
             session.rollback()
+            return False
 
 
 def sql_list_partition_codes(limit: int = 50, offset: int = 0) -> List[PartitionCode]:
@@ -197,13 +217,12 @@ def sql_count_partition_grants() -> int:
 def sql_delete_partition_code_or_grant_by_code(code: str) -> Tuple[int, int]:
     with Session() as session:
         try:
-            now = datetime.now()
             unused_deleted = session.query(PartitionCode).filter(PartitionCode.code == code).delete(synchronize_session=False)
             used_deleted = (
                 session.query(PartitionGrant)
                 .filter(
                     PartitionGrant.code == code,
-                    ((PartitionGrant.status != "active") | (PartitionGrant.expires_at <= now)),
+                    PartitionGrant.status == "expired",
                 )
                 .delete(synchronize_session=False)
             )
@@ -228,10 +247,9 @@ def sql_clear_unused_partition_codes() -> int:
 def sql_clear_used_partition_grants() -> int:
     with Session() as session:
         try:
-            now = datetime.now()
             count = (
                 session.query(PartitionGrant)
-                .filter((PartitionGrant.status != "active") | (PartitionGrant.expires_at <= now))
+                .filter(PartitionGrant.status == "expired")
                 .delete(synchronize_session=False)
             )
             session.commit()
@@ -290,6 +308,7 @@ def sql_redeem_partition_code_atomic(
                     grant.expires_at = expires_at
                 grant.status = "active"
                 grant.code = code
+                grant.embyid = embyid
                 grant.embyname = embyname or grant.embyname
                 grant.updated_at = datetime.now()
             else:

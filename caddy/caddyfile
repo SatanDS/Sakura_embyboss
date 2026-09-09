@@ -1,15 +1,24 @@
 {
-	# 本地测试关闭自动 HTTPS，开启 debug 日志方便排查。
+	# TLS is terminated by the frontend proxy.
 	auto_https off
-	debug
+}
+
+(playlist_ban) {
+	reverse_proxy {args[0]} {
+		method GET
+		rewrite /emby/ban_playlist?
+		header_up -X-Forwarded-For
+		header_up -X-Real-IP
+		header_up -X-DuSheng-Origin-Token
+		header_up X-DuSheng-Line-Token {$DUSHENGCDN_ORIGIN_TOKEN}
+		header_up X-Original-URI {http.request.orig_uri}
+		header_up X-Original-Method {http.request.orig_method}
+	}
 }
 
 (emby_local_config) {
 	http://{args[0]}:{args[2]} {
-		log {
-			output file caddy-local.log
-			format console
-		}
+		# Access/debug logs are disabled: Emby URLs and headers carry credentials.
 
 		# DuShengCDN does not have a stable source IP. Require its private
 		# shared origin token before accepting any request on public 18080.
@@ -17,20 +26,20 @@
 		@origin_invalid {
 			not header X-DuSheng-Origin-Token {$DUSHENGCDN_ORIGIN_TOKEN}
 		}
-		@emby_response_no_store path /emby/*
+		@emby_response_no_store path_regexp emby_response_no_store (?i)^/(?:emby/)?(?:Videos|Audio|Items|PlaybackInfo|MediaSegments|LiveTv|Sessions)(?:/|$)
 
 		# 播放线路审查：
 		# Emby Web 常见上报路径是 /emby/Sessions/Playing/Progress。
 		# 这里只要命中 /emby/Sessions/Playing 开头的请求，都会先走 line_report，再反代到 Emby。
-		@line_audit_play path /emby/Sessions/Playing /emby/Sessions/Playing/*
+		@line_audit_play path_regexp line_audit_play (?i)^/(?:emby/)?Sessions/Playing(?:/|$)
 
 		# A Playing/Progress report can arrive after the media connection has
 		# already been opened. Audit the actual media endpoints as well so a
 		# denied VIP request cannot keep receiving video/audio or HLS segments.
-		@line_audit_media path_regexp line_audit_media (?i)^(?:/emby/(?:Videos|Audio)/[^/]+/(?:stream|universal|hls[0-9]*|master\.m3u8|original)(?:/|\.|$)|/emby/(?:Items/[^/]+/)?PlaybackInfo(?:/|$)|/emby/MediaSegments(?:/|$)|/emby/LiveTv/(?:LiveStreams|LiveStreamFiles)(?:/|$))
-		@line_audit_download path_regexp line_audit_download (?i)^/emby/Items/[^/]+/(Download|File)(/|$)
+		@line_audit_media path_regexp line_audit_media (?i)^/(?:emby/)?(?:(?:Videos|Audio)/|(?:Items/[^/]+/)?PlaybackInfo(?:/|$)|MediaSegments(?:/|$)|LiveTv/(?:LiveStreams|LiveStreamFiles|LiveRecordings)(?:/|$))
+		@line_audit_download path_regexp line_audit_download (?i)^/(?:emby/)?Items/[^/]+/(Download|File)(/|$)
 
-		# 播放列表创建：直接重定向到 bot 的 ban_playlist 接口。
+		# Playlist mutations are authenticated and processed by the local Bot.
 		@playlist_create {
 			method POST
 			path /emby/Playlists
@@ -67,19 +76,19 @@
 			header @emby_response_no_store Cache-Control "private, no-store"
 
 			handle @playlist_create {
-				redir http://{args[4]}/emby/ban_playlist?eid={query.userId} 302
+				import playlist_ban {args[4]}
 			}
 
 			handle @playlist_items_post {
-				redir http://{args[4]}/emby/ban_playlist?eid={query.userId} 302
+				import playlist_ban {args[4]}
 			}
 
 			handle @playlist_item_delete {
-				redir http://{args[4]}/emby/ban_playlist?eid={query.userId} 302
+				import playlist_ban {args[4]}
 			}
 
 			handle @playlist_item_move {
-				redir http://{args[4]}/emby/ban_playlist?eid={query.userId} 302
+				import playlist_ban {args[4]}
 			}
 
 			handle @playlist_items_get {

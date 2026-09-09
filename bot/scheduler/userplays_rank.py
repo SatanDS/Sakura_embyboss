@@ -1,12 +1,14 @@
 import math
+import re
 import cn2an
 from datetime import datetime, timezone, timedelta
 
 from bot import bot, bot_photo, group, sakura_b, LOGGER, ranks, _open 
 from bot.func_helper.emby import emby
-from bot.func_helper.utils import convert_to_beijing_time, convert_s, cache, get_users, tem_deluser
+from bot.func_helper.utils import convert_s, cache, get_users, tem_deluser
+from bot.func_helper.concurrency import get_user_lock
 from bot.sql_helper import Session
-from bot.sql_helper.sql_emby import sql_get_emby, sql_update_embys, Emby, sql_update_emby
+from bot.sql_helper.sql_emby import sql_get_emby_by_embyid, sql_update_embys, Emby, sql_update_emby
 from bot.func_helper.fix_bottons import plays_list_button
 
 
@@ -106,58 +108,65 @@ class Uplaysinfo:
 
     @staticmethod
     async def check_low_activity():
-        now = datetime.now(timezone(timedelta(hours=8)))
         success, users = await emby.users()
         if not success:
-            return await bot.send_message(chat_id=group[0], text='⭕ 调用emby api失败')
+            return await bot.send_message(chat_id=group[0], text='调用 Emby API 失败')
         from bot import config
         activity_check_days = config.activity_check_days
-        msg = f'正在执行**{activity_check_days}天活跃检测**...\n'
+        notices = [f'正在执行 {activity_check_days} 天活跃检测...\n']
         for user in users:
-            # 数据库先找
-            e = sql_get_emby(tg=user["Name"])
-            if e is None:
+            e = sql_get_emby_by_embyid(user["Id"])
+            if not e:
                 continue
-
-            elif e.lv == 'c':
-                try:
-                    ac_date = convert_to_beijing_time(user["LastActivityDate"])
-                except KeyError:
-                    ac_date = "None"
-                finally:
-                    if ac_date == "None" or ac_date + timedelta(days=15) < now:
-                        if await emby.emby_del(emby_id=e.embyid):
-                            sql_update_emby(Emby.embyid == e.embyid, embyid=None, name=None, pwd=None, pwd2=None, lv='d',
-                                            cr=None, ex=None)
+            async with get_user_lock(e.tg):
+                e = sql_get_emby_by_embyid(user["Id"])
+                if not e:
+                    continue
+                now = datetime.now()
+                if e.lv == 'c':
+                    if e.disabled_at is None:
+                        LOGGER.warning('跳过自动删除账户 %s：没有可确认的禁用时间', e.tg)
+                        continue
+                    if now < e.disabled_at + timedelta(days=config.freeze_days):
+                        continue
+                    if await emby.emby_del(emby_id=e.embyid):
+                        if sql_update_emby(Emby.embyid == e.embyid, embyid=None, name=None, pwd=None, pwd2=None,
+                                           lv='d', cr=None, ex=None):
                             tem_deluser()
-                            msg += f'**🔋活跃检测** - [{e.name}](tg://user?id={e.tg})\n#id{e.tg} 禁用后未解禁，已执行删除。\n\n'
-                            LOGGER.info(f"【活跃检测】- 删除账户 {user['Name']} #id{e.tg}")
+                            notices.append(f'账户 {e.name} #id{e.tg} 冻结期结束，已删除。\n')
                         else:
-                            msg += f'**🔋活跃检测** - [{e.name}](tg://user?id={e.tg})\n#id{e.tg} 禁用后未解禁，执行删除失败。\n\n'
-                            LOGGER.info(f"【活跃检测】- 删除账户失败 {user['Name']} #id{e.tg}")
-            elif e.lv == 'b':
-                try:
-                    ac_date = convert_to_beijing_time(user["LastActivityDate"])
-                    
-                    # print(e.name, ac_date, now)
-                    if ac_date + timedelta(days=activity_check_days) < now:
-                        if await emby.emby_change_policy(emby_id=user["Id"], disable=True):
-                            sql_update_emby(Emby.embyid == user["Id"], lv='c')
-                            msg += f"**🔋活跃检测** - [{user['Name']}](tg://user?id={e.tg})\n#id{e.tg} {activity_check_days}天未活跃，禁用\n\n"
-                            LOGGER.info(f"【活跃检测】- 禁用账户 {user['Name']} #id{e.tg}：{activity_check_days}天未活跃")
-                        else:
-                            msg += f"**🎂活跃检测** - [{user['Name']}](tg://user?id={e.tg})\n{activity_check_days}天未活跃，禁用失败啦！检查emby连通性\n\n"
-                            LOGGER.info(f"【活跃检测】- 禁用账户 {user['Name']} #id{e.tg}：禁用失败啦！检查emby连通性")
-                except KeyError:
-                    if await emby.emby_change_policy(emby_id=user["Id"], disable=True):
-                        sql_update_emby(Emby.embyid == user["Id"], lv='c')
-                        msg += f"**🔋活跃检测** - [{user['Name']}](tg://user?id={e.tg})\n#id{e.tg} 注册后未活跃，禁用\n\n"
-                        LOGGER.info(f"【活跃检测】- 禁用账户 {user['Name']} #id{e.tg}：注册后未活跃禁用")
+                            LOGGER.error('账户 %s 已从 Emby 删除，但数据库更新失败', e.tg)
                     else:
-                        msg += f"**🎂活跃检测** - [{user['Name']}](tg://user?id={e.tg})\n#id{e.tg} 注册后未活跃，禁用失败啦！检查emby连通性\n\n"
-                        LOGGER.info(f"【活跃检测】- 禁用账户 {user['Name']} #id{e.tg}：禁用失败啦！检查emby连通性")
-        msg += '**活跃检测结束**\n'
-        n = 1000
-        chunks = [msg[i:i + n] for i in range(0, len(msg), n)]
-        for c in chunks:
-            await bot.send_message(chat_id=group[0], text=c + f'**{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}**')
+                        notices.append(f'账户 {e.name} #id{e.tg} 删除失败，请检查 Emby 连接。\n')
+                elif e.lv == 'b':
+                    last_activity = user.get('LastActivityDate')
+                    try:
+                        if last_activity:
+                            # Emby uses seven fractional digits; Python 3.10 accepts six.
+                            timestamp = re.sub(r'\.(\d+)', lambda match: '.' + match[1][:6].ljust(6, '0'),
+                                               last_activity, count=1)
+                            ac_date = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                            if ac_date.tzinfo is None:
+                                ac_date = ac_date.replace(tzinfo=timezone.utc)
+                        else:
+                            ac_date = e.cr
+                        if ac_date is None:
+                            LOGGER.warning('跳过活跃检测账户 %s：缺少活动和注册时间', e.tg)
+                            continue
+                        if ac_date.tzinfo is not None:
+                            ac_date = ac_date.astimezone().replace(tzinfo=None)
+                    except (AttributeError, TypeError, ValueError):
+                        LOGGER.warning('跳过活跃检测账户 %s：活动时间无效', e.tg)
+                        continue
+                    if now < ac_date + timedelta(days=activity_check_days):
+                        continue
+                    if await emby.emby_change_policy(emby_id=e.embyid, disable=True):
+                        if sql_update_emby(Emby.embyid == e.embyid, lv='c', disabled_at=datetime.now()):
+                            notices.append(f'账户 {e.name} #id{e.tg} 已连续 {activity_check_days} 天未活跃，已禁用。\n')
+                        else:
+                            LOGGER.error('账户 %s 已在 Emby 禁用，但数据库更新失败', e.tg)
+                    else:
+                        notices.append(f'账户 {e.name} #id{e.tg} 禁用失败，请检查 Emby 连接。\n')
+        msg = ''.join(notices) + '活跃检测结束\n'
+        for start in range(0, len(msg), 1000):
+            await bot.send_message(chat_id=group[0], text=msg[start:start + 1000])
