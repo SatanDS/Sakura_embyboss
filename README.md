@@ -733,6 +733,8 @@ python -B scripts/run_offline_tests.py
 
 上線前還必須用 Stripe 測試模式驗證付款回調重試、金額／幣種篡改、付款成功但網站離線、重複發碼、未勾選須知、月底續期和普通／VIP跨期排期。測試和生產密鑰、Webhook URL、資料庫及兌換碼加密密鑰必須分開。
 
+如果点击付款后未进入 Stripe，先查看脱敏诊断：`docker compose logs --since=5m --tail=300 embyboss 2>&1 | grep -F 'payment_failure'`。日志只保留操作、异常类型、错误码、已知参数名、HTTP 状态和 Stripe 请求编号，不记录密钥、请求体、完整响应或异常正文。`request_id=req_...` 可用于在对应测试或正式环境的 Stripe Workbench 请求日志中定位失败请求；仅凭网页“请求失败”不能判断金额过低或支付方式未开通。
+
 ### 16.1 Emby 4.9 + SenPlayer identity mapping
 
 Emby 4.9.5.0 does not provide a usable `/emby/Users/Me` route; `Me` is parsed as a GUID and returns `Unrecognized Guid format`. Never use a client-supplied `userId` as the identity source by calling `/emby/Users/{id}`: that endpoint does not bind the path ID to the token.

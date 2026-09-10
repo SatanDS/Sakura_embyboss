@@ -16,10 +16,12 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field, StrictBool, StrictInt
 
 from bot import bot, config
+from bot import LOGGER
 owner = getattr(__import__('bot'), 'owner', 0)
 admins = getattr(__import__('bot'), 'admins', [])
 bot_name = getattr(__import__('bot'), 'bot_name', 'bot')
 from bot.payments.pages import render_page
+from bot.payments.diagnostics import log_payment_error
 try:
     from bot.payments.models import Audit, Order
     from bot.payments.browser_auth import BrowserAuth, LoginError, session_csrf, LOGIN_SECONDS, SESSION_SECONDS
@@ -44,7 +46,8 @@ class SecurePaymentRoute(APIRoute):
                 response = JSONResponse({"detail": "invalid_request"}, status_code=422)
             except HTTPException as exc:
                 response = JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
-            except Exception:
+            except Exception as exc:
+                _log_provider_error("request", exc)
                 response = JSONResponse({"detail": "service_unavailable"}, status_code=503)
             response.headers.update({
                 "Cache-Control": "no-store", "Pragma": "no-cache",
@@ -73,8 +76,7 @@ async def payment_worker():
         except Exception as exc:
             # Payment is optional; a missing key or provider outage must not
             # terminate the Telegram worker.
-            from bot import LOGGER
-            LOGGER.error("支付后台任务失败: %s", type(exc).__name__)
+            _log_provider_error("worker", exc)
         await asyncio.sleep(60)
 
 
@@ -162,7 +164,21 @@ _PUBLIC_ERROR_CODES = {
 
 def _public_error(exc, fallback="service_unavailable"):
     code = _error_code(exc)
-    return code if code in _PUBLIC_ERROR_CODES else fallback
+    if code in _PUBLIC_ERROR_CODES:
+        return code
+    from stripe import AuthenticationError, PermissionError, StripeError
+    if isinstance(exc, StripeError):
+        if code == "amount_too_small":
+            return "stripe_amount_too_small"
+        if isinstance(exc, AuthenticationError):
+            return "stripe_credentials_invalid"
+        if isinstance(exc, PermissionError):
+            return "stripe_permission_denied"
+    return fallback
+
+
+def _log_provider_error(context, exc):
+    log_payment_error(LOGGER, context, exc)
 
 
 class CheckoutRequest(BaseModel):
@@ -327,6 +343,7 @@ async def create_checkout(body: CheckoutRequest, request: Request):
     except HTTPException:
         raise
     except Exception as exc:
+        _log_provider_error("checkout", exc)
         raise HTTPException(status_code=409 if _error_code(exc) in {"product_changed", "sold_out"} else 400,
                              detail=_public_error(exc))
 
@@ -373,14 +390,14 @@ async def stripe_webhook(request: Request, stripe_signature: str = Header(defaul
         service = _service()
         service.ingest_webhook(raw, stripe_signature)
     except Exception as exc:
+        _log_provider_error("webhook", exc)
         raise HTTPException(status_code=400, detail=_public_error(exc, "stripe_signature_invalid"))
     try:
         await service.process_tasks(limit=10)
     except Exception as exc:
         # The event and task are already durable; let Stripe stop retrying the
         # same delivery while the outbox retries provider/DB work.
-        from bot import LOGGER
-        LOGGER.error("支付回调已入队但处理延迟: %s", type(exc).__name__)
+        _log_provider_error("webhook_tasks", exc)
     return {"received": True}
 
 

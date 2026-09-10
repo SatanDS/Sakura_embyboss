@@ -601,6 +601,9 @@ class PaymentService:
                     raise PaymentError("unknown_task_type")
             except Exception as exc:
                 error = exc.code if isinstance(exc, PaymentError) else type(exc).__name__
+                from bot import LOGGER
+                from .diagnostics import log_payment_error
+                log_payment_error(LOGGER, "task_" + task_type, exc)
             with self.session_factory.begin() as session:
                 task = session.query(Task).filter_by(id=task_id, lease_token=token).with_for_update().first()
                 if task:

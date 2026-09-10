@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, patch
 from urllib.parse import parse_qs, urlsplit
 
 from fastapi import FastAPI
+from loguru import logger
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
@@ -114,6 +115,7 @@ class PaymentHTTPTests(unittest.IsolatedAsyncioTestCase):
         self.authenticator = self.auth_module.BrowserAuth(self.sessions)
         sys.modules["bot"].bot = types.SimpleNamespace(send_message=AsyncMock())
         sys.modules["bot"].config = types.SimpleNamespace()
+        sys.modules["bot"].LOGGER = logger
         sys.modules["bot"].owner = 1001
         sys.modules["bot"].admins = [1002]
         sys.modules["bot"].bot_name = "test_login_bot"
@@ -310,6 +312,61 @@ class PaymentHTTPTests(unittest.IsolatedAsyncioTestCase):
         status, body, response_headers = await self.request("/payments/orders")
         self.assertEqual((status, body["orders"][0]["buyer_tg"]), (200, 1001))
         self.assertIn((b"cache-control", b"no-store"), response_headers)
+
+    async def test_checkout_provider_error_is_logged_and_response_stays_private(self):
+        import stripe
+        csrf = await self.login()
+        secret = "sk_test_private_fixture"
+        self.service.create_checkout.side_effect = stripe.InvalidRequestError(
+            "bad request " + secret, param="payment_method_types[1]", http_status=400,
+            headers={"request-id": "req_test123"}, http_body=secret,
+        )
+        messages = []
+        sink = type(logger).add(logger, messages.append, format="{message}")
+        try:
+            status, body, _ = await self.request("/payments/checkout", method="POST",
+                headers={"origin": "https://pay.test", "X-CSRF-Token": csrf},
+                body={"product_id": "p1", "product_version": 1, "terms_version": "v1", "accepted": True})
+        finally:
+            logger.remove(sink)
+        self.assertEqual((status, body), (400, {"detail": "service_unavailable"}))
+        self.assertEqual(len(messages), 1)
+        self.assertIn("request_id=req_test123", str(messages[0]))
+        self.assertIn("param=payment_method_types[1]", str(messages[0]))
+        self.assertNotIn(secret, str(messages) + str(body))
+
+    async def test_checkout_reports_only_confirmed_provider_categories(self):
+        import stripe
+        csrf = await self.login()
+        for error, expected in (
+            (stripe.InvalidRequestError("private", param="amount", code="amount_too_small"), "stripe_amount_too_small"),
+            (stripe.AuthenticationError("private"), "stripe_credentials_invalid"),
+            (stripe.PermissionError("private"), "stripe_permission_denied"),
+            (stripe.InvalidRequestError("private", param="payment_method_types"), "service_unavailable"),
+        ):
+            with self.subTest(error=type(error).__name__):
+                self.service.create_checkout.side_effect = error
+                status, body, _ = await self.request("/payments/checkout", method="POST",
+                    headers={"origin": "https://pay.test", "X-CSRF-Token": csrf},
+                    body={"product_id": "p1", "product_version": 1, "terms_version": "v1", "accepted": True})
+                self.assertEqual((status, body), (400, {"detail": expected}))
+
+    async def test_webhook_signature_failure_does_not_log_payload(self):
+        import stripe
+        self.settings.stripe_webhook_secret = "whsec_fixture"
+        error = stripe.SignatureVerificationError("private webhook body", "secret_signature")
+        self.service.ingest_webhook = lambda *_args: (_ for _ in ()).throw(error)
+        messages = []
+        sink = type(logger).add(logger, messages.append, format="{message}")
+        try:
+            status, body, _ = await self.request("/payments/stripe/webhook", method="POST",
+                headers={"Stripe-Signature": "secret_signature"}, body={"private": "secret-body"})
+        finally:
+            logger.remove(sink)
+        self.assertEqual((status, body), (400, {"detail": "stripe_signature_invalid"}))
+        self.assertIn("type=SignatureVerificationError", str(messages))
+        for secret in ("private webhook body", "secret_signature", "secret-body"):
+            self.assertNotIn(secret, str(messages) + str(body))
 
     async def test_browser_cookie_required_and_cross_origin_reads_rejected(self):
         await self.login()

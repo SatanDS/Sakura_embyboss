@@ -13,6 +13,8 @@ from types import SimpleNamespace
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
+from loguru import logger
+from unittest.mock import AsyncMock
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -20,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def load_payment_modules():
     base = declarative_base()
     bot = types.ModuleType("bot")
+    bot.LOGGER = logger
     sql = types.ModuleType("bot.sql_helper")
     sql.Base = base
     sys.modules["bot"] = bot
@@ -119,6 +122,32 @@ class PaymentCoreTests(unittest.TestCase):
         with self.sessions.begin() as session:
             task = self.service.enqueue(session, "immediate-test", "notify_code", {"order_id": "x"})
         self.assertLessEqual(task.next_run, self.service.utcnow())
+
+    def test_checkout_worker_failure_is_retryable_and_logs_stripe_metadata(self):
+        import stripe
+        from datetime import timedelta
+        order = self.ps.create_order(42, "p1", 1, self.service.TERMS_VERSION, True)
+        with self.sessions.begin() as session:
+            task = session.query(self.models.Task).filter_by(unique_key="checkout:" + order["id"]).one()
+            task.next_run = self.service.utcnow() - timedelta(seconds=5)
+        self.gateway.create_checkout = AsyncMock(side_effect=stripe.InvalidRequestError(
+            "private_response", param="expires_at", http_status=400,
+            headers={"request-id": "req_worker123"}))
+        messages = []
+        sink = type(logger).add(logger, messages.append, format="{message}")
+        try:
+            self.assertEqual(asyncio.run(self.ps.process_tasks(limit=1)), 1)
+        finally:
+            logger.remove(sink)
+        with self.sessions() as session:
+            task = session.query(self.models.Task).filter_by(unique_key="checkout:" + order["id"]).one()
+            self.assertEqual((task.state, task.attempts, task.last_error), ("pending", 1, "InvalidRequestError"))
+            self.assertEqual(session.get(self.models.Order, order["id"]).payment_state, "pending")
+            self.assertEqual(session.query(self.models.Code).count(), 0)
+        self.assertIn("operation=task_create_checkout", str(messages))
+        self.assertIn("param=expires_at", str(messages))
+        self.assertIn("request_id=req_worker123", str(messages))
+        self.assertNotIn("private_response", str(messages))
 
 
 if __name__ == "__main__":
