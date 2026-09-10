@@ -51,7 +51,7 @@ async def p_start(_, msg):
     # group-membership gate because a buyer may not have an Emby account yet.
     if len(getattr(msg, "command", [])) > 1 and str(msg.command[1]).startswith("paylogin_"):
         from bot.modules.commands.payment import approve_browser_login
-        token = str(msg.command[1])[8:]
+        token = str(msg.command[1]).removeprefix("paylogin_")
         result = await approve_browser_login(msg.from_user.id, token)
         await deleteMessage(msg)
         if isinstance(result, tuple):

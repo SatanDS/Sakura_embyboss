@@ -1,5 +1,6 @@
 """Browser payment login regressions; no Telegram, MySQL, or production config."""
 
+import ast
 import importlib.util
 import json
 import sys
@@ -8,7 +9,8 @@ import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 from http.cookies import SimpleCookie
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
+from urllib.parse import parse_qs, urlsplit
 
 from fastapi import FastAPI
 
@@ -133,6 +135,65 @@ class PaymentHTTPTests(unittest.IsolatedAsyncioTestCase):
         self.app = FastAPI()
         self.app.include_router(self.api.router)
         self.cookies = {}
+        self.load_bot_login_handlers()
+
+    def load_bot_login_handlers(self):
+        # Load the real command handlers, stubbing only Telegram transport and
+        # unrelated startup imports. Authentication and persistence stay real.
+        bot_module = sys.modules["bot"]
+        bot_module.prefixes = ["/"]
+        bot_module.bot.on_message = lambda *_args, **_kwargs: lambda handler: handler
+        bot_module.bot.on_callback_query = lambda *_args, **_kwargs: lambda handler: handler
+        for name in ("bot.modules", "bot.modules.commands", "bot.func_helper"):
+            package = types.ModuleType(name)
+            package.__path__ = []
+            sys.modules[name] = package
+        transport = types.ModuleType("bot.func_helper.msg_utils")
+        for name in ("sendMessage", "deleteMessage", "callAnswer", "editMessage"):
+            setattr(transport, name, AsyncMock())
+        self.transport = transport
+        sys.modules[transport.__name__] = transport
+        sys.modules["bot.web.api.payment"] = self.api
+        spec = importlib.util.spec_from_file_location(
+            "bot.modules.commands.payment", ROOT / "bot/modules/commands/payment.py")
+        self.payment_commands = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = self.payment_commands
+        spec.loader.exec_module(self.payment_commands)
+        source = ROOT / "bot/modules/commands/start.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        handler = next(node for node in tree.body
+                       if isinstance(node, ast.AsyncFunctionDef) and node.name == "p_start")
+        handler.decorator_list = []
+        self.group_check = AsyncMock(return_value=False)
+        namespace = {"deleteMessage": transport.deleteMessage, "sendMessage": transport.sendMessage,
+                     "user_in_group_filter": self.group_check}
+        exec(compile(ast.Module(body=[handler], type_ignores=[]), str(source), "exec"), namespace)
+        self.start_handler = namespace["p_start"]
+
+    async def begin_bot_login(self, user=1001):
+        status, challenge, headers = await self.request("/payments/auth/start", method="POST",
+            headers={"origin": "https://pay.test", "X-Payment-Request": "1"})
+        self.assertEqual(status, 200)
+        self.assertTrue(any(b"HttpOnly" in value and b"Secure" in value
+                            for key, value in headers if key == b"set-cookie"))
+        payload = parse_qs(urlsplit(challenge["login_url"]).query)["start"][0]
+        self.assertLessEqual(len(payload), 64)
+        message = types.SimpleNamespace(command=["start", payload], from_user=types.SimpleNamespace(id=user))
+        await self.start_handler(None, message)
+        self.group_check.assert_not_awaited()
+        self.transport.deleteMessage.assert_awaited_with(message)
+        prompt = self.transport.sendMessage.await_args
+        self.assertIn(challenge["display_code"], prompt.args[1])
+        buttons = prompt.kwargs["buttons"].inline_keyboard[0]
+        self.assertEqual([button.callback_data for button in buttons], [
+            f"paylogin:yes:{challenge['challenge_id']}", f"paylogin:no:{challenge['challenge_id']}"])
+        return challenge
+
+    async def decide_bot_login(self, challenge, user=1001, approve=True):
+        action = "yes" if approve else "no"
+        callback = types.SimpleNamespace(data=f"paylogin:{action}:{challenge['challenge_id']}",
+                                        from_user=types.SimpleNamespace(id=user))
+        await self.payment_commands.payment_login_decision(None, callback)
 
     def tearDown(self):
         self.engine.dispose()
@@ -175,13 +236,10 @@ class PaymentHTTPTests(unittest.IsolatedAsyncioTestCase):
         return start["status"], json.loads(payload), start["headers"]
 
     async def login(self, user=1001):
-        status, challenge, headers = await self.request("/payments/auth/start", method="POST",
-                                                        headers={"origin": "https://pay.test", "X-Payment-Request": "1"})
-        self.assertEqual(status, 200)
-        self.assertTrue(any(b"HttpOnly" in value and b"Secure" in value for key, value in headers if key == b"set-cookie"))
-        token = challenge["login_url"].split("paylogin_", 1)[1]
-        prepared = self.authenticator.prepare(token, user)
-        self.authenticator.decide(prepared["id"], user, approve=True)
+        challenge = await self.begin_bot_login(user)
+        status, pending, _ = await self.request("/payments/auth/poll", headers={"X-Payment-Request": "1"})
+        self.assertEqual((status, pending["authenticated"]), (200, False))
+        await self.decide_bot_login(challenge, user)
         status, body, headers = await self.request("/payments/auth/poll", headers={"X-Payment-Request": "1"})
         self.assertEqual((status, body["authenticated"]), (200, True))
         for key, value in headers:
@@ -190,6 +248,37 @@ class PaymentHTTPTests(unittest.IsolatedAsyncioTestCase):
         status, identity, _ = await self.request("/payments/me")
         self.assertEqual(status, 200)
         return identity["csrf_token"]
+
+    async def test_bot_preserves_urlsafe_token_characters(self):
+        for edge in ("_", "-"):
+            with self.subTest(edge=edge):
+                self.cookies.clear()
+                link_token = edge + "A" * 41 + edge
+                with patch.object(self.auth_module.secrets, "token_urlsafe",
+                                  side_effect=["B" * 43, link_token]):
+                    challenge = await self.begin_bot_login()
+                await self.decide_bot_login(challenge)
+                status, body, _ = await self.request("/payments/auth/poll", headers={"X-Payment-Request": "1"})
+                self.assertEqual((status, body["authenticated"]), (200, True))
+
+    async def test_wrong_bot_approver_and_denial_do_not_issue_session(self):
+        challenge = await self.begin_bot_login()
+        await self.decide_bot_login(challenge, user=1002)
+        status, body, _ = await self.request("/payments/auth/poll", headers={"X-Payment-Request": "1"})
+        self.assertEqual((status, body["authenticated"]), (200, False))
+        await self.decide_bot_login(challenge, approve=False)
+        status, body, _ = await self.request("/payments/auth/poll", headers={"X-Payment-Request": "1"})
+        self.assertEqual((status, body["detail"]), (410, "challenge_denied"))
+        await self.decide_bot_login(challenge)
+        self.assertEqual((await self.request("/payments/me"))[0], 401)
+
+    async def test_bot_confirmation_cannot_bypass_expiry(self):
+        challenge = await self.begin_bot_login()
+        self.authenticator.now = lambda: datetime.utcnow() + timedelta(seconds=self.auth_module.LOGIN_SECONDS + 1)
+        await self.decide_bot_login(challenge)
+        status, body, _ = await self.request("/payments/auth/poll", headers={"X-Payment-Request": "1"})
+        self.assertEqual((status, body["detail"]), (410, "challenge_expired"))
+        self.assertEqual((await self.request("/payments/me"))[0], 401)
 
     async def test_actual_routes_login_csrf_origin_and_logout(self):
         self.assertEqual((await self.request("/payments/auth/start", method="POST"))[0], 403)
