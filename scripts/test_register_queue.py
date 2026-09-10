@@ -161,6 +161,20 @@ class RegisterQueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reason2, "queue_full")
         self.assertIsNone(pos2)
 
+    async def test_paid_registration_uses_reserved_slot_after_counter_reaches_limit(self):
+        async def noop():
+            return None
+
+        self.manager.ensure_started = noop
+        rq._open.all_user = 1
+        rq._open.tem = 1
+        ok, reason, position = await self.manager.enqueue(
+            rq.RegisterJob(3001, "paid", "1234", True, 30, FakeMessage(), payment_code_id="code-1")
+        )
+        self.assertTrue(ok)
+        self.assertEqual(reason, "queued")
+        self.assertEqual(position, 1)
+
     async def test_duplicate_user_is_rejected_while_busy(self):
         async def noop():
             return None

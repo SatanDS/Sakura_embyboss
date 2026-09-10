@@ -164,7 +164,7 @@ class MySQLIntegrationTests(unittest.TestCase):
         cls.sql = load_sql_runtime(cls.engine)
         cls.fresh_sql = load_sql_runtime(cls.fresh_engine)
 
-        run_upgrade(cls.upgrade_url, cls.sql, "20260315_03")
+        run_upgrade(cls.upgrade_url, cls.sql, "20260315_04")
         cls.old_revision = revision_at(cls.engine)
         cls.old_columns = {column["name"] for column in sa.inspect(cls.engine).get_columns("emby")}
         with cls.engine.begin() as connection:
@@ -187,7 +187,7 @@ class MySQLIntegrationTests(unittest.TestCase):
     def test_upgrade_retains_old_rows_and_null_freeze_start(self):
         self.assertEqual(self.old_revision, "20260315_03")
         self.assertNotIn("disabled_at", self.old_columns)
-        self.assertEqual(self.first_revision, "20260909_04")
+        self.assertEqual(self.first_revision, "20260909_05")
         self.assertEqual(self.repeated_revision, self.first_revision)
         with self.sql["Session"]() as session:
             disabled = session.get(self.sql["Emby"], 11001)
@@ -200,7 +200,7 @@ class MySQLIntegrationTests(unittest.TestCase):
             self.assertIsNone(active.disabled_at)
 
     def test_fresh_startup_and_repeat_upgrade_are_usable(self):
-        self.assertEqual(self.first_fresh_revision, "20260909_04")
+        self.assertEqual(self.first_fresh_revision, "20260909_05")
         self.assertEqual(self.repeated_fresh_revision, self.first_fresh_revision)
         with self.fresh_sql["Session"]() as session:
             row = self.fresh_sql["Emby"](tg=12001, embyid="fresh-user", lv="c", disabled_at=datetime(2026, 9, 9))

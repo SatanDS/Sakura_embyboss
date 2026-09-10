@@ -79,6 +79,7 @@ user_p = [
     BotCommand("count", "[用户] 媒体库数量"),
     BotCommand("red", "[用户/禁言] 发红包"),
     BotCommand("srank", "[用户/禁言] 查看计分")]
+user_p.append(BotCommand("pay", "购买账号套餐"))
 
 # 取消 BotCommand("exchange", "[私聊] 使用注册码")
 admin_p = user_p + [

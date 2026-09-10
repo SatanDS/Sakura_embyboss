@@ -159,6 +159,7 @@ class AccountLifecycleTests(unittest.IsolatedAsyncioTestCase):
         namespace = dict(self.namespace, and_=and_, _open=SimpleNamespace(exchange=False),
                          FloodWait=type('FloodWait', (Exception,), {}), sleep=asyncio.sleep,
                          get_all_emby2=lambda condition: [], sql_update_emby2=Mock(),
+                         _managed_or_none=lambda tg: None,
                          Emby2=self.emby_model)
         # The final non-Telegram query uses expired; its empty result is stubbed.
         self.emby_model.expired = 0

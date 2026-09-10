@@ -24,6 +24,10 @@ services:
     network_mode: host
     depends_on:
       - mysql
+    environment:
+      TGBOT_STRIPE_SECRET_KEY: ${TGBOT_STRIPE_SECRET_KEY:-}
+      TGBOT_STRIPE_WEBHOOK_SECRET: ${TGBOT_STRIPE_WEBHOOK_SECRET:-}
+      TGBOT_PAYMENT_CODE_KEY: ${TGBOT_PAYMENT_CODE_KEY:-}
     volumes:
       - ./config.json:/app/config.json
       - ./log:/app/log

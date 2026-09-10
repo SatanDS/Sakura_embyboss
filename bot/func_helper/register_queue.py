@@ -31,6 +31,9 @@ class RegisterJob:
     stats: bool
     days: int
     status_message: object
+    payment_code_id: Optional[str] = None
+    payment_tier: str = "normal"
+    reservation_key: Optional[str] = None
 
 
 class RegisterQueueManager:
@@ -73,10 +76,23 @@ class RegisterQueueManager:
             if job.user_id in self._busy_users:
                 return False, "duplicate", None
             current_tem = int(_open.tem or 0)
-            if current_tem + self._reserved_slots >= _open.all_user:
+            # A paid registration already owns a durable reservation created
+            # with the order; do not reject it because another account filled
+            # the live counter after payment.
+            if not job.payment_code_id and current_tem + self._reserved_slots >= _open.all_user:
                 return False, "slot_full", None
-            if self._queue.qsize() >= self._max_waiting_queue_size_locked():
+            if not job.payment_code_id and self._queue.qsize() >= self._max_waiting_queue_size_locked():
                 return False, "queue_full", None
+
+            if getattr(getattr(config, "payments", None), "enabled", False) and not job.payment_code_id:
+                from bot.payments.service import reserve_registration, PaymentError
+                from bot.sql_helper import Session
+                try:
+                    with Session.begin() as session:
+                        job.reservation_key = f"free:{job.user_id}"
+                        reserve_registration(session, job.reservation_key, _open.all_user)
+                except PaymentError:
+                    return False, "slot_full", None
 
             ahead = self._active_jobs + self._queue.qsize()
             self._busy_users.add(job.user_id)
@@ -96,6 +112,11 @@ class RegisterQueueManager:
                 LOGGER.exception(f"注册队列worker异常[{worker_index}]: {e}")
                 await self._safe_edit(job.status_message, "❌ 注册任务执行异常，请稍后重试。", re_create_ikb)
             finally:
+                if job.reservation_key:
+                    from bot.payments.service import release_registration
+                    from bot.sql_helper import Session
+                    with Session.begin() as session:
+                        release_registration(session, job.reservation_key)
                 async with self._lock:
                     self._active_jobs = max(0, self._active_jobs - 1)
                     self._busy_users.discard(job.user_id)
@@ -111,7 +132,7 @@ class RegisterQueueManager:
                 return await self._safe_edit(job.status_message, "💦 你已经有账户啦！请勿重复注册。")
             if not job.stats and int(current.us or 0) <= 0:
                 return await self._safe_edit(job.status_message, "🤖 当前没有可用注册资格，请重新领取注册码后再试。")
-            if _open.tem >= _open.all_user:
+            if _open.tem >= _open.all_user and not job.payment_code_id:
                 return await self._safe_edit(
                     job.status_message,
                     f'**🚫 很抱歉，剩余可注册总数({_open.tem})，已达总注册限制({_open.all_user})。**',
@@ -139,7 +160,21 @@ class RegisterQueueManager:
                 await self._rollback_created_account(job.user_id, eid, "创建后检测到账户状态已变化")
                 return await self._safe_edit(job.status_message, '⚠️ 账户状态已变化，请重新打开面板确认。')
 
-            if job.stats:
+            if job.payment_code_id:
+                from bot.payments.service import PaymentService, PaymentError
+                from bot.payments.settings import PaymentSettings
+                from bot import config
+                try:
+                    from bot.sql_helper import Session
+                    PaymentService(Session, PaymentSettings.from_config(config), None).finalize_registration(
+                        job.payment_code_id, job.user_id, eid, job.username, pwd, job.pwd2, datetime.now(), ex,
+                    )
+                    updated = True
+                except PaymentError as exc:
+                    LOGGER.error(f"付费注册码入账失败: tg={job.user_id}, error={exc.code}")
+                    await self._rollback_created_account(job.user_id, eid, "付费注册码入账失败")
+                    return await self._safe_edit(job.status_message, "❌ 付费注册入账失败，请联系管理员。")
+            elif job.stats:
                 updated = sql_update_emby(
                     Emby.tg == job.user_id,
                     embyid=eid,

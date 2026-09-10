@@ -687,6 +687,51 @@ docker run --rm \
 - Bot Token 只在一個執行個體使用；更換後使用 --force-recreate。
 - 每次更新後檢查 git status、容器狀態及日誌。
 
+## 17. Stripe 付款與一次性兌換碼
+
+付款功能預設關閉。第一版使用獨立 HTTPS 網站和 Stripe Checkout 單次付款，不在 Telegram 內嵌 Stripe，也不提供自動續費或一般退款。Telegram 內的數位服務仍須遵守 Telegram Stars 規則；Stripe 網站只作為外部付款入口。
+
+付款前必须在浏览器发起 Telegram 登录挑战，再回到 Bot 确认一次性验证码；挑战有效期 5 分钟并绑定发起浏览器。登录后还必须勾选当前版本的购买须知。成功付款后才由 Stripe Webhook 验证并发放一张可转赠、只能兑换一次的加密兑换码；浏览器返回成功页不能直接触发发码。Stripe `event.id`、订单、支付对象和发码记录都有唯一约束，重复通知会安全忽略。
+
+商品分為普通／VIP 注冊碼和普通／VIP 續期碼，價格由管理員在支付商品資料表設定，金額使用 CNY 最小單位（分）。VIP 權益和普通權益可按開通日逐月排期，提前購買不會立即覆蓋目前周期。付款成功只代表收到兌換碼，不會自動創建 Emby 帳戶。
+
+在伺服器環境檔設定以下密鑰，絕對不要寫進 Git 或 `config.json`：
+
+~~~bash
+export TGBOT_STRIPE_SECRET_KEY=sk_test_...
+export TGBOT_STRIPE_WEBHOOK_SECRET=whsec_...
+export TGBOT_PAYMENT_CODE_KEY=<base64-url-safe-32-byte-key>
+~~~
+
+在 `config.json` 的最外層加入並確認支付網站地址：
+
+~~~json
+"payments": {
+  "enabled": false,
+  "public_url": "https://pay.example.com",
+  "live_mode": false,
+  "checkout_minutes": 30,
+  "seat_limit": 1000,
+  "terms_version": "2026-09-09-v1"
+}
+~~~
+
+先在 Stripe 測試模式建立 Webhook，指向 `https://pay.example.com/payments/stripe/webhook`，監聽 `checkout.session.completed`、`checkout.session.async_payment_succeeded`、`checkout.session.async_payment_failed`、`checkout.session.expired`、退款和爭議事件。支付頁面要求 Stripe 帳戶實際已開通支付方式；CNY 定價不代表你的商戶一定能使用支付寶或微信支付。
+
+付款網站入口是 `https://pay.example.com/payments/shop`，Bot 私聊 `/pay` 也會返回該地址。更新後先保持 `enabled: false`，執行資料庫遷移和測試模式小額驗證；確認 Webhook、補單、發碼和 Bot 兌換都正常，再切換為 `true`。一般售後退款不在 Bot 或後台提供；Stripe 外部退款、拒付和法律要求仍會記錄並通知管理員。
+
+測試命令：
+
+~~~bash
+python -B scripts/test_payment_core.py
+python -B scripts/test_payment_entitlements.py
+python -B scripts/test_payment_api.py
+python -B scripts/test_payment_browser_auth.py
+python -B scripts/run_offline_tests.py
+~~~
+
+上線前還必須用 Stripe 測試模式驗證付款回調重試、金額／幣種篡改、付款成功但網站離線、重複發碼、未勾選須知、月底續期和普通／VIP跨期排期。測試和生產密鑰、Webhook URL、資料庫及兌換碼加密密鑰必須分開。
+
 ### 16.1 Emby 4.9 + SenPlayer identity mapping
 
 Emby 4.9.5.0 does not provide a usable `/emby/Users/Me` route; `Me` is parsed as a GUID and returns `Unrecognized Guid format`. Never use a client-supplied `userId` as the identity source by calling `/emby/Users/{id}`: that endpoint does not bind the path ID to the token.

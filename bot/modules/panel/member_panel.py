@@ -39,7 +39,7 @@ from bot.sql_helper.sql_emby import sql_get_emby, sql_update_emby, Emby
 from bot.sql_helper.sql_emby2 import sql_get_emby2, sql_delete_emby2
 
 # 创号函数
-async def create_user(_, call, stats):
+async def create_user(_, call, stats, payment_code=None):
     msg = await ask_return(call,
                            text='🤖**注意：您已进入注册状态:\n\n• 请在2min内输入 `[用户名][空格][安全码]`\n• 举个例子🌰：`苏苏 1234`**\n\n• 用户名中不限制中/英文/emoji，🚫**特殊字符**'
                                 '\n• 安全码为敏感操作时附加验证，请填入最熟悉的数字4~6位；退出请点 /cancel', timer=120,
@@ -64,7 +64,7 @@ async def create_user(_, call, stats):
             if not stats and int(current.us or 0) <= 0:
                 return await msg.reply('🤖 当前没有可用注册资格，请重新领取注册码后再试。')
 
-            days = _open.open_us if stats else int(current.us)
+            days = (int(payment_code["months"]) * 30 if payment_code else _open.open_us) if stats else int(current.us)
             queue = get_register_queue_manager()
             send = await msg.reply(
                 f'🆗 会话结束，收到设置\n\n用户名：**{emby_name}**  安全码：**{emby_pwd2}** \n\n__正在加入注册队列__......')
@@ -76,6 +76,8 @@ async def create_user(_, call, stats):
                     stats=stats,
                     days=days,
                     status_message=send,
+                    payment_code_id=payment_code.get("id") if payment_code else None,
+                    payment_tier=payment_code.get("tier", "normal") if payment_code else "normal",
                 )
             )
             if ok:
@@ -128,6 +130,14 @@ async def create(_, call):
     :return:
     """
     stats = None
+    payment_code = None
+    try:
+        from bot.payments.service import PaymentService
+        from bot.payments.settings import PaymentSettings
+        from bot.sql_helper import Session
+        payment_code = PaymentService(Session, PaymentSettings.from_config(config), None).pending_code(call.from_user.id)
+    except Exception:
+        payment_code = None
     queue = get_register_queue_manager()
     if await queue.is_user_busy(call.from_user.id):
         return await callAnswer(call, '⚠️ 你已有注册任务正在排队或处理中，请稍后。', True)
@@ -139,7 +149,9 @@ async def create(_, call):
 
         if e.embyid:
             return await callAnswer(call, '💦 你已经有账户啦！请勿重复注册。', True)
-        if _open.stat:
+        if payment_code and payment_code["kind"] == "register":
+            stats = True
+        elif _open.stat:
             stats = True
         elif int(e.us or 0) > 0:
             stats = False
@@ -153,7 +165,7 @@ async def create(_, call):
 
     if send is False:
         return
-    await create_user(_, call, stats=stats)
+    await create_user(_, call, stats=stats, payment_code=payment_code)
 
 
 # 换绑tg

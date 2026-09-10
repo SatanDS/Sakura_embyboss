@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="same-origin">
+  <meta name="color-scheme" content="light dark">
+  <title>{{ page_title }} · {{ brand_name }}</title>
+  <link rel="icon" type="image/png" href="/payments/static/brand.png">
+  <link rel="stylesheet" href="/payments/static/payments.css">
+  <script src="/payments/static/theme.js"></script>
+  <script defer src="/payments/static/lucide.min.js"></script>
+  <script defer src="/payments/static/payments.js"></script>
+</head>
+<body data-page="{{ page }}" data-order-id="{{ order_id|default('') }}">
+  <a class="skip-link" href="#main">跳到主要内容</a>
+  <aside class="sidebar">
+    <a class="brand" href="/payments/shop"><img src="/payments/static/brand.png" width="44" height="44" alt=""><span>{{ brand_name }}<small>会员中心</small></span></a>
+    <nav aria-label="主要导航">
+      <a href="/payments/shop" {% if page == 'shop' %}aria-current="page"{% endif %}><i data-lucide="shopping-bag"></i><span>购买套餐</span></a>
+      <a href="/payments/my-orders" {% if page in ['orders', 'order'] %}aria-current="page"{% endif %}><i data-lucide="receipt-text"></i><span>我的订单</span></a>
+      <a id="admin-nav" href="/payments/admin" hidden {% if page == 'admin' %}aria-current="page"{% endif %}><i data-lucide="sliders-horizontal"></i><span>销售管理</span></a>
+    </nav>
+    <div class="sidebar-foot"><i data-lucide="shield-check"></i><span>Stripe 安全支付</span></div>
+  </aside>
+  <div class="workspace">
+    <header class="topbar">
+      <span class="breadcrumb">会员中心 <span>/</span> {{ page_title }}</span>
+      <div class="topbar-actions">
+        <button id="theme-toggle" class="icon-button" type="button" title="切换明暗主题" aria-label="切换明暗主题"><i data-lucide="sun-moon"></i></button>
+        <span id="identity" class="identity" hidden></span>
+        <button id="login-button" class="button small" type="button"><i data-lucide="send"></i>Telegram 登录</button>
+        <button id="logout-button" class="icon-button" hidden type="button" title="退出登录" aria-label="退出登录"><i data-lucide="log-out"></i></button>
+      </div>
+    </header>
+    <main id="main" tabindex="-1">
+      <div class="page-heading"><div><p class="eyebrow">{{ brand_name }} 会员服务</p><h1>{{ page_title }}</h1></div><button id="refresh-button" class="icon-button" title="刷新" aria-label="刷新" type="button"><i data-lucide="refresh-cw"></i></button></div>
+      <div id="page-error" class="notice danger" role="alert" hidden></div>
+      <div id="page-status" class="empty-state" role="status"><span class="spinner"></span><p>正在加载</p></div>
+      {% if page == 'shop' %}
+      <section id="shop-view" hidden aria-label="套餐商品">
+        <div class="section-toolbar">
+          <div class="segments" role="tablist" aria-label="套餐用途"><button type="button" role="tab" aria-selected="true" data-kind="register">注册新账号</button><button type="button" role="tab" aria-selected="false" data-kind="renew">续期已有账号</button></div>
+          <span class="subtle">人民币 CNY · 单次付款</span>
+        </div>
+        <div class="tier-row"><h2 id="product-section-title">注册套餐</h2><div class="select-wrap"><label for="tier-filter">线路等级</label><select id="tier-filter"><option value="all">全部等级</option><option value="normal">普通</option><option value="vip">VIP</option></select></div></div>
+        <div id="products" class="product-grid"></div>
+        <div id="products-empty" class="empty-state" hidden><i data-lucide="package-open"></i><h2>暂无在售套餐</h2><p>请选择其他等级，或稍后查看。</p></div>
+        <section class="purchase-terms" aria-labelledby="terms-title"><h2 id="terms-title"><i data-lucide="file-check-2"></i>购买须知</h2><p id="terms-text"></p><div class="terms-facts"><span>可转赠 · 仅限一次兑换</span><span>兑换后开始计算权益</span><span>不自动续费</span></div></section>
+      </section>
+      {% elif page == 'orders' %}
+      <section id="orders-view" hidden aria-label="订单记录">
+        <div class="section-toolbar"><label class="search-field"><i data-lucide="search"></i><input id="order-search" type="search" placeholder="搜索订单号或套餐" aria-label="搜索订单号或套餐"></label><select id="order-filter" aria-label="支付状态"><option value="all">全部状态</option><option value="pending">待支付</option><option value="paid">已支付</option><option value="expired">已过期</option><option value="review">待核查</option></select></div>
+        <div class="table-scroll"><table><thead><tr><th>订单 / 套餐</th><th>金额</th><th>支付状态</th><th>发码状态</th><th>创建时间</th><th><span class="sr-only">操作</span></th></tr></thead><tbody id="orders-body"></tbody></table></div>
+        <div id="orders-empty" class="empty-state" hidden><i data-lucide="receipt-text"></i><h2>暂无订单</h2><a class="button" href="/payments/shop">购买套餐</a></div>
+        <p id="orders-count" class="subtle results-count"></p>
+      </section>
+      {% elif page == 'order' %}
+      <section id="order-view" hidden aria-label="订单详情">
+        <a class="back-link" href="/payments/my-orders"><i data-lucide="arrow-left"></i>我的订单</a>
+        <div class="order-head"><div><span id="detail-status" class="badge"></span><h2 id="detail-title"></h2><p id="detail-id" class="mono subtle"></p></div><strong id="detail-amount" class="order-amount"></strong></div>
+        <dl id="order-facts" class="facts-grid"></dl>
+        <div id="order-message" class="notice" role="status" hidden></div>
+        <section id="code-section" class="code-section" hidden><h2>兑换码</h2><div class="code-bar"><output id="code-value" class="mono">•••• •••• •••• ••••</output><button id="reveal-code" class="icon-button" type="button" title="显示兑换码" aria-label="显示兑换码"><i data-lucide="eye"></i></button><button id="copy-code" class="icon-button" disabled type="button" title="复制兑换码" aria-label="复制兑换码"><i data-lucide="copy"></i></button></div><p class="subtle">请妥善保管。兑换码可转赠，兑换后无法再次使用。</p></section>
+        <a id="continue-payment" class="button primary" hidden rel="noreferrer">继续付款<i data-lucide="arrow-up-right"></i></a>
+      </section>
+      {% elif page == 'admin' %}
+      <section id="admin-view" hidden aria-label="销售管理">
+        <div class="segments admin-tabs" role="tablist" aria-label="管理视图"><button type="button" role="tab" aria-selected="true" data-admin-tab="orders">订单管理</button><button type="button" role="tab" aria-selected="false" data-admin-tab="products">套餐管理</button></div>
+        <section id="admin-orders-panel">
+          <div class="metrics"><div><span>订单数</span><strong id="metric-orders">0</strong></div><div><span>已支付金额</span><strong id="metric-paid">¥0.00</strong></div><div><span>待核查</span><strong id="metric-review">0</strong></div></div>
+          <div class="section-toolbar"><label class="search-field"><i data-lucide="search"></i><input id="admin-order-search" type="search" placeholder="订单号、套餐或 Telegram ID" aria-label="搜索订单"></label><select id="admin-order-filter" aria-label="筛选订单"><option value="all">全部订单</option><option value="pending">待支付</option><option value="paid">已支付</option><option value="review">待核查</option><option value="expired">已过期</option></select></div>
+          <div class="table-scroll"><table><thead><tr><th>订单 / 购买者</th><th>套餐</th><th>金额</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead><tbody id="admin-orders-body"></tbody></table></div>
+          <p id="admin-orders-empty" class="empty-state" hidden>暂无符合条件的订单</p>
+        </section>
+        <section id="admin-products-panel" hidden><div class="section-toolbar"><h2>套餐目录</h2><button id="new-product" class="button primary" type="button" hidden><i data-lucide="plus"></i>新增套餐</button></div><div class="table-scroll"><table><thead><tr><th>套餐</th><th>用途 / 等级</th><th>时长</th><th>价格</th><th>销售上限</th><th>状态</th><th><span class="sr-only">操作</span></th></tr></thead><tbody id="admin-products-body"></tbody></table></div><p id="admin-products-empty" class="empty-state" hidden>暂无套餐</p></section>
+      </section>
+      {% endif %}
+    </main>
+    <footer><span>© {{ brand_name }}</span><span>支付宝 / 微信支付 · 由 Stripe 处理付款</span></footer>
+  </div>
+  <dialog id="login-dialog" aria-labelledby="login-title"><div class="dialog-heading"><h2 id="login-title">登录会员中心</h2><button class="icon-button" data-close type="button" title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></div><div class="login-mark"><i data-lucide="send"></i></div><p id="login-status" class="text-center" role="status">正在创建登录请求</p><div id="login-code-wrap" class="login-code" hidden><span class="subtle">确认码</span><strong id="login-code" class="mono"></strong></div><a id="telegram-link" class="button primary full-width" target="_blank" rel="noopener noreferrer" hidden>前往 Telegram 确认<i data-lucide="arrow-up-right"></i></a><button id="retry-login" type="button" class="button full-width" hidden>重新登录</button></dialog>
+  <dialog id="checkout-dialog" aria-labelledby="checkout-title"><div class="dialog-heading"><h2 id="checkout-title">确认购买</h2><button class="icon-button" data-close type="button" title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></div><div class="checkout-summary"><div><h3 id="checkout-product"></h3><p id="checkout-description" class="subtle"></p></div><strong id="checkout-price"></strong></div><p id="checkout-terms" class="legal-copy"></p><label class="checkbox-row"><input id="accept-terms" type="checkbox"><span>我已阅读并同意购买须知，确认所选套餐及不退款规则。</span></label><p id="checkout-error" class="notice danger" hidden role="alert"></p><button id="pay-button" type="button" class="button primary full-width" disabled>前往付款<i data-lucide="arrow-up-right"></i></button></dialog>
+  <dialog id="product-dialog" aria-labelledby="product-dialog-title"><form id="product-form"><div class="dialog-heading"><h2 id="product-dialog-title">编辑套餐</h2><button class="icon-button" data-close type="button" title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></div><label class="form-field">套餐名称<input name="title" required maxlength="120"></label><div class="form-grid"><label class="form-field">用途<select name="kind"><option value="register">注册新账号</option><option value="renew">续期已有账号</option></select></label><label class="form-field">等级<select name="tier"><option value="normal">普通</option><option value="vip">VIP</option></select></label><label class="form-field">时长<select name="months"><option value="1">1 个月</option><option value="3">3 个月</option><option value="6">6 个月</option><option value="12">12 个月</option></select></label><label class="form-field">价格（人民币元）<input name="price" type="number" min="0" max="999999.99" step="0.01" required></label></div><label class="form-field">销售上限<input name="sales_limit" type="number" min="1" step="1" placeholder="不限"></label><label class="checkbox-row"><input name="active" type="checkbox"><span>上架销售</span></label><label class="checkbox-row"><input id="confirm-product-change" type="checkbox" required><span>我已确认价格与上架状态。</span></label><p id="product-error" class="notice danger" hidden role="alert"></p><button type="submit" class="button primary full-width"><i data-lucide="save"></i>保存套餐</button></form></dialog>
+  <dialog id="review-dialog" aria-labelledby="review-title"><form id="review-form"><div class="dialog-heading"><h2 id="review-title">记录核查结论</h2><button class="icon-button" data-close type="button" title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></div><p id="review-order-id" class="mono subtle"></p><label class="form-field">处理结论<textarea name="note" required minlength="3" maxlength="1000" rows="5"></textarea></label><p id="review-error" class="notice danger" hidden role="alert"></p><button type="submit" class="button primary full-width"><i data-lucide="check"></i>确认记录</button></form></dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+  <template id="product-template"><article class="product"><div class="product-top"><span class="product-icon"><i data-lucide="ticket"></i></span><span class="badge product-tier"></span></div><h3 class="product-title"></h3><p class="product-kind subtle"></p><div class="price"><strong></strong><span> / <span class="product-months"></span> 个月</span></div><ul class="product-details"><li><i data-lucide="check"></i><span class="product-access"></span></li><li><i data-lucide="calendar-days"></i><span class="product-period"></span></li><li><i data-lucide="gift"></i><span>可转赠 · 一次兑换</span></li></ul><button type="button" class="button product-buy">选择套餐<i data-lucide="arrow-right"></i></button></article></template>
+  <noscript><div class="noscript">请启用 JavaScript 以登录及购买套餐。</div></noscript>
+</body>
+</html>

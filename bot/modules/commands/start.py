@@ -47,6 +47,16 @@ async def count_info(_, msg):
 # 私聊开启面板
 @bot.on_message(filters.command('start', prefixes) & filters.private)
 async def p_start(_, msg):
+    # External payment site login: this branch intentionally precedes the
+    # group-membership gate because a buyer may not have an Emby account yet.
+    if len(getattr(msg, "command", [])) > 1 and str(msg.command[1]).startswith("paylogin_"):
+        from bot.modules.commands.payment import approve_browser_login
+        token = str(msg.command[1])[8:]
+        result = await approve_browser_login(msg.from_user.id, token)
+        await deleteMessage(msg)
+        if isinstance(result, tuple):
+            return await sendMessage(msg, result[0], buttons=result[1], timer=120)
+        return await sendMessage(msg, result, timer=120)
     if not await user_in_group_filter(_, msg):
         return await asyncio.gather(deleteMessage(msg),
                                     sendMessage(msg,

@@ -122,6 +122,27 @@ def _redeem_renew_code_atomic(register_code: str, user_id: int):
 
 
 async def rgs_code(_, msg, register_code):
+    if str(register_code).startswith("Pay_"):
+        from bot.payments.service import PaymentError, PaymentService
+        from bot.payments.settings import PaymentSettings
+        try:
+            paid = PaymentService(Session, PaymentSettings.from_config(__import__('bot').config), None)
+            current = sql_get_emby(tg=msg.from_user.id)
+            if current and current.embyid:
+                result = paid.redeem_renewal(register_code, msg.from_user.id)
+                if result.get("restored"):
+                    await emby.emby_change_policy(emby_id=result["embyid"], disable=False)
+                return await sendMessage(msg, f"✅ 已兑换 {result['months']} 个月{'VIP' if result['tier'] == 'vip' else '普通'}续期，账号到期时间已更新。")
+            result = paid.claim_code(register_code, msg.from_user.id)
+            if result["kind"] != "register":
+                raise PaymentError("account_required", "请先注册 Emby 账号")
+            if not current:
+                from bot.sql_helper.sql_emby import sql_add_emby
+                sql_add_emby(msg.from_user.id)
+            return await sendMessage(msg, f"✅ 兑换成功：{result['months']} 个月{'VIP' if result['tier'] == 'vip' else '普通'}注册码。请返回面板点击“创建账户”。")
+        except PaymentError as exc:
+            return await sendMessage(msg, f"❌ {exc}")
+
     # 白名单码独立于注册开关，优先处理
     if is_whitelist_code(register_code):
         if not _open.use_whitelist_code:

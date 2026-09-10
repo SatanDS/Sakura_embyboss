@@ -35,6 +35,7 @@ def _legacy_create_all_tables():
     在未安装 Alembic 或配置缺失时兜底建表，保证服务可启动。
     """
     from bot.sql_helper import sql_code, sql_emby, sql_emby2, sql_favorites, sql_partition, sql_request_record, sql_douban  # noqa: F401
+    from bot.payments import models as payment_models  # noqa: F401
 
     Base.metadata.create_all(bind=engine, checkfirst=True)
 
@@ -80,6 +81,10 @@ def sql_start() -> sessionmaker:
 
 
 Session = sql_start()
+
+# Register payment and entitlement models before Alembic inspects metadata.
+from bot.payments import models as payment_models  # noqa: E402,F401
+from bot.payments import entitlements as payment_entitlements  # noqa: E402,F401
 
 
 run_migrations()

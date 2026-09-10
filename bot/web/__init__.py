@@ -9,9 +9,11 @@ import asyncio
 import errno
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.cors import CORSMiddleware
 
-from .api import emby_api_route, user_api_route, auth_api_route
+from .api import emby_api_route, user_api_route, auth_api_route, payment_api_route
+from .api.payment import payment_worker
 from bot import api as config_api, LOGGER
 
 
@@ -28,6 +30,7 @@ class Web:
         self.app: FastAPI = FastAPI()
         self.web_api = None
         self.start_api = None
+        self.payment_task = None
 
     def init_api(self):
         """
@@ -37,6 +40,11 @@ class Web:
         self.app.include_router(emby_api_route)
         self.app.include_router(user_api_route)
         self.app.include_router(auth_api_route)
+        self.app.include_router(payment_api_route)
+        from pathlib import Path
+        payment_static = Path(__file__).resolve().parents[1] / "payments" / "static"
+        if payment_static.is_dir():
+            self.app.mount("/payments/static", StaticFiles(directory=payment_static), name="payment-static")
         # 配字 CORS 的中间件
         self.app.add_middleware(
             CORSMiddleware,
@@ -87,11 +95,16 @@ class Web:
             raise SystemExit from None
 
         LOGGER.info("【API服务】 启动成功!")
+        if getattr(config_api, "status", False) and getattr(__import__('bot').config, "payments", None):
+            self.payment_task = asyncio.create_task(payment_worker(), name="payment-worker")
 
     def stop(self):
         """
         停止 Web API 服务。
         """
+        if self.payment_task:
+            self.payment_task.cancel()
+            self.payment_task = None
         if self.start_api:
             LOGGER.info("正在停止 API 服务...")
             try:

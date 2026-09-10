@@ -132,5 +132,13 @@
     "line_report_token": "CHANGE_ME",
     "api_key": null,
     "allow_legacy_bot_token": false
+  },
+  "payments": {
+    "enabled": false,
+    "public_url": "https://pay.example.com",
+    "live_mode": false,
+    "checkout_minutes": 30,
+    "seat_limit": 1000,
+    "terms_version": "2026-09-09-v1"
   }
 }

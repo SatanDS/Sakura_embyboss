@@ -191,6 +191,40 @@ def is_user_whitelisted(user_details: Optional[Emby]) -> bool:
     )
 
 
+def effective_line_entitlement(user_details: Optional[Emby]):
+    """Resolve a managed paid period at request time; preserve legacy rows."""
+    if not user_details:
+        return None
+    if not hasattr(config, "payments"):
+        return user_details
+    try:
+        from bot.payments.entitlements import resolve_entitlement, AccountEntitlement
+        from bot.sql_helper import Session
+    except (ImportError, AttributeError):
+        # Lightweight integrations/tests that do not load the optional ledger
+        # retain the legacy lv/ex projection.
+        return user_details
+    try:
+        with Session() as session:
+            managed = session.query(AccountEntitlement).filter_by(tg=user_details.tg).first()
+            if managed is None:
+                return user_details
+            current = session.query(Emby).filter(Emby.tg == user_details.tg).first()
+            result = resolve_entitlement(session, current)
+            if result is None:
+                return user_details
+            from types import SimpleNamespace
+            # A blocked account must never regain VIP access merely because a
+            # paid period still has time left (admin/policy bans are separate
+            # from subscription expiry).
+            projected_level = ('a' if result.allowed and result.current_tier == 'vip'
+                               else 'b' if result.allowed else 'c')
+            return SimpleNamespace(lv=projected_level, ex=result.current_end,
+                                   tg=user_details.tg, name=user_details.name)
+    except Exception as exc:
+        raise RuntimeError("payment entitlement lookup failed") from exc
+
+
 async def get_session_server_address(session_id: str) -> Optional[str]:
     """
     通过 Emby API 获取会话的服务器地址
@@ -1069,6 +1103,7 @@ async def line_report(
     # matches Telegram IDs and names and is unsafe for authorization.
     try:
         user_details = sql_get_emby_by_embyid(resolved_user_id, raise_on_error=True)
+        user_details = effective_line_entitlement(user_details)
     except Exception as exc:
         LOGGER.error(f"Line entitlement lookup unavailable: {type(exc).__name__}")
         # An unknown entitlement during an outage is not a policy violation.

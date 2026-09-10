@@ -134,8 +134,21 @@ def sql_update_embys(some_list: list, method=None):
                 return False
         if method == 'ex':
             try:
-                mappings = [{"tg": c[0], "ex": c[1]} for c in some_list]
-                session.bulk_update_mappings(Emby, mappings)
+                from sqlalchemy import inspect as sa_inspect
+                entitlements_ready = all(sa_inspect(session.bind).has_table(name)
+                                         for name in ('payment_account_entitlements', 'payment_account_periods'))
+                if not entitlements_ready:
+                    mappings = [{"tg": c[0], "ex": c[1]} for c in some_list]
+                    session.bulk_update_mappings(Emby, mappings)
+                    session.commit()
+                    return True
+                from bot.payments.entitlements import legacy_update
+                for tg, expiry in sorted(some_list, key=lambda item: item[0]):
+                    row = session.query(Emby).filter(Emby.tg == tg).with_for_update().one_or_none()
+                    if row is None:
+                        continue
+                    for key, value in legacy_update(session, row, {"ex": expiry}).items():
+                        setattr(row, key, value)
                 session.commit()
                 return True
             except:
@@ -219,7 +232,22 @@ def get_all_emby(condition):
             return None
 
 
-def sql_update_emby(condition, **kwargs):
+def sql_managed_entitlement(tg, now=None):
+    """Read the current paid entitlement; database failures must not mean legacy."""
+    try:
+        resolve_entitlement = __import__('bot.payments.entitlements', fromlist=['resolve_entitlement']).resolve_entitlement
+    except (ImportError, AttributeError):
+        return None
+    with Session() as session:
+        row = session.query(Emby).filter(Emby.tg == tg).one_or_none()
+        try:
+            return resolve_entitlement(session, row, now) if row is not None else None
+        except NameError:
+            return None
+
+
+def sql_update_emby(condition, *, entitlement_block_reason=None, entitlement_unblock=False,
+                    entitlement_set_tier=False, **kwargs):
     """
     更新一条emby记录，根据condition来匹配，然后更新其他的字段
     """
@@ -229,6 +257,21 @@ def sql_update_emby(condition, **kwargs):
             emby = session.query(Emby).filter(condition).with_for_update().first()
             if emby is None:
                 return False
+            # Keep pre-migration installations and isolated maintenance tools
+            # compatible until the payment tables have been created.
+            entitlements_ready = False
+            try:
+                from sqlalchemy import inspect as sa_inspect
+                entitlements_ready = all(sa_inspect(session.bind).has_table(name)
+                                         for name in ('payment_account_entitlements', 'payment_account_periods'))
+            except Exception:
+                entitlements_ready = False
+            if entitlements_ready and ('lv' in kwargs or 'ex' in kwargs):
+                from bot.payments.entitlements import legacy_update
+                kwargs = legacy_update(session, emby, kwargs, datetime.now(),
+                                       block_reason=entitlement_block_reason,
+                                       explicit_unblock=entitlement_unblock,
+                                       set_tier=entitlement_set_tier)
             next_level = kwargs.get('lv')
             if next_level is not None:
                 if next_level == 'c' and emby.lv != 'c':
