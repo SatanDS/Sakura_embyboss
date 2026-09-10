@@ -45,6 +45,28 @@ class PaymentSettingsTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 PaymentSettings.from_config(self.config(live_mode=True)).validate()
 
+    def test_setup_command_unpadded_key_preserves_cipher_key(self):
+        raw = bytes(range(224, 256))
+        padded = base64.urlsafe_b64encode(raw).decode("ascii")
+        crypto_spec = importlib.util.spec_from_file_location("payment_crypto_key_test", path.with_name("crypto.py"))
+        crypto = importlib.util.module_from_spec(crypto_spec)
+        crypto_spec.loader.exec_module(crypto)
+        token, _, ciphertext = crypto.CodeCipher(padded).issue("order-key-compatibility")
+        for encoded in (padded, padded.rstrip("=")):
+            with self.subTest(padded=encoded.endswith("=")), self.env(TGBOT_PAYMENT_CODE_KEY=encoded):
+                settings = PaymentSettings.from_config(self.config())
+                settings.validate()
+                self.assertEqual(settings.encryption_key_bytes(), raw)
+                self.assertEqual(crypto.CodeCipher(settings.code_key).reveal(
+                    ciphertext, "order-key-compatibility"), token)
+
+    def test_invalid_encryption_keys_are_rejected(self):
+        valid = base64.urlsafe_b64encode(b"k" * 32).decode("ascii")
+        for encoded in ("", "abc", "!" + valid, valid[:8] + "\n" + valid[8:], "\u4e2d" + valid,
+                        base64.urlsafe_b64encode(b"k" * 31).decode("ascii")):
+            with self.env(TGBOT_PAYMENT_CODE_KEY=encoded), self.assertRaises(ValueError):
+                PaymentSettings.from_config(self.config()).validate()
+
     def test_http_payment_origin_is_only_allowed_for_local_test(self):
         with self.env():
             with self.assertRaises(ValueError):

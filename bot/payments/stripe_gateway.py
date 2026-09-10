@@ -32,8 +32,8 @@ class StripeGateway:
                 "currency": "cny", "unit_amount": order["amount_fen"],
                 "product_data": {"name": product["title"]},
             }}],
-            "success_url": base + "/shop/orders/" + order["id"],
-            "cancel_url": base + "/shop/orders/" + order["id"],
+            "success_url": base + "/payments/shop/orders/" + order["id"],
+            "cancel_url": base + "/payments/shop/orders/" + order["id"],
             "expires_at": order["expires_timestamp"],
         }
         response = await asyncio.to_thread(

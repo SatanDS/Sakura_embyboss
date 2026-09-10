@@ -39,7 +39,10 @@ class PaymentSettings:
 
     def encryption_key_bytes(self):
         try:
-            key = base64.urlsafe_b64decode(self.code_encryption_key.encode('ascii'))
+            encoded = self.code_encryption_key.encode('ascii')
+            # Accept the unpadded URL-safe key produced by the setup command.
+            encoded += b'=' * (-len(encoded) % 4)
+            key = base64.b64decode(encoded, altchars=b'-_', validate=True)
         except (ValueError, UnicodeError):
             raise ValueError('Payment encryption key must be a base64 encoded 32-byte key') from None
         if len(key) != 32:
