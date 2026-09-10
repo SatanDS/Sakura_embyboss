@@ -156,6 +156,9 @@ class Payments(BaseModel):
     checkout_minutes: int = 30
     seat_limit: int = 0
     terms_version: str = "2026-09-09-v1"
+    # Test-mode checkout is deny-by-default. Only these Telegram IDs may use
+    # Stripe sandbox money against the configured database.
+    test_buyer_ids: List[int] = Field(default_factory=list)
 class RedEnvelope(BaseModel):
     status: bool = True  # 是否开启红包
     allow_private: bool = True # 是否允许专属红包

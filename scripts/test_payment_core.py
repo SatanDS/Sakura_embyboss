@@ -59,7 +59,7 @@ class PaymentCoreTests(unittest.TestCase):
         self.settings = SimpleNamespace(enabled=True, public_url="https://pay.test", mode="test",
                                         stripe_secret_key="sk_test_x", stripe_webhook_secret="whsec_x",
                                         code_key=self.key, checkout_minutes=30, seat_limit=10,
-                                        terms_version=self.service.TERMS_VERSION)
+                                        terms_version=self.service.TERMS_VERSION, test_buyer_ids=(1, 42))
         with self.sessions.begin() as session:
             self.product = self.models.Product(id="p1", title="VIP 1 个月", kind="renew", tier="vip",
                                                months=1, price_fen=100, version=1, active=True)
@@ -72,6 +72,9 @@ class PaymentCoreTests(unittest.TestCase):
         self.engine.dispose()
 
     def test_terms_and_product_version_are_enforced(self):
+        with self.assertRaises(self.service.PaymentError) as ctx:
+            self.ps.create_order(99, "p1", 1, self.service.TERMS_VERSION, True)
+        self.assertEqual(ctx.exception.code, "test_buyer_not_allowed")
         with self.assertRaises(self.service.PaymentError) as ctx:
             self.ps.create_order(1, "p1", 1, self.service.TERMS_VERSION, False)
         self.assertEqual(ctx.exception.code, "terms_required")
@@ -97,6 +100,11 @@ class PaymentCoreTests(unittest.TestCase):
             code = session.query(self.models.Code).one()
             self.assertNotIn(token, code.ciphertext)
             self.assertEqual(code.token_hash, self.crypto.code_hash(token))
+
+        self.settings.mode = "live"
+        with self.assertRaises(self.service.PaymentError) as ctx:
+            self.ps.reveal_code(order["id"], 42)
+        self.assertEqual(ctx.exception.code, "order_mode_mismatch")
 
     def test_webhook_event_is_idempotent(self):
         event = {"id": "evt_1", "type": "checkout.session.completed", "livemode": False,

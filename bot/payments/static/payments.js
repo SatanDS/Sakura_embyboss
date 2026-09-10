@@ -16,6 +16,9 @@
     no_capacity: "注册名额已满。", code_held: "该兑换码暂停使用，请联系管理员。", code_unavailable: "兑换码暂不可用，请稍后刷新。",
     invalid_product: "请检查套餐名称、时长、价格和销售上限。", checkout_failed: "暂时无法创建支付，请稍后重试。",
     gateway_unavailable: "支付服务暂不可用，请稍后重试。", challenge_expired: "登录请求已过期，请重新登录。",
+    test_buyer_not_allowed: "当前为测试支付，仅允许配置的测试账号下单。",
+    code_mode_mismatch: "兑换码不属于当前支付环境。",
+    order_mode_mismatch: "订单不属于当前支付环境。",
   };
   const money = (fen) => new Intl.NumberFormat("zh-CN", { style: "currency", currency: "CNY" }).format(Number(fen || 0) / 100);
   const date = (value) => {

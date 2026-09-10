@@ -19,6 +19,7 @@ class PaymentSettings:
     mode: str = 'test'
     seat_limit: int = 0
     terms_version: str = '2026-09-09-v1'
+    test_buyer_ids: tuple = ()
 
     @classmethod
     def from_config(cls, config):
@@ -35,6 +36,7 @@ class PaymentSettings:
             mode=mode,
             seat_limit=int(getattr(section, 'seat_limit', 0) or 0),
             terms_version=str(getattr(section, 'terms_version', '2026-09-09-v1')),
+            test_buyer_ids=tuple(int(value) for value in (getattr(section, 'test_buyer_ids', None) or ())),
         )
 
     def encryption_key_bytes(self):
@@ -59,4 +61,6 @@ class PaymentSettings:
         expected = 'sk_live_' if self.live_mode else 'sk_test_'
         if not self.stripe_secret_key.startswith(expected) or not self.stripe_webhook_secret.startswith('whsec_'):
             raise ValueError('Stripe credentials are missing or do not match payment mode')
+        if self.enabled and not self.live_mode and not self.test_buyer_ids:
+            raise ValueError('Test payment mode requires an explicit test_buyer_ids allowlist')
         self.encryption_key_bytes()

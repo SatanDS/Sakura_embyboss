@@ -712,13 +712,14 @@ export TGBOT_PAYMENT_CODE_KEY=<base64-url-safe-32-byte-key>
   "live_mode": false,
   "checkout_minutes": 30,
   "seat_limit": 1000,
-  "terms_version": "2026-09-09-v1"
+  "terms_version": "2026-09-09-v1",
+  "test_buyer_ids": []
 }
 ~~~
 
 先在 Stripe 測試模式建立 Webhook，指向 `https://pay.example.com/payments/stripe/webhook`，監聽 `checkout.session.completed`、`checkout.session.async_payment_succeeded`、`checkout.session.async_payment_failed`、`checkout.session.expired`、退款和爭議事件。支付頁面要求 Stripe 帳戶實際已開通支付方式；CNY 定價不代表你的商戶一定能使用支付寶或微信支付。
 
-付款網站入口是 `https://pay.example.com/payments/shop`，Bot 私聊 `/pay` 也會返回該地址。更新後先保持 `enabled: false`，執行資料庫遷移和測試模式小額驗證；確認 Webhook、補單、發碼和 Bot 兌換都正常，再切換為 `true`。一般售後退款不在 Bot 或後台提供；Stripe 外部退款、拒付和法律要求仍會記錄並通知管理員。
+付款網站入口是 `https://pay.example.com/payments/shop`，Bot 私聊 `/pay` 也會返回該地址。更新後先保持 `enabled: false`，執行資料庫遷移和測試模式小額驗證；测试模式必须把允许测试付款的 Telegram ID 填入 `test_buyer_ids`，否则所有测试下单都会被拒绝。订单和兑换码会记录 `test/live` 环境，测试付款不会在正式模式兑现。確認 Webhook、補單、發碼和 Bot 兌換都正常，再切換為 `true`。一般售後退款不在 Bot 或後台提供；Stripe 外部退款、拒付和法律要求仍會記錄並通知管理員。
 
 測試命令：
 

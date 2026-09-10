@@ -141,6 +141,14 @@ class PaymentService:
         return getattr(self.settings, "mode", "live" if getattr(self.settings, "live_mode", False) else "test")
 
     @property
+    def test_buyer_ids(self):
+        return frozenset(getattr(self.settings, "test_buyer_ids", ()) or ())
+
+    def _assert_buyer_allowed(self, buyer_tg):
+        if self.mode == "test" and buyer_tg not in self.test_buyer_ids:
+            raise PaymentError("test_buyer_not_allowed", "测试支付仅允许配置的测试账号")
+
+    @property
     def seat_limit(self):
         return int(getattr(self.settings, "seat_limit", 0) or 0)
 
@@ -158,6 +166,7 @@ class PaymentService:
     def _order(order):
         result = {key: getattr(order, key) for key in (
             "id", "buyer_tg", "product_id", "product_snapshot", "amount_fen", "currency", "terms_version",
+            "mode",
             "accepted_at", "payment_state", "fulfillment_state", "checkout_url", "expires_at", "created_at",
             "stripe_session_id", "stripe_payment_intent_id", "refunded", "dispute_status", "review_required",
         )}
@@ -213,6 +222,7 @@ class PaymentService:
             raise PaymentError("sales_disabled", "当前暂停销售")
         if type(buyer_tg) is not int or buyer_tg <= 0:
             raise PaymentError("login_required")
+        self._assert_buyer_allowed(buyer_tg)
         if accepted is not True or terms_version != self.terms_version:
             raise PaymentError("terms_required", "请阅读并确认当前购买须知")
         now = now or utcnow()
@@ -235,6 +245,7 @@ class PaymentService:
                 raise PaymentError("sold_out", "套餐已售完")
             order = Order(id=new_id(), buyer_tg=buyer_tg, product_id=product.id,
                           product_snapshot=self._product(product), amount_fen=product.price_fen, currency="cny",
+                          mode=self.mode,
                           terms_version=terms_version, terms_hash=TERMS_HASH, accepted_at=now,
                           payment_state="pending", fulfillment_state="pending", created_at=now, updated_at=now,
                           # Stripe requires at least 30 minutes at request arrival, including network transit.
@@ -289,7 +300,9 @@ class PaymentService:
             return result
 
     def reveal_code(self, order_id, buyer_tg=None):
-        self.get_order(order_id, buyer_tg)
+        order = self.get_order(order_id, buyer_tg)
+        if order["mode"] != self.mode:
+            raise PaymentError("order_mode_mismatch", "订单不属于当前支付环境")
         with self.session_factory() as session:
             code = session.query(Code).filter_by(order_id=order_id).first()
             if code is None:
@@ -309,6 +322,8 @@ class PaymentService:
                 raise PaymentError("code_held", "此兑换码暂时被冻结，请联系管理员")
             if row.state == "redeemed":
                 raise PaymentError("code_used", "兑换码已被使用")
+            if row.mode != self.mode:
+                raise PaymentError("code_mode_mismatch", "兑换码不属于当前支付环境")
             if row.state == "claimed" and row.redeemer_tg != user_tg:
                 raise PaymentError("code_claimed", "兑换码正在被其他用户处理")
             row.state = "claimed"
@@ -319,7 +334,7 @@ class PaymentService:
 
     def pending_code(self, user_tg):
         with self.session_factory() as session:
-            row = session.query(Code).filter_by(redeemer_tg=user_tg, state="claimed").order_by(Code.claimed_at.desc()).first()
+            row = session.query(Code).filter_by(redeemer_tg=user_tg, state="claimed", mode=self.mode).order_by(Code.claimed_at.desc()).first()
             if not row:
                 return None
             return {"id": row.id, "kind": row.kind, "tier": row.tier, "months": row.months,
@@ -333,6 +348,8 @@ class PaymentService:
                 raise PaymentError("invalid_code", "兑换码无效或已冻结")
             if row.state == "redeemed":
                 raise PaymentError("code_used", "兑换码已被使用")
+            if row.mode != self.mode:
+                raise PaymentError("code_mode_mismatch", "兑换码不属于当前支付环境")
             if row.kind != "renew":
                 raise PaymentError("wrong_code_kind", "此兑换码用于注册新账号")
             Emby = _emby_model()
@@ -358,6 +375,8 @@ class PaymentService:
                 return False
             if row.state != "claimed" or row.redeemer_tg != user_tg or row.kind != "register":
                 raise PaymentError("code_claim_required")
+            if row.mode != self.mode:
+                raise PaymentError("code_mode_mismatch", "兑换码不属于当前支付环境")
             Emby = _emby_model()
             user = session.query(Emby).filter(Emby.tg == user_tg).with_for_update().one()
             if user.embyid:
@@ -385,6 +404,8 @@ class PaymentService:
         return {"ok": True}
 
     def _validate_session(self, order, response):
+        if order.mode != self.mode:
+            raise PaymentError("order_mode_mismatch", "订单不属于当前支付环境")
         intent = response.get("payment_intent")
         intent_id = intent.get("id") if isinstance(intent, dict) else intent
         expected_live = self.mode == "live"
@@ -502,6 +523,8 @@ class PaymentService:
     def fulfill_order(self, order_id):
         with self.session_factory.begin() as session:
             order = session.query(Order).filter_by(id=order_id).with_for_update().one()
+            if order.mode != self.mode:
+                raise PaymentError("order_mode_mismatch", "订单不属于当前支付环境")
             if order.payment_state != "paid":
                 raise PaymentError("payment_unconfirmed")
             code = session.query(Code).filter_by(order_id=order_id).first()
@@ -510,7 +533,7 @@ class PaymentService:
                 held = order.refunded or order.dispute_status not in FINAL_DISPUTES
                 product = order.product_snapshot
                 code = Code(order_id=order_id, token_hash=digest, ciphertext=ciphertext,
-                            kind=product["kind"], tier=product["tier"], months=product["months"],
+                            kind=product["kind"], tier=product["tier"], months=product["months"], mode=order.mode,
                             state="held" if held else "issued", held_reason="external_payment_issue" if held else None)
                 session.add(code)
                 session.flush()

@@ -155,6 +155,7 @@ def _error_code(exc):
 _PUBLIC_ERROR_CODES = {
     "sales_disabled", "product_changed", "terms_required", "terms_changed", "sold_out",
     "capacity_full", "no_capacity", "not_found", "code_held", "code_unavailable",
+    "test_buyer_not_allowed", "code_mode_mismatch", "order_mode_mismatch",
     "stripe_mode_mismatch", "invalid_event", "event_too_large", "stripe_signature_invalid",
 }
 

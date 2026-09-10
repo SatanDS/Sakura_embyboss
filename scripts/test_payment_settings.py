@@ -18,7 +18,8 @@ PaymentSettings = module.PaymentSettings
 class PaymentSettingsTests(unittest.TestCase):
     def config(self, **values):
         defaults = dict(enabled=True, public_url="https://pay.example.test", live_mode=False,
-                        checkout_minutes=30, seat_limit=100, terms_version="terms-v1")
+                        checkout_minutes=30, seat_limit=100, terms_version="terms-v1",
+                        test_buyer_ids=[1001])
         defaults.update(values)
         return SimpleNamespace(payments=SimpleNamespace(**defaults), open=SimpleNamespace(all_user=100))
 
@@ -44,6 +45,11 @@ class PaymentSettingsTests(unittest.TestCase):
         with self.env():
             with self.assertRaises(ValueError):
                 PaymentSettings.from_config(self.config(live_mode=True)).validate()
+
+    def test_enabled_test_mode_requires_allowlist(self):
+        with self.env():
+            with self.assertRaises(ValueError):
+                PaymentSettings.from_config(self.config(test_buyer_ids=[])).validate()
 
     def test_setup_command_unpadded_key_preserves_cipher_key(self):
         raw = bytes(range(224, 256))
