@@ -266,6 +266,8 @@ class PaymentService:
 
     async def _create_checkout(self, order_id):
         order = self.get_order(order_id)
+        if order["mode"] != self.mode:
+            raise PaymentError("order_mode_mismatch", "订单不属于当前支付环境")
         if order["stripe_session_id"] or order["payment_state"] != "pending":
             return
         response = await self.gateway.create_checkout(order)
@@ -481,6 +483,8 @@ class PaymentService:
 
     async def reconcile_order(self, order_id, session_hint=None):
         order = self.get_order(order_id)
+        if order["mode"] != self.mode:
+            raise PaymentError("order_mode_mismatch", "订单不属于当前支付环境")
         session_id = order["stripe_session_id"] or session_hint
         if not session_id:
             await self._create_checkout(order_id)
@@ -566,7 +570,8 @@ class PaymentService:
     async def reconcile_orders(self):
         with self.session_factory.begin() as session:
             orders = session.query(Order).filter(or_(Order.payment_state == "pending", Order.review_required.is_(True),
-                                                       Order.fulfillment_state != "issued")).all()
+                                                       Order.fulfillment_state != "issued"),
+                                                  Order.mode == self.mode).all()
             slot = int(utcnow().replace(tzinfo=timezone.utc).timestamp()) // 300
             for order in orders:
                 if order.payment_state == "expired":

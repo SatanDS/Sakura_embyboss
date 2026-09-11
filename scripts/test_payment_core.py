@@ -141,6 +141,23 @@ class PaymentCoreTests(unittest.TestCase):
             code = session.query(self.models.Code).one()
             self.assertEqual((code.state, code.redeemer_tg), ("issued", None))
 
+    def test_live_mode_never_creates_checkout_for_test_order(self):
+        order = self.ps.create_order(42, "p1", 1, self.service.TERMS_VERSION, True)
+        self.settings.mode = "live"
+        self.gateway.create_checkout = AsyncMock()
+        with self.assertRaises(self.service.PaymentError) as ctx:
+            asyncio.run(self.ps._create_checkout(order["id"]))
+        self.assertEqual(ctx.exception.code, "order_mode_mismatch")
+        self.gateway.create_checkout.assert_not_awaited()
+
+    def test_reconcile_worker_ignores_orders_from_other_mode(self):
+        order = self.ps.create_order(42, "p1", 1, self.service.TERMS_VERSION, True)
+        self.settings.mode = "live"
+        self.assertEqual(asyncio.run(self.ps.reconcile_orders()), 0)
+        with self.sessions() as session:
+            self.assertEqual(session.query(self.models.Task).filter(
+                self.models.Task.task_type == "reconcile_order").count(), 0)
+
     def test_webhook_event_is_idempotent(self):
         event = {"id": "evt_1", "type": "checkout.session.completed", "livemode": False,
                  "data": {"object": {"id": "cs_1", "metadata": {"order_id": "missing"}}}}
