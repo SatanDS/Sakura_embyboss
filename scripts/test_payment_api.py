@@ -329,7 +329,7 @@ class PaymentHTTPTests(unittest.IsolatedAsyncioTestCase):
                 body={"product_id": "p1", "product_version": 1, "terms_version": "v1", "accepted": True})
         finally:
             logger.remove(sink)
-        self.assertEqual((status, body), (400, {"detail": "service_unavailable"}))
+        self.assertEqual((status, body), (400, {"detail": "stripe_payment_methods_unavailable"}))
         self.assertEqual(len(messages), 1)
         self.assertIn("request_id=req_test123", str(messages[0]))
         self.assertIn("param=payment_method_types[1]", str(messages[0]))
@@ -342,7 +342,7 @@ class PaymentHTTPTests(unittest.IsolatedAsyncioTestCase):
             (stripe.InvalidRequestError("private", param="amount", code="amount_too_small"), "stripe_amount_too_small"),
             (stripe.AuthenticationError("private"), "stripe_credentials_invalid"),
             (stripe.PermissionError("private"), "stripe_permission_denied"),
-            (stripe.InvalidRequestError("private", param="payment_method_types"), "service_unavailable"),
+            (stripe.InvalidRequestError("private", param="payment_method_types"), "stripe_payment_methods_unavailable"),
         ):
             with self.subTest(error=type(error).__name__):
                 self.service.create_checkout.side_effect = error

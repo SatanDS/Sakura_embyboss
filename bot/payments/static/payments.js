@@ -20,6 +20,7 @@
     code_mode_mismatch: "兑换码不属于当前支付环境。",
     order_mode_mismatch: "订单不属于当前支付环境。",
     stripe_amount_too_small: "套餐金额低于 Stripe 允许的最低金额，请联系管理员调整价格。",
+    stripe_payment_methods_unavailable: "Stripe 正式账户尚未启用支付宝或微信支付，请在 Stripe 付款方式设置中开通后重试。",
     stripe_credentials_invalid: "Stripe 密钥验证失败，请联系管理员检查支付配置。",
     stripe_permission_denied: "Stripe 拒绝了当前收款权限，请联系管理员核查。",
     service_unavailable: "暂时无法创建或查询付款，请稍后重试或联系管理员。",

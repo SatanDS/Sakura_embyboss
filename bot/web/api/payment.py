@@ -170,6 +170,10 @@ def _public_error(exc, fallback="service_unavailable"):
     if isinstance(exc, StripeError):
         if code == "amount_too_small":
             return "stripe_amount_too_small"
+        param = str(getattr(exc, "param", "") or "")
+        if param == "payment_method_types" or param.startswith("payment_method_types[") \
+                or param.startswith("payment_method_options"):
+            return "stripe_payment_methods_unavailable"
         if isinstance(exc, AuthenticationError):
             return "stripe_credentials_invalid"
         if isinstance(exc, PermissionError):
