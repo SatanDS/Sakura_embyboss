@@ -146,7 +146,7 @@
     if (!checkoutWindow) return;
     try {
       checkoutWindow.document.open();
-      checkoutWindow.document.write(`<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>正在打开 Stripe</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#11131c;color:#f4f2ff;font:15px system-ui,-apple-system,"Microsoft YaHei",sans-serif}.box{text-align:center}.spinner{width:34px;height:34px;margin:0 auto 18px;border:3px solid #454d73;border-top-color:#91a6ff;border-radius:50%;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}p{margin:0;color:#bbb7d0}</style><main class="box"><div class="spinner"></div><strong>正在打开 Stripe 支付页面</strong><p>请勿重复点击或重复付款。</p></main></html>`);
+      checkoutWindow.document.write(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>正在打开 Stripe</title><link rel="stylesheet" href="/payments/static/checkout-wait.css"></head><body><main class="checkout-wait"><div class="checkout-wait-spinner" aria-hidden="true"></div><strong>正在打开 Stripe 支付页面</strong><p>请勿重复点击或重复付款。</p></main></body></html>`);
       checkoutWindow.document.close();
       checkoutWindow.opener = null;
     } catch (_) {}
@@ -156,7 +156,11 @@
     state.checkoutInFlight = true;
     const button = $("pay-button"); button.disabled = true; text($("pay-button-label"), "正在创建支付…"); show($("checkout-error"), false);
     let checkoutWindow = null;
-    try { checkoutWindow = window.open("about:blank", "dusheng-stripe-checkout"); primeCheckoutWindow(checkoutWindow); } catch (_) {}
+    try {
+      const suffix = (window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`).replace(/[^A-Za-z0-9_-]/g, "");
+      checkoutWindow = window.open("about:blank", `dusheng-stripe-checkout-${suffix}`);
+      primeCheckoutWindow(checkoutWindow);
+    } catch (_) {}
     try {
       const result = await api("/checkout", { method: "POST", body: JSON.stringify({ product_id: state.selected.id, product_version: state.selected.version, terms_version: state.terms.version, accepted: true }) });
       const url = safeExternal(result.checkout_url, "stripe"); if (!url) throw new Error("支付链接暂不可用，请在我的订单中查看结果。");

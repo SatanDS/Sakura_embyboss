@@ -36,10 +36,13 @@ class PaymentUITests(unittest.TestCase):
     def test_checkout_and_order_poll_warn_before_repeat_payment(self):
         for marker in ("正在创建支付", "正在跳转到 Stripe", "window.open", "scheduleOrderPoll", "请不要重复付款"):
             self.assertIn(marker, self.javascript)
+        self.assertIn("checkout-wait.css", self.javascript)
+        self.assertIn("dusheng-stripe-checkout-${suffix}", self.javascript)
         self.assertIn('!$("payment-waiting").hidden', self.javascript)
         self.assertIn('target="_blank" rel="noopener noreferrer"', self.template)
         self.assertIn(".payment-waiting", self.styles)
         self.assertIn("animation:spin", self.styles)
+        self.assertIn("checkout-wait-spin", (ROOT / "bot/payments/static/checkout-wait.css").read_text(encoding="utf-8"))
 
     def test_payment_code_prefix_is_distinct_from_admin_format(self):
         self.assertIn('prefix="DuSheng-Pay_"', (ROOT / "bot/payments/service.py").read_text(encoding="utf-8"))

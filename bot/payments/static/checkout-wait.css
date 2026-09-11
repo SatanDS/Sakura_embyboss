@@ -1,0 +1,7 @@
+html,body{margin:0;min-height:100%;background:#11131c;color:#f4f2ff;font:15px/1.6 system-ui,-apple-system,"Microsoft YaHei",sans-serif}
+body{min-height:100vh;display:grid;place-items:center}
+.checkout-wait{text-align:center;padding:24px}
+.checkout-wait-spinner{width:34px;height:34px;margin:0 auto 18px;border:3px solid #454d73;border-top-color:#91a6ff;border-radius:50%;animation:checkout-wait-spin .8s linear infinite}
+.checkout-wait p{margin:0;color:#bbb7d0}
+@keyframes checkout-wait-spin{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){.checkout-wait-spinner{animation-duration:.01ms}}
