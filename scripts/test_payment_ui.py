@@ -34,7 +34,7 @@ class PaymentUITests(unittest.TestCase):
         self.assertIn('class="identity-uid"', rendered)
 
     def test_checkout_and_order_poll_warn_before_repeat_payment(self):
-        for marker in ("正在创建支付", "正在跳转到 Stripe", "window.open", "scheduleOrderPoll", "请不要重复付款"):
+        for marker in ("正在创建支付", "正在跳转到 Stripe", "window.open", "scheduleOrderPoll", "请不要重复付款", "若未自动返回"):
             self.assertIn(marker, self.javascript)
         self.assertIn('new URL("/payments/static/checkout-wait.css", window.location.origin)', self.javascript)
         self.assertIn("dusheng-stripe-checkout-${suffix}", self.javascript)
