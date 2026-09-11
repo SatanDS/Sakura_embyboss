@@ -621,7 +621,19 @@ class PaymentService:
                 error = exc.code if isinstance(exc, PaymentError) else type(exc).__name__
                 from bot import LOGGER
                 from .diagnostics import log_payment_error
-                log_payment_error(LOGGER, "task_" + task_type, exc)
+                # Reconciliation/create tasks left over from the opposite
+                # Stripe environment are intentionally terminal after a
+                # test-to-live switch. Retrying them forever only creates log
+                # noise; mode isolation already prevents any provider call.
+                stale_mode_task = (
+                    isinstance(exc, PaymentError)
+                    and exc.code == "order_mode_mismatch"
+                    and task_type in {"reconcile_order", "create_checkout"}
+                )
+                if stale_mode_task:
+                    error = None
+                else:
+                    log_payment_error(LOGGER, "task_" + task_type, exc)
             with self.session_factory.begin() as session:
                 task = session.query(Task).filter_by(id=task_id, lease_token=token).with_for_update().first()
                 if task:

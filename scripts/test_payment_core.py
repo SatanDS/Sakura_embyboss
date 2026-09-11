@@ -158,6 +158,20 @@ class PaymentCoreTests(unittest.TestCase):
             self.assertEqual(session.query(self.models.Task).filter(
                 self.models.Task.task_type == "reconcile_order").count(), 0)
 
+    def test_stale_mode_reconcile_task_is_completed_without_retry(self):
+        order = self.ps.create_order(42, "p1", 1, self.service.TERMS_VERSION, True)
+        self.settings.mode = "live"
+        with self.sessions.begin() as session:
+            task = session.query(self.models.Task).filter_by(
+                unique_key="checkout:" + order["id"]).one()
+            task.unique_key = "reconcile-stale"
+            task.task_type = "reconcile_order"
+            task.next_run = self.service.utcnow()
+        self.assertEqual(asyncio.run(self.ps.process_tasks(limit=1)), 1)
+        with self.sessions() as session:
+            task = session.query(self.models.Task).filter_by(unique_key="reconcile-stale").one()
+            self.assertEqual((task.state, task.last_error), ("done", None))
+
     def test_webhook_event_is_idempotent(self):
         event = {"id": "evt_1", "type": "checkout.session.completed", "livemode": False,
                  "data": {"object": {"id": "cs_1", "metadata": {"order_id": "missing"}}}}
