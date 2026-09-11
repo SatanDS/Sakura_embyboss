@@ -360,7 +360,7 @@ async def payment_order(order_id: str, request: Request):
         service = _service()
         order = service.get_order(order_id, buyer)
         if order.get("payment_state") == "pending":
-            service.schedule_reconcile(order_id, buyer)
+            service.schedule_reconcile(order_id, buyer, audit=False)
         return order
     except Exception as exc:
         raise HTTPException(status_code=404, detail=_public_error(exc, "not_found"))

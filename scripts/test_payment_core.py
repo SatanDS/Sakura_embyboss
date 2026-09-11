@@ -98,7 +98,7 @@ class PaymentCoreTests(unittest.TestCase):
             row.payment_state = "paid"
         self.ps.fulfill_order(order["id"])
         token = self.ps.reveal_code(order["id"], 42)
-        self.assertTrue(token.startswith("Pay_"))
+        self.assertTrue(token.startswith("DuSheng-Pay_"))
         with self.sessions() as session:
             code = session.query(self.models.Code).one()
             self.assertNotIn(token, code.ciphertext)
@@ -108,6 +108,38 @@ class PaymentCoreTests(unittest.TestCase):
         with self.assertRaises(self.service.PaymentError) as ctx:
             self.ps.reveal_code(order["id"], 42)
         self.assertEqual(ctx.exception.code, "order_mode_mismatch")
+
+    def test_paid_code_uses_dusheng_payment_prefix_and_legacy_prefix_remains_valid(self):
+        order = self.ps.create_order(42, "p1", 1, self.service.TERMS_VERSION, True)
+        with self.sessions.begin() as session:
+            session.get(self.models.Order, order["id"]).payment_state = "paid"
+        self.ps.fulfill_order(order["id"])
+        token = self.ps.reveal_code(order["id"], 42)
+        self.assertTrue(token.startswith("DuSheng-Pay_"))
+        legacy, _, _ = self.crypto.CodeCipher(self.key).issue("legacy-order", prefix="Pay_")
+        self.assertTrue(legacy.startswith("Pay_"))
+
+    def test_reconcile_poll_does_not_create_audit_spam(self):
+        order = self.ps.create_order(42, "p1", 1, self.service.TERMS_VERSION, True)
+        self.ps.schedule_reconcile(order["id"], 42, audit=False)
+        self.ps.schedule_reconcile(order["id"], 42, audit=False)
+        with self.sessions() as session:
+            self.assertEqual(session.query(self.models.Task).filter(
+                self.models.Task.task_type == "reconcile_order").count(), 1)
+            self.assertEqual(session.query(self.models.Audit).count(), 0)
+
+    def test_wrong_kind_claim_does_not_lock_a_transfer_code(self):
+        order = self.ps.create_order(42, "p1", 1, self.service.TERMS_VERSION, True)
+        with self.sessions.begin() as session:
+            session.get(self.models.Order, order["id"]).payment_state = "paid"
+        self.ps.fulfill_order(order["id"])
+        token = self.ps.reveal_code(order["id"], 42)
+        with self.assertRaises(self.service.PaymentError) as ctx:
+            self.ps.claim_code(token, 99, expected_kind="register")
+        self.assertEqual(ctx.exception.code, "wrong_code_kind")
+        with self.sessions() as session:
+            code = session.query(self.models.Code).one()
+            self.assertEqual((code.state, code.redeemer_tg), ("issued", None))
 
     def test_webhook_event_is_idempotent(self):
         event = {"id": "evt_1", "type": "checkout.session.completed", "livemode": False,

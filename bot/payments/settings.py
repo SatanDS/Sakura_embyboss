@@ -34,6 +34,7 @@ class PaymentSettings:
             live_mode=bool(getattr(section, 'live_mode', False)),
             code_key=os.getenv('TGBOT_PAYMENT_CODE_KEY', ''),
             mode=mode,
+            checkout_minutes=int(getattr(section, 'checkout_minutes', 30) or 30),
             seat_limit=int(getattr(section, 'seat_limit', 0) or 0),
             terms_version=str(getattr(section, 'terms_version', '2026-09-09-v1')),
             test_buyer_ids=tuple(int(value) for value in (getattr(section, 'test_buyer_ids', None) or ())),

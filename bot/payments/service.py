@@ -311,8 +311,14 @@ class PaymentService:
                 raise PaymentError("code_held", "该兑换码暂时不可用，请联系管理员")
             return self.cipher.reveal(code.ciphertext, order_id)
 
-    def claim_code(self, plaintext, user_tg):
-        """Atomically reserve a paid code for one Telegram user."""
+    def claim_code(self, plaintext, user_tg, *, expected_kind=None):
+        """Atomically reserve a paid code for one Telegram user.
+
+        Registration is the only flow that should claim a code before an
+        Emby account exists. Rejecting other kinds before changing the state
+        prevents a recipient without an account from accidentally locking a
+        renewal code that was meant to be transferred to another user.
+        """
         from .crypto import code_hash
         with self.session_factory.begin() as session:
             row = session.query(Code).filter_by(token_hash=code_hash(plaintext)).with_for_update().first()
@@ -324,6 +330,8 @@ class PaymentService:
                 raise PaymentError("code_used", "兑换码已被使用")
             if row.mode != self.mode:
                 raise PaymentError("code_mode_mismatch", "兑换码不属于当前支付环境")
+            if expected_kind is not None and row.kind != expected_kind:
+                raise PaymentError("wrong_code_kind", "该兑换码不能用于当前操作")
             if row.state == "claimed" and row.redeemer_tg != user_tg:
                 raise PaymentError("code_claimed", "兑换码正在被其他用户处理")
             row.state = "claimed"
@@ -529,7 +537,7 @@ class PaymentService:
                 raise PaymentError("payment_unconfirmed")
             code = session.query(Code).filter_by(order_id=order_id).first()
             if not code:
-                _, digest, ciphertext = self.cipher.issue(order_id)
+                _, digest, ciphertext = self.cipher.issue(order_id, prefix="DuSheng-Pay_")
                 held = order.refunded or order.dispute_status not in FINAL_DISPUTES
                 product = order.product_snapshot
                 code = Code(order_id=order_id, token_hash=digest, ciphertext=ciphertext,
@@ -543,11 +551,16 @@ class PaymentService:
             else:
                 enqueue(session, "review:" + order_id + ":held", "notify_review", {"order_id": order_id})
 
-    def schedule_reconcile(self, order_id, actor_tg=None):
+    def schedule_reconcile(self, order_id, actor_tg=None, *, audit=True):
         self.get_order(order_id)
         with self.session_factory.begin() as session:
-            enqueue(session, "manual-reconcile:" + new_id(), "reconcile_order", {"order_id": order_id})
-            session.add(Audit(actor_tg=actor_tg, action="reconcile_requested", target_id=order_id, details={}))
+            # Order pages poll every few seconds while an asynchronous payment
+            # settles. Use a short deterministic bucket so polling cannot
+            # create an unbounded task and audit stream.
+            slot = int(utcnow().replace(tzinfo=timezone.utc).timestamp()) // 60
+            enqueue(session, f"manual-reconcile:{order_id}:{slot}", "reconcile_order", {"order_id": order_id})
+            if audit:
+                session.add(Audit(actor_tg=actor_tg, action="reconcile_requested", target_id=order_id, details={}))
         return {"ok": True}
 
     async def reconcile_orders(self):

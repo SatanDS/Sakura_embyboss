@@ -2,9 +2,13 @@
 
 import base64
 import hashlib
+import re
 import secrets
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+
+_PREFIX_RE = re.compile(r"^[A-Za-z][A-Za-z0-9-]{0,14}_$")
 
 
 def code_hash(token):
@@ -21,8 +25,10 @@ class CodeCipher:
             raise ValueError("Payment code encryption key must contain 32 bytes")
         self._cipher = AESGCM(raw)
 
-    def issue(self, order_id):
-        token = "Pay_" + secrets.token_urlsafe(32)
+    def issue(self, order_id, prefix="Pay_"):
+        if not isinstance(prefix, str) or not _PREFIX_RE.fullmatch(prefix):
+            raise ValueError("Invalid payment code prefix")
+        token = prefix + secrets.token_urlsafe(32)
         nonce = secrets.token_bytes(12)
         encrypted = self._cipher.encrypt(nonce, token.encode("ascii"), order_id.encode("ascii"))
         return token, code_hash(token), base64.urlsafe_b64encode(nonce + encrypted).decode("ascii")

@@ -3,7 +3,7 @@
 (() => {
   const $ = (id) => document.getElementById(id);
   const page = document.body.dataset.page;
-  const state = { user: null, products: [], orders: [], terms: null, kind: "register", selected: null, editing: null, review: null, code: null, poll: null, refreshing: false };
+  const state = { user: null, products: [], orders: [], terms: null, kind: "register", selected: null, editing: null, review: null, code: null, poll: null, orderPoll: null, orderPollStarted: 0, refreshing: false, checkoutInFlight: false };
   const labels = { pending: "待支付", paid: "已支付", expired: "已过期", issued: "已发码", claimed: "兑换处理中", redeemed: "已兑换", held: "暂停使用", review: "待核查", fulfilled: "已发码", failed: "待处理" };
   const errors = {
     unauthorized: "请先通过 Telegram 登录。", login_required: "请先通过 Telegram 登录。",
@@ -83,7 +83,8 @@
     try { state.user = await api("/me"); if (!state.user.telegram_id) state.user = null; }
     catch (error) { if (error.status !== 401) throw error; state.user = null; }
     show($("login-button"), !state.user); show($("logout-button"), !!state.user); show($("identity"), !!state.user);
-    text($("identity"), state.user ? `TG ${state.user.telegram_id}` : "");
+    text($("identity").querySelector(".identity-name"), state.user ? "ID" : "");
+    text($("identity").querySelector(".identity-uid"), state.user ? `UID（${state.user.telegram_id}）` : "");
     show($("admin-nav"), ["admin", "owner"].includes(state.user?.role));
   }
   async function startLogin() {
@@ -141,17 +142,37 @@
     text($("checkout-description"), `${product.kind === "register" ? "注册码" : "续期码"} · ${product.tier === "vip" ? "VIP" : "普通"} · ${product.months} 个月 · 1 份`);
     text($("checkout-terms"), state.terms.text); $("checkout-dialog").showModal();
   }
+  function primeCheckoutWindow(checkoutWindow) {
+    if (!checkoutWindow) return;
+    try {
+      checkoutWindow.document.open();
+      checkoutWindow.document.write(`<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>正在打开 Stripe</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#11131c;color:#f4f2ff;font:15px system-ui,-apple-system,"Microsoft YaHei",sans-serif}.box{text-align:center}.spinner{width:34px;height:34px;margin:0 auto 18px;border:3px solid #454d73;border-top-color:#91a6ff;border-radius:50%;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}p{margin:0;color:#bbb7d0}</style><main class="box"><div class="spinner"></div><strong>正在打开 Stripe 支付页面</strong><p>请勿重复点击或重复付款。</p></main></html>`);
+      checkoutWindow.document.close();
+      checkoutWindow.opener = null;
+    } catch (_) {}
+  }
   async function checkout() {
-    if (!$("accept-terms").checked || !state.selected || !state.terms) return;
-    const button = $("pay-button"); button.disabled = true; show($("checkout-error"), false);
+    if (!$("accept-terms").checked || !state.selected || !state.terms || state.checkoutInFlight) return;
+    state.checkoutInFlight = true;
+    const button = $("pay-button"); button.disabled = true; text($("pay-button-label"), "正在创建支付…"); show($("checkout-error"), false);
+    let checkoutWindow = null;
+    try { checkoutWindow = window.open("about:blank", "dusheng-stripe-checkout"); primeCheckoutWindow(checkoutWindow); } catch (_) {}
     try {
       const result = await api("/checkout", { method: "POST", body: JSON.stringify({ product_id: state.selected.id, product_version: state.selected.version, terms_version: state.terms.version, accepted: true }) });
       const url = safeExternal(result.checkout_url, "stripe"); if (!url) throw new Error("支付链接暂不可用，请在我的订单中查看结果。");
-      window.location.assign(url);
+      text($("pay-button-label"), "正在跳转到 Stripe…");
+      button.disabled = true;
+      if (checkoutWindow && !checkoutWindow.closed) checkoutWindow.location.replace(url);
+      else window.location.assign(url);
+      const orderId = result.order_id || result.order?.id;
+      if (checkoutWindow && orderId) window.location.assign("/payments/shop/orders/" + encodeURIComponent(orderId));
     } catch (error) {
+      if (checkoutWindow && !checkoutWindow.closed) checkoutWindow.close();
       displayError("checkout-error", error);
       if (["product_changed", "terms_changed"].includes(error.code)) { $("accept-terms").checked = false; state.selected = null; await loadShop().catch(() => {}); }
+      text($("pay-button-label"), "前往付款");
       button.disabled = !$("accept-terms").checked || !state.selected;
+      state.checkoutInFlight = false;
     }
   }
   function filteredOrders(admin) {
@@ -207,7 +228,32 @@
     const checkoutUrl = safeExternal(order.checkout_url, "stripe");
     const canPay = order.payment_state === "pending" && checkoutUrl && (!order.expires_timestamp || order.expires_timestamp * 1000 > Date.now());
     show($("continue-payment"), !!canPay); if (canPay) $("continue-payment").href = checkoutUrl;
+    const waiting = order.payment_state === "pending" || (order.payment_state === "paid" && order.fulfillment_state !== "issued");
+    show($("payment-waiting"), waiting);
+    if (waiting) {
+      text($("payment-waiting-title"), order.payment_state === "pending" ? "正在等待付款确认" : "付款已确认，正在发放兑换码");
+      text($("payment-waiting-text"), "请不要重复付款。页面会自动更新，完成后可在此查看兑换码。");
+      scheduleOrderPoll();
+    } else stopOrderPoll();
     show($("order-view")); iconRefresh();
+  }
+  function stopOrderPoll() {
+    if (state.orderPoll) { clearTimeout(state.orderPoll); state.orderPoll = null; }
+  }
+  function scheduleOrderPoll() {
+    // pageshow/visibilitychange can fire before the first order response and
+    // after a terminal state. Only poll while the waiting card is visible.
+    if (page !== "order" || !$("order-view") || !$("payment-waiting") || $("payment-waiting").hidden || state.orderPoll) return;
+    if (!state.orderPollStarted) state.orderPollStarted = Date.now();
+    if (Date.now() - state.orderPollStarted > 10 * 60 * 1000) {
+      text($("payment-waiting-text"), "确认时间较长，请稍后手动刷新。若已完成付款，请勿重复付款。");
+      return;
+    }
+    state.orderPoll = setTimeout(async () => {
+      state.orderPoll = null;
+      if (document.hidden) return;
+      try { await loadOrder(); } catch (error) { text($("payment-waiting-text"), errorMessage(error)); scheduleOrderPoll(); }
+    }, 4000);
   }
   async function revealCode() {
     $("reveal-code").disabled = true;
@@ -278,6 +324,7 @@
   $("copy-code")?.addEventListener("click", async () => { if (!state.code) return; try { await navigator.clipboard.writeText(state.code); toast("兑换码已复制"); } catch (_) { toast("复制失败，请选中兑换码后手动复制。"); } });
   document.querySelectorAll("[data-admin-tab]").forEach((button) => button.addEventListener("click", () => { document.querySelectorAll("[data-admin-tab]").forEach((tab) => tab.setAttribute("aria-selected", String(tab === button))); show($("admin-orders-panel"), button.dataset.adminTab === "orders"); show($("admin-products-panel"), button.dataset.adminTab === "products"); }));
   $("new-product")?.addEventListener("click", () => editProduct(null)); $("product-form").addEventListener("submit", saveProduct); $("review-form").addEventListener("submit", saveReview);
-  window.addEventListener("pageshow", (event) => { if (event.persisted) window.location.reload(); });
+  window.addEventListener("pageshow", (event) => { if (event.persisted) window.location.reload(); else if (page === "order") scheduleOrderPoll(); });
+  document.addEventListener("visibilitychange", () => { if (!document.hidden && page === "order" && $("payment-waiting") && !$("payment-waiting").hidden) scheduleOrderPoll(); });
   iconRefresh(); load();
 })();

@@ -36,6 +36,11 @@ class PaymentSettingsTests(unittest.TestCase):
             self.assertEqual(settings.mode, "test")
             self.assertEqual(settings.seat_limit, 100)
 
+    def test_checkout_minutes_is_loaded_from_config(self):
+        with self.env():
+            settings = PaymentSettings.from_config(self.config(checkout_minutes=45))
+            self.assertEqual(settings.checkout_minutes, 45)
+
     def test_disabled_payment_can_start_without_stripe_credentials(self):
         with self.env(TGBOT_STRIPE_SECRET_KEY="", TGBOT_STRIPE_WEBHOOK_SECRET="", TGBOT_PAYMENT_CODE_KEY=""):
             settings = PaymentSettings.from_config(self.config(enabled=False))

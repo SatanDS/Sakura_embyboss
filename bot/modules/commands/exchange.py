@@ -122,7 +122,7 @@ def _redeem_renew_code_atomic(register_code: str, user_id: int):
 
 
 async def rgs_code(_, msg, register_code):
-    if str(register_code).startswith("Pay_"):
+    if str(register_code).startswith(("DuSheng-Pay_", "DuShengPay_", "Pay_")):
         from bot.payments.service import PaymentError, PaymentService
         from bot.payments.settings import PaymentSettings
         try:
@@ -133,7 +133,7 @@ async def rgs_code(_, msg, register_code):
                 if result.get("restored"):
                     await emby.emby_change_policy(emby_id=result["embyid"], disable=False)
                 return await sendMessage(msg, f"✅ 已兑换 {result['months']} 个月{'VIP' if result['tier'] == 'vip' else '普通'}续期，账号到期时间已更新。")
-            result = paid.claim_code(register_code, msg.from_user.id)
+            result = paid.claim_code(register_code, msg.from_user.id, expected_kind="register")
             if result["kind"] != "register":
                 raise PaymentError("account_required", "请先注册 Emby 账号")
             if not current:
