@@ -145,8 +145,9 @@
   function primeCheckoutWindow(checkoutWindow) {
     if (!checkoutWindow) return;
     try {
+      const waitCss = new URL("/payments/static/checkout-wait.css", window.location.origin).href;
       checkoutWindow.document.open();
-      checkoutWindow.document.write(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>正在打开 Stripe</title><link rel="stylesheet" href="/payments/static/checkout-wait.css"></head><body><main class="checkout-wait"><div class="checkout-wait-spinner" aria-hidden="true"></div><strong>正在打开 Stripe 支付页面</strong><p>请勿重复点击或重复付款。</p></main></body></html>`);
+      checkoutWindow.document.write(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>正在打开 Stripe</title><link rel="stylesheet" href="${waitCss}"></head><body><main class="checkout-wait"><div class="checkout-wait-spinner" aria-hidden="true"></div><strong>正在打开 Stripe 支付页面</strong><p>请勿重复点击或重复付款。</p></main></body></html>`);
       checkoutWindow.document.close();
       checkoutWindow.opener = null;
     } catch (_) {}
