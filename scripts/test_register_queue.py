@@ -20,6 +20,10 @@ if not REAL_MODE:
 
 from bot.func_helper import register_queue as rq
 from bot.func_helper.fix_bottons import _telegram_url
+from bot.func_helper.registration_notice import (
+    DEFAULT_REGISTRATION_NOTICE, NOTICE_MAX_UNITS,
+    get_registration_notice, validate_registration_notice,
+)
 
 if REAL_MODE:
     from bot.func_helper.emby import emby
@@ -29,6 +33,27 @@ if REAL_MODE:
 class FakeMessage:
     def __init__(self):
         self.history = []
+
+
+class RegistrationNoticeTests(unittest.TestCase):
+    def test_missing_or_empty_config_preserves_default_notice(self):
+        for config in (SimpleNamespace(), SimpleNamespace(registration_notice=None),
+                       SimpleNamespace(registration_notice=""), SimpleNamespace(registration_notice="  ")):
+            with self.subTest(config=config):
+                self.assertEqual(get_registration_notice(config), DEFAULT_REGISTRATION_NOTICE)
+
+    def test_validation_rejects_empty_non_text_and_invalid_unicode(self):
+        for text in (None, "", " \n ", 123, "\ud800"):
+            with self.subTest(text=repr(text)):
+                with self.assertRaises(ValueError):
+                    validate_registration_notice(text)
+
+    def test_length_limit_counts_utf16_units(self):
+        limit_text = "\U0001f600" * (NOTICE_MAX_UNITS // 2)
+        self.assertEqual(validate_registration_notice(limit_text), limit_text)
+        with self.assertRaises(ValueError):
+            validate_registration_notice(limit_text + "a")
+        self.assertEqual(validate_registration_notice(" \n **新须知** \n "), "**新须知**")
 
 
 class RegisterQueueTests(unittest.IsolatedAsyncioTestCase):
@@ -50,6 +75,7 @@ class RegisterQueueTests(unittest.IsolatedAsyncioTestCase):
             "low_activity": rq.schedall.low_activity,
         }
         self.old_activity_days = rq.config.activity_check_days
+        self.old_notice = rq.config.registration_notice
 
         rq._open.all_user = 10
         rq._open.tem = 0
@@ -58,6 +84,7 @@ class RegisterQueueTests(unittest.IsolatedAsyncioTestCase):
         rq.schedall.check_ex = True
         rq.schedall.low_activity = False
         rq.config.activity_check_days = 10
+        rq.config.registration_notice = None
 
         self.users = {}
         self.messages = []
@@ -129,6 +156,7 @@ class RegisterQueueTests(unittest.IsolatedAsyncioTestCase):
         rq.schedall.check_ex = self.old_schedall["check_ex"]
         rq.schedall.low_activity = self.old_schedall["low_activity"]
         rq.config.activity_check_days = self.old_activity_days
+        rq.config.registration_notice = self.old_notice
 
     async def _cancel_workers(self):
         for task in self.manager._workers:
@@ -285,6 +313,37 @@ class RegisterQueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await self.manager.is_user_busy(user_id))
         self.assertTrue(any("账户状态已变化" in item[1] for item in message.history))
         self.assertFalse(any("用户须知" in item[1] for item in message.history))
+
+    async def test_notice_changes_apply_to_later_successful_registrations(self):
+        for user_id, text in ((4001, "第一版注册须知"), (4002, "第二版注册须知")):
+            self.users[user_id] = SimpleNamespace(tg=user_id, embyid=None, us=30)
+            rq.config.registration_notice = text
+            message = FakeMessage()
+            await self.manager.enqueue(rq.RegisterJob(user_id, f"notice-{user_id}", "2468", False, 30, message))
+            await asyncio.wait_for(self.manager._queue.join(), timeout=2)
+            notices = [item for item in message.history if item[0] == "send"]
+            self.assertEqual(notices, [("send", text, rq.registration_notice_ikb)])
+            self.assertEqual(self.users[user_id].embyid, f"emby-notice-{user_id}")
+
+    async def test_notice_send_failure_does_not_undo_successful_registration(self):
+        for user_id, raises in ((4101, False), (4102, True)):
+            self.users[user_id] = SimpleNamespace(tg=user_id, embyid=None, us=30)
+            message = FakeMessage()
+
+            async def failed_send(message, text, buttons=None):
+                if raises:
+                    raise RuntimeError("notice send failed")
+                return False
+
+            with patch.object(rq, "sendMessage", failed_send):
+                await self.manager.enqueue(rq.RegisterJob(user_id, f"notice-{user_id}", "2468", False, 30, message))
+                await asyncio.wait_for(self.manager._queue.join(), timeout=2)
+            self.assertEqual(self.users[user_id].embyid, f"emby-notice-{user_id}")
+            self.assertEqual(self.users[user_id].us, 0)
+            self.assertTrue(any("创建用户成功" in item[1] for item in message.history))
+            self.assertFalse(await self.manager.is_user_busy(user_id))
+        self.assertEqual(rq._open.tem, 2)
+        self.assertEqual(self.deleted_emby_ids, [])
 
 
 @unittest.skipUnless(REAL_MODE, "Set REGISTER_QUEUE_REAL=1 to run the real Emby registration integration test.")

@@ -174,6 +174,7 @@ class Config(BaseModel):
     main_group: str
     chanel: str
     bot_photo: str
+    registration_notice: Optional[str] = None
     open: Open
     admins: List[int] = Field(default_factory=list)
     money: str

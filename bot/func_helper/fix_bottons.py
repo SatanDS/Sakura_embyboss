@@ -412,7 +412,7 @@ def config_preparation() -> InlineKeyboardMarkup:
         [[('📄 导出日志', 'log_out'), ('📌 设置探针', 'set_tz')],
          [('🎬 显/隐指定库', 'set_block'), (f'{fuxx_pt} 皮套人过滤功能', 'set_fuxx_pitao')],
          [('💠 普通用户线路', 'set_line'),('🌟 白名单线路', 'set_whitelist_line')],
-         [('📡 客户端过滤', 'set_client_filter')],
+         [('📡 客户端过滤', 'set_client_filter'), ('注册须知', 'registration_notice_panel')],
          [(f'{leave_ban} 退群封禁', 'leave_ban'), (f'{uplays} 观影奖励结算', 'set_uplays')],
          [(f'{auto_up} 自动更新bot', 'set_update'), (f'{mp_set} 点播', 'set_mp')],
          [(f'{red_envelope_status} 红包', 'set_red_envelope_status'), (f'{allow_private} 专属红包', 'set_red_envelope_allow_private')],

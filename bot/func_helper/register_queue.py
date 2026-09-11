@@ -8,19 +8,12 @@ from bot.func_helper.concurrency import get_user_lock
 from bot.func_helper.emby import emby
 from bot.func_helper.fix_bottons import re_create_ikb, registration_notice_ikb
 from bot.func_helper.msg_utils import editMessage, sendMessage
+from bot.func_helper.registration_notice import DEFAULT_REGISTRATION_NOTICE, get_registration_notice
 from bot.func_helper.utils import tem_adduser
 from bot.sql_helper.sql_emby import sql_get_emby, sql_update_emby, Emby
 
 
-REGISTRATION_NOTICE = (
-    "📢 **用户须知**\n\n"
-    "1. **私人影视服务器，线路严禁外传。**禁止下载影片、使用爆米花、媒体库模式或创建播放列表；开启这些功能可能导致各种问题，发现违规将直接 Ban。\n\n"
-    "2. 私人服务器成本较高，请大家珍惜使用。访问白名单优化线路时请关闭代理，或将白名单优化线路加入直连规则。\n\n"
-    "3. 如遇“继续播放”无速度，请移除“继续观看”记录或点击“已观看”，重新播放后再拖到之前看到的时间节点；这是本地缓存机制导致的。\n\n"
-    "4. 发送口令领取注册码后，请联系 `@emby_dusheng_bot`。电脑端和安卓手机端推荐免费的 [Hills](https://t.me/Hills_app)；iOS 推荐免费的 [Lenna](https://t.me/Lenna_App)，需使用外区 Apple ID 下载（国区没有）。Infuse、SenPlayer 为付费客户端。\n\n"
-    "5. 注册完成后，下载并注册豆瓣 App，复制豆瓣 ID，然后在 Bot「用户功能 → 豆瓣想看」中绑定 ID。搜索想看的内容并点击“想看”；服务器每 30 分钟同步一次大家的想看动态并自动下载。若自动下载的清晰度不理想，可联系服主洗版。\n\n"
-    "阅读完毕后，点击下方按钮加入 Bot 管理的群组。"
-)
+REGISTRATION_NOTICE = DEFAULT_REGISTRATION_NOTICE
 
 
 @dataclass
@@ -163,7 +156,6 @@ class RegisterQueueManager:
             if job.payment_code_id:
                 from bot.payments.service import PaymentService, PaymentError
                 from bot.payments.settings import PaymentSettings
-                from bot import config
                 try:
                     from bot.sql_helper import Session
                     PaymentService(Session, PaymentSettings.from_config(config), None).finalize_registration(
@@ -226,7 +218,7 @@ class RegisterQueueManager:
             try:
                 notice_result = await sendMessage(
                     job.status_message,
-                    REGISTRATION_NOTICE,
+                    get_registration_notice(config),
                     buttons=registration_notice_ikb,
                 )
                 if notice_result is not True:
