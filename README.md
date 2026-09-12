@@ -24,7 +24,7 @@ Emby 客戶端 -> DuShengCDN/NPM (HTTPS，保留 Host/認證標頭)
 | Caddy | *:18080 | VIP/普通線路入口 |
 | MySQL | 127.0.0.1:3306 | Bot 資料庫 |
 
-8838 不應透過 CDN 公開；Caddy 必須使用 host network，才能以 127.0.0.1 呼叫 Bot 的內部端點。
+8838 不應直接對公網開放；Caddy 必須使用 host network，才能以 127.0.0.1 呼叫 Bot 的內部端點。啟用付款網站時，只透過獨立支付網域反代 `/payments/*`，不要公開整個 Bot API，詳見第 17 節。
 
 ## 2. 申請 Telegram Bot 與 API
 
@@ -691,56 +691,6 @@ docker run --rm \
 - Bot Token 只在一個執行個體使用；更換後使用 --force-recreate。
 - 每次更新後檢查 git status、容器狀態及日誌。
 
-## 17. Stripe 付款與一次性兌換碼
-
-付款功能預設關閉。第一版使用獨立 HTTPS 網站和 Stripe Checkout 單次付款，不在 Telegram 內嵌 Stripe，也不提供自動續費或一般退款。Telegram 內的數位服務仍須遵守 Telegram Stars 規則；Stripe 網站只作為外部付款入口。
-
-付款前必须在浏览器发起 Telegram 登录挑战，再回到 Bot 确认一次性验证码；挑战有效期 5 分钟并绑定发起浏览器。登录后还必须勾选当前版本的购买须知。成功付款后才由 Stripe Webhook 验证并发放一张可转赠、只能兑换一次的加密兑换码；浏览器返回成功页不能直接触发发码。Stripe `event.id`、订单、支付对象和发码记录都有唯一约束，重复通知会安全忽略。
-
-商品分為普通／VIP 注冊碼和普通／VIP 續期碼，價格由管理員在支付商品資料表設定，金額使用 CNY 最小單位（分）。VIP 權益和普通權益可按開通日逐月排期，提前購買不會立即覆蓋目前周期。付款成功只代表收到兌換碼，不會自動創建 Emby 帳戶。
-
-在伺服器環境檔設定以下密鑰，絕對不要寫進 Git 或 `config.json`：
-
-~~~bash
-export TGBOT_STRIPE_SECRET_KEY=sk_test_...
-export TGBOT_STRIPE_WEBHOOK_SECRET=whsec_...
-export TGBOT_PAYMENT_CODE_KEY=<base64-url-safe-32-byte-key>
-~~~
-
-在 `config.json` 的最外層加入並確認支付網站地址：
-
-~~~json
-"payments": {
-  "enabled": false,
-  "public_url": "https://pay.example.com",
-  "live_mode": false,
-  "checkout_minutes": 30,
-  "seat_limit": 1000,
-  "terms_version": "2026-09-09-v1",
-  "test_buyer_ids": []
-}
-~~~
-
-先在 Stripe 測試模式建立 Webhook，指向 `https://pay.example.com/payments/stripe/webhook`，監聽 `checkout.session.completed`、`checkout.session.async_payment_succeeded`、`checkout.session.async_payment_failed`、`checkout.session.expired`、退款和爭議事件。支付頁面要求 Stripe 帳戶實際已開通支付方式；CNY 定價不代表你的商戶一定能使用支付寶或微信支付。
-
-付款網站入口是 `https://pay.example.com/payments/shop`，Bot 私聊 `/pay` 也會返回該地址。更新後先保持 `enabled: false`，執行資料庫遷移和測試模式小額驗證；测试模式必须把允许测试付款的 Telegram ID 填入 `test_buyer_ids`，否则所有测试下单都会被拒绝。订单和兑换码会记录 `test/live` 环境，测试付款不会在正式模式兑现。確認 Webhook、補單、發碼和 Bot 兌換都正常，再切換為 `true`。一般售後退款不在 Bot 或後台提供；Stripe 外部退款、拒付和法律要求仍會記錄並通知管理員。
-
-网页自动发放的兑换码使用 `DuSheng-Pay_` 前缀；管理员通过 Bot 生成的注册码、续期码和白名单码继续使用 `DuSheng-...` 格式。系统同时兼容已经发出的旧 `Pay_` 和 `DuShengPay_` 兑换码。
-
-測試命令：
-
-~~~bash
-python -B scripts/test_payment_core.py
-python -B scripts/test_payment_entitlements.py
-python -B scripts/test_payment_api.py
-python -B scripts/test_payment_browser_auth.py
-python -B scripts/run_offline_tests.py
-~~~
-
-上線前還必須用 Stripe 測試模式驗證付款回調重試、金額／幣種篡改、付款成功但網站離線、重複發碼、未勾選須知、月底續期和普通／VIP跨期排期。測試和生產密鑰、Webhook URL、資料庫及兌換碼加密密鑰必須分開。
-
-如果点击付款后未进入 Stripe，先查看脱敏诊断：`docker compose logs --since=5m --tail=300 embyboss 2>&1 | grep -F 'payment_failure'`。日志只保留操作、异常类型、错误码、已知参数名、HTTP 状态和 Stripe 请求编号，不记录密钥、请求体、完整响应或异常正文。`request_id=req_...` 可用于在对应测试或正式环境的 Stripe Workbench 请求日志中定位失败请求；仅凭网页“请求失败”不能判断金额过低或支付方式未开通。
-
 ### 16.1 Emby 4.9 + SenPlayer identity mapping
 
 Emby 4.9.5.0 does not provide a usable `/emby/Users/Me` route; `Me` is parsed as a GUID and returns `Unrecognized Guid format`. Never use a client-supplied `userId` as the identity source by calling `/emby/Users/{id}`: that endpoint does not bind the path ID to the token.
@@ -897,3 +847,399 @@ docker exec embyboss python3 -c 'import sqlite3;d=sqlite3.connect("file:/emby-au
 - 某種憑據格式回傳 401：修改閘道前，先用相同請求直連本機 Emby 源站比對。不同 Emby 版本接受的 URL 憑據欄位可能不同；閘道不能將源站不接受的憑據視為已驗證身份。
 
 尋求協助時，只提供已遮蔽敏感資訊的指令輸出，不要傳送 `config.json`、Bot／CDN 令牌、密碼或資料庫內容。
+
+## 17. Stripe 付款网站部署与维护
+
+本节按「收款资格 → 备份更新 → 测试配置 → 网站代理 → 登录上架 → 测试验收 → 正式切换」执行。已经完成的配置不需要重新生成密钥或重复创建 Webhook；日常更新看 17.9，报错看 17.11。
+
+### 17.1 部署前确认
+
+适用于第 1～9 节已部署的单实例 Bot、MySQL 和 Caddy。以下命令在实际业务服务器的 Bash 中执行，不是在 Windows、CDN 边缘节点或另一台靶机中执行。
+
+| 项目 | 本节约定 |
+| --- | --- |
+| 项目目录 | `/opt/Tgbot`，注意大小写 |
+| Bot 服务与容器 | Compose 服务 `embyboss`，容器 `embyboss` |
+| MySQL 容器 | `mysql`，数据库名读取容器内的 `MYSQL_DATABASE` |
+| Bot API | `127.0.0.1:8838`，不开放公网端口 |
+| Caddy 容器与入口 | `emby-line-gateway`，host 网络，HTTP `18080` |
+| Caddy 配置与环境文件 | `/opt/Tgbot/caddy/caddyfile`、`/etc/dusheng/emby-line.env` |
+| 支付域名示例 | `pay.example.com`，全文替换成实际域名；当前部署为 `xf.dusheng.lol` |
+
+Stripe 设置入口为 [正式付款方式](https://dashboard.stripe.com/settings/payment_methods) 和 [测试付款方式](https://dashboard.stripe.com/test/settings/payment_methods)。也可从 Dashboard 的「设置 → 支付 → 付款方式」进入；先选对商户账户及正式/测试环境。
+
+**当前代码同时指定支付宝 `alipay` 和微信支付 `wechat_pay`，没有只启用其中一种的配置开关。** 正式收款前必须确认这两项均获批并可用于当前商户的 CNY Checkout。支付宝审核未通过、微信仍在审批时，先保持停售；仅换正式密钥或重启无法解决商户能力限制。测试环境能用，不代表正式环境获批。
+
+本项目使用 Stripe 托管 Checkout，CNY 单次付款，每单一份商品、一张码，不自动续费。没有个人收款码回调或人工确认收款功能，用户截图、点击「已付款」和成功页都不能代替服务端到账验证。Telegram 内数字服务遵循 Stars 规则，本节部署的是独立网站。
+
+### 17.2 备份与拉取代码
+
+首次安装先完成前面的基础部署；以下是已有服务器的更新步骤。备份保存在仓库外，不复制正在运行的 MySQL 数据目录。备份失败、Git 冲突或构建失败时，此命令块会停止。
+
+~~~bash
+(
+set -eu
+cd /opt/Tgbot
+umask 077
+payment_backup="/opt/tgbot-payment-backup-$(date +%Y%m%d-%H%M%S)"
+mkdir -m 700 "$payment_backup"
+cp -a config.json docker-compose.yml .dockerignore "$payment_backup/"
+cp -a caddy/caddyfile "$payment_backup/Caddyfile"
+if [ -f .env ]; then cp -a .env "$payment_backup/"; fi
+if [ -f /etc/dusheng/emby-line.env ]; then
+  cp -a /etc/dusheng/emby-line.env "$payment_backup/emby-line.env"
+fi
+git rev-parse HEAD > "$payment_backup/previous-commit.txt"
+docker image tag "$(docker inspect -f '{{.Image}}' embyboss)" \
+  "embyboss:backup-$(basename "$payment_backup")"
+docker exec mysql sh -c \
+  'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mysqldump -uroot --single-transaction --routines --triggers --events --databases "$MYSQL_DATABASE"' \
+  > "$payment_backup/database.sql"
+test -s "$payment_backup/database.sql"
+echo "备份目录：$payment_backup"
+
+git status --short --branch
+git pull --ff-only --autostash origin master
+test -z "$(git diff --name-only --diff-filter=U)"
+git log -1 --oneline
+python3 -m json.tool config.json >/dev/null
+docker compose config --quiet
+docker compose build embyboss
+)
+~~~
+
+`--autostash` 会尝试合并本机配置；出现冲突时必须核对备份、Git 差异和 stash，不要反复 `stash apply`，不要用示例配置覆盖正式文件。保留服务器的域名、端口、上游，以及第 16.2 节的 Emby 认证目录只读挂载。构建时保留 `.dockerignore` 对 `.env`、`config.json`、数据库和 Telegram session 的排除规则。
+
+### 17.3 测试密钥与配置
+
+测试推荐使用独立数据库、Emby 和测试 Bot。若在现有业务库验证支付，只允许指定测试账号下单；不要拿测试码给真实用户开通或续期。`test/live` 标记只能隔离兑换环境，不能把已经写入业务库的测试权益自动撤销。
+
+在 Stripe 测试环境取得以下密钥。不要把公钥填入后端密钥字段。
+
+| 变量 | 内容 | 保存位置 |
+| --- | --- | --- |
+| `TGBOT_STRIPE_SECRET_KEY` | 测试 Secret key，`sk_test_...`；不是 `pk_test_...` 公钥 | `/opt/Tgbot/.env` |
+| `TGBOT_STRIPE_WEBHOOK_SECRET` | 对应 Webhook 端点的签名密钥，`whsec_...` | 同上 |
+| `TGBOT_PAYMENT_CODE_KEY` | 随机 32 字节的 Base64 URL 安全编码，用于加密兑换码 | 同上 |
+
+在测试环境的「Workbench/开发者 → Webhooks（事件目标）」创建一次端点，URL 使用实际支付域名：
+
+~~~text
+https://pay.example.com/payments/stripe/webhook
+~~~
+
+选择以下事件，并保存此端点的签名密钥。URL 此时可先登记，公网路由完成后再验证投递。
+
+~~~text
+checkout.session.completed
+checkout.session.async_payment_succeeded
+checkout.session.async_payment_failed
+checkout.session.expired
+charge.refunded
+charge.dispute.created
+charge.dispute.updated
+charge.dispute.closed
+~~~
+
+仅首次部署且没有已加密的兑换码时，生成兑换码密钥一次：
+
+~~~bash
+openssl rand -base64 32 | tr '+/' '-_'
+~~~
+
+保留完整输出，包括末尾 `=`，通常为 44 字符；程序也接受正确的无填充编码。生成结果只填入服务器 `.env`，不发到聊天、不写进 README。**已有兑换码时禁止直接换这个密钥**，否则原码无法解密，不能靠重新发码修复。
+
+~~~bash
+cd /opt/Tgbot
+umask 077
+nano .env
+~~~
+
+在原 `.env` 中加入或修改这三行，替换下面的占位值，保留原有 `MYSQL_*` 配置：
+
+~~~dotenv
+TGBOT_STRIPE_SECRET_KEY=sk_test_REPLACE_ME
+TGBOT_STRIPE_WEBHOOK_SECRET=whsec_REPLACE_ME
+TGBOT_PAYMENT_CODE_KEY=REPLACE_WITH_GENERATED_KEY
+~~~
+
+Compose 的 `embyboss.environment` 必须包含以下映射，当前仓库模板已包含。`.env` 不会自动将所有变量传入容器；也不要在 Compose 中写死旧密钥。当前 shell 中同名 `TGBOT_*` 环境变量会覆盖 `.env`，修改后需确保没有残留的 `export` 值。
+
+~~~yaml
+environment:
+  TGBOT_STRIPE_SECRET_KEY: ${TGBOT_STRIPE_SECRET_KEY:-}
+  TGBOT_STRIPE_WEBHOOK_SECRET: ${TGBOT_STRIPE_WEBHOOK_SECRET:-}
+  TGBOT_PAYMENT_CODE_KEY: ${TGBOT_PAYMENT_CODE_KEY:-}
+~~~
+
+编辑现有 `config.json`，在最外层加入/修改 `payments`。以下只是该字段，不是完整配置文件；`123456789` 替换为测试购买者的 Telegram 数字 ID。`public_url` 只填 HTTPS 根地址，不加 `/payments/shop`、查询参数或空格。
+
+~~~json
+"payments": {
+  "enabled": false,
+  "public_url": "https://pay.example.com",
+  "live_mode": false,
+  "checkout_minutes": 30,
+  "seat_limit": 1000,
+  "terms_version": "2026-09-09-v1",
+  "test_buyer_ids": [123456789]
+}
+~~~
+
+`seat_limit` 限制已有账号与已预留注册席位的总量，0 表示不限制，应按实际服务器容量设置。`checkout_minutes` 建议保持 30，创建 Checkout 时增加 60 秒网络传输余量，默认约 31 分钟。须知版本不是须知正文，不能通过随意改版本号更改法律文案。Bot API 同时须为 `api.status: true`，监听 `127.0.0.1:8838`。
+
+编辑后先用新镜像做独立配置校验，不启动第二个 Bot，也不打印密钥：
+
+~~~bash
+(
+set -eu
+cd /opt/Tgbot
+chmod 600 .env config.json
+python3 -m json.tool config.json >/dev/null
+docker compose config --quiet
+docker compose run --rm --no-deps -T embyboss python3 - <<'PY'
+import json
+import runpy
+from types import SimpleNamespace
+
+with open('config.json', encoding='utf-8') as f:
+    raw = json.load(f)
+Settings = runpy.run_path('bot/payments/settings.py')['PaymentSettings']
+p = Settings.from_config(SimpleNamespace(payments=SimpleNamespace(**raw['payments'])))
+p.validate()
+api = raw.get('api', {})
+assert api.get('status') is True, 'Bot API is disabled'
+assert api.get('http_url') == '127.0.0.1', 'Bot API must stay on loopback'
+assert api.get('http_port') == 8838, 'Check Bot API upstream port'
+print('PAYMENT_CONFIG_OK')
+print('SALES_ENABLED =', p.enabled)
+print('LIVE_MODE =', p.live_mode)
+print('PUBLIC_URL =', p.public_url)
+print('TEST_BUYER_COUNT =', len(p.test_buyer_ids))
+print('CODE_KEY_BYTES =', len(p.encryption_key_bytes()))
+PY
+)
+~~~
+
+预期为 `PAYMENT_CONFIG_OK`、`LIVE_MODE = False`、`CODE_KEY_BYTES = 32`。这里验证配置格式，不会验证 Stripe 商户资质或确认 `whsec_...` 属于哪个端点。
+
+### 17.4 支付域名、Caddy 与 CDN
+
+链路为「浏览器/Stripe → HTTPS 支付域名 → CDN/NPM → Caddy HTTP 18080 → 本机 Bot 8838」。DNS 指向你的 HTTPS 入口，CDN 回源地址填实际业务源站，回源协议/端口为 HTTP/18080，保留支付域名 Host。HTTPS 证书必须有效，不能依靠 `curl -k` 通过验收。
+
+支付站关闭缓存，原样转发 Cookie、Set-Cookie、Origin、请求体、查询参数及 `Stripe-Signature`。Webhook 路径不能有验证码、登录挑战或跳转；修改 CDN 后发布配置并等待节点生效。无需对公网开放 8838。
+
+编辑 `/opt/Tgbot/caddy/caddyfile`，在现有 VIP/普通线路配置之后增加以下**独立站点**。已有支付站点则修改原块，勿重复追加；将示例域名替换成实际域名。Caddyfile 中不要包含 Markdown 链接或代码围栏。
+
+~~~caddyfile
+http://pay.example.com:18080 {
+    header Cache-Control "no-store"
+    redir / /payments/shop 302
+
+    handle /payments/* {
+        reverse_proxy 127.0.0.1:8838 {
+            header_up -X-DuSheng-Origin-Token
+            header_up -X-DuSheng-Line-Token
+        }
+    }
+
+    handle {
+        respond "Not Found" 404
+    }
+}
+~~~
+
+这个站点只公开 `/payments/*`，内部 `/emby/*`、`/user/*`、`/auth/*` 不转发；`/payments/admin` 仍由 Bot 登录和角色权限保护。保留原来的 `import emby_local_config ...`、VIP 令牌验证及 HLS 规则。
+
+先验证宿主机的新文件，再重启原 Caddy 容器以刷新挂载。验证失败时不重启，按第 17.2 节的备份修正配置。
+
+~~~bash
+(
+set -eu
+cd /opt/Tgbot
+gateway_image="$(docker inspect -f '{{.Image}}' emby-line-gateway)"
+docker run --rm \
+  --env-file /etc/dusheng/emby-line.env \
+  -v /opt/Tgbot/caddy/caddyfile:/etc/caddy/Caddyfile:ro \
+  "$gateway_image" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+docker restart emby-line-gateway
+host_hash="$(sha256sum caddy/caddyfile | awk '{print $1}')"
+container_hash="$(docker exec emby-line-gateway sha256sum /etc/caddy/Caddyfile | awk '{print $1}')"
+test "$host_hash" = "$container_hash"
+echo 'CONFIG_MOUNT_OK'
+)
+~~~
+
+单文件 bind mount 在编辑器或 Git 替换文件后可能仍指向旧文件：容器内 validate/reload 成功不代表加载了宿主机的新内容。两边摘要必须一致。上述操作只更新 Caddyfile；若改了 `/etc/dusheng/emby-line.env`，还需要按第 9.2 节重建网关，restart 不会更新环境变量。
+
+### 17.5 启动与逐层连通检查
+
+~~~bash
+(
+set -eu
+cd /opt/Tgbot
+docker compose up -d --no-deps --no-build --force-recreate embyboss
+payment_ready=0
+for attempt in $(seq 1 30); do
+  if curl -fsS --max-time 3 http://127.0.0.1:8838/payments/shop >/dev/null; then
+    payment_ready=1
+    break
+  fi
+  sleep 2
+done
+test "$payment_ready" -eq 1
+docker compose ps embyboss
+docker compose logs --since=3m --tail=100 embyboss
+)
+~~~
+
+Bot 启动会自动运行 Alembic 迁移。看到 API 就绪后检查响应内容；**仅有 HTTP 200 不够，空白响应仍视为失败**。这一步不会下单或扣款。
+
+~~~bash
+(
+set -eu
+cd /opt/Tgbot
+payment_host='pay.example.com' # 替换为实际支付域名
+
+local_page="$(curl -fsS --max-time 15 http://127.0.0.1:8838/payments/shop)"
+printf '%s' "$local_page" | grep -q 'payments.css'
+curl -fsS --max-time 15 http://127.0.0.1:8838/payments/products >/dev/null
+echo 'PAYMENT_LOCAL_OK'
+
+gateway_page="$(curl -fsS --max-time 15 -H "Host: $payment_host" http://127.0.0.1:18080/payments/shop)"
+printf '%s' "$gateway_page" | grep -q 'payments.css'
+echo 'PAYMENT_GATEWAY_OK'
+
+public_page="$(curl -fsS --max-time 20 "https://$payment_host/payments/shop")"
+printf '%s' "$public_page" | grep -q 'payments.css'
+public_js="$(curl -fsS --max-time 20 "https://$payment_host/payments/static/payments.js")"
+printf '%s' "$public_js" | grep -q 'scheduleOrderPoll'
+curl -fsS --max-time 20 "https://$payment_host/payments/static/checkout-wait.css" >/dev/null
+echo 'PAYMENT_PUBLIC_OK'
+
+internal_status="$(curl -sS --max-time 15 -o /dev/null -w '%{http_code}' \
+  -H "Host: $payment_host" http://127.0.0.1:18080/emby/line_report)"
+test "$internal_status" = 404
+public_internal_status="$(curl -sS --max-time 20 -o /dev/null -w '%{http_code}' \
+  "https://$payment_host/emby/line_report")"
+test "$public_internal_status" = 404
+echo 'INTERNAL_ROUTES_NOT_EXPOSED'
+)
+~~~
+
+页面路由按 GET 验证，不用 `curl -I` 的 HEAD 请求代替；未实现 HEAD 时可能返回 405。本机正常但网关异常，查 Caddy；网关正常但公网异常，查 CDN 回源、证书和 Host。
+
+### 17.6 登录与商品上架
+
+打开 `https://实际支付域名/payments/shop`，点击「Telegram 登录」，在 Bot 核对确认码并确认，再回到发起登录的原浏览器。请求有效期 5 分钟；构建、重启或等待过久后，请刷新并重新发起，不要复用旧链接。
+
+所有者（`config.owner` 的 Telegram ID）登录后进入「销售管理 → 套餐管理」。系统初始生成普通/VIP 注册码、普通/VIP 续期码的 1、3、6、12 个月草稿，价格为 0 且未上架。所有者设置价格、销售上限并上架后才可购买；销售上限同时计算待支付和已支付订单。普通管理员可以查单、对账和补发原码，不能改价。
+
+后台价格输入单位是人民币元，服务端存储为整数分。验收可选择 ¥10 的测试商品，但 **¥10 不是代码规定的最低价，也不是 Stripe 对所有商户的统一门槛**；实际最低金额受商户结算币种等条件影响，以 Stripe 错误码和账户规则为准。
+
+确认测试白名单正确后，在 `config.json` 中将 `payments.enabled` 改为 `true`，保持 `live_mode: false`；执行 17.3 配置校验和 17.5 的 Bot 重建命令。手工修改配置/`.env` 后要重建容器，单纯 `docker restart` 不会加载新的环境变量。
+
+### 17.7 测试验收
+
+使用白名单中的测试账号，分别完成支付宝和微信的 Stripe 测试付款。测试环境不代表实际扣款；完整兑换、并发和故障测试在隔离的数据库/Emby 中进行。
+
+- 未勾选购买须知不能下单；商品改价或须知版本变化后须重新确认。
+- Checkout 打开时显示等待提示；原浏览器保留订单页。付款后订单页每 4 秒查状态，最长约 10 分钟，超时后可手动刷新；不能把一直转圈当作已到账。
+- 订单应依次确认「已支付」「已发码」。Stripe 托管页的动画和返回由 Stripe 控制；若未自动返回，关闭支付标签页查看原订单，勿因此重新付款。
+- 兑换码应为 `DuSheng-Pay_...`；Bot 管理员创建的旧制码保持 `DuSheng-...` 格式，已发出的 `Pay_`、`DuShengPay_` 仍兼容。换前缀不会改变已有订单的原码。
+- 验证注册/续期用途、VIP/普通周期、转赠、同一码第二次兑换被拒绝。付款只发码，注册成功或兑换续期时才建立权益。
+- Stripe 对应环境的 Webhook 投递返回 2xx。用同一事件重新投递后，仍只有一张码；后台「补发原码」不能生成另一张。
+- 在隔离环境验证金额/币种不符、伪造签名、多人抢兑、服务中断恢复及通知失败；订单付款和发码状态独立，通知失败不能让已收款订单丢失。
+- 检查非购买者不能查询兑换码，普通用户不能管理商品；同时用合法 VIP 和普通账号回归有/无 `/emby` 前缀及 HLS 播放，保留认证数据库只读挂载。
+
+本地离线回归使用已安装依赖的开发环境执行：
+
+~~~bash
+python3 -B scripts/run_offline_tests.py
+~~~
+
+该脚本隔离真实配置和网络；输出中的 skipped 是未执行的靶机检查，不算通过。离线测试通过不能代替 Stripe 测试支付、真实 MySQL/Emby 验证或正式小额支付验收。
+
+### 17.8 切换正式收款
+
+**两种支付方式均通过正式审核后才执行。** 测试白名单只在 `live_mode: false` 生效，不能用它限制正式模式的购买者。
+
+1. 先将 `payments.enabled` 改为 `false`，重建 Bot 停止创建新订单；让测试付款和发码任务处理完成。测试侧仍待支付的 Checkout 在 Stripe 测试后台确认取消/过期，并完成对账；不能直接删除订单或数据库。检查测试商品价格，正式开放前将不售卖的测试商品下架，避免沿用测试价。
+2. 按 17.2 的备份部分保存当前数据库、配置、密钥和镜像。独立测试部署不要合并测试库到正式库；若此前直接在业务库测试，先核查测试账号权益和已发码情况，再切换。
+3. 在 Stripe **正式环境**确认支付宝、微信支付和 CNY 能力，取得 `sk_live_...` Secret key；创建正式 Webhook 端点，使用 17.3 的完整事件列表。已有正确的正式端点可继续用，无需每次升级重建。
+4. 修改 `.env` 的 Stripe Secret key 和 Webhook 签名密钥。正式端点也以 `whsec_` 开头，不能靠前缀判断它是测试还是正式，必须核对端点所属环境。测试和正式端点可以先后使用同一公网 URL，但当前实例一次只校验一套签名密钥。
+
+~~~dotenv
+TGBOT_STRIPE_SECRET_KEY=sk_live_REPLACE_ME
+TGBOT_STRIPE_WEBHOOK_SECRET=whsec_REPLACE_WITH_LIVE_ENDPOINT_SECRET
+~~~
+
+**同一数据库从测试切正式、升级或重启时，`TGBOT_PAYMENT_CODE_KEY` 保持原值。** 独立测试部署与独立正式部署分别使用各自的加密密钥，不能把「环境隔离」理解为每次切模式都换密钥。
+
+5. 在 `config.json` 中修改以下三个字段，其余支付域名、容量等配置保持实际值：
+
+~~~json
+"enabled": false,
+"live_mode": true,
+"test_buyer_ids": []
+~~~
+
+6. 重新执行 17.3 的独立配置校验，确认 `LIVE_MODE = True`、`SALES_ENABLED = False`、`CODE_KEY_BYTES = 32`。然后执行 17.5 重建 Bot 并检查日志和公网。它不会启动新的购买，但已存在 Checkout 仍可能付款，原订单交付任务也继续运行。
+7. 确认商品正式售价和上下架状态后，将 `payments.enabled` 改为 `true`，再次校验并重建 Bot。分别用微信和支付宝完成一笔允许金额的**真实付款**，在正式 Stripe 后台核对金额、币种、成功状态和 Webhook 投递，再确认 Bot 的发码、通知、兑换。全部通过后再对外宣传开放。
+
+正式模式下测试订单/测试码不能兑换是预期行为。测试和正式的 Stripe 密钥、Webhook 不可混用；不要修改旧订单的 `mode` 字段绕过检查。停止使用的测试端点应在测试任务核对完毕后停用，避免测试事件继续投递到正式实例。
+
+同一数据库的商品、销售计数、注册席位和账号权益并非各环境独立。当前代码复用未过期的同商品待支付订单时没有按模式筛选，因此切换前要在测试模式处理完旧待支付单，否则原测试购买者可能暂时遇到订单环境不匹配。测试记录和席位也不会随切换自动清空，这也是完整验收推荐隔离部署的原因。
+
+### 17.9 后续更新
+
+仅更新代码时执行 17.2 完成备份、拉取和构建，然后执行 17.3 校验、17.5 重建和连通检查。保留当前 `live_mode`、`.env`、价格和已售订单，不重新生成密钥，不覆盖本机 Compose/Caddy 配置。代码已经包含配置字段默认值，缺少可选字段通常不需要重建整个 `config.json`。
+
+仅修改密钥或 `config.json` 时，无需再次 build，但必须 `docker compose up -d --no-deps --no-build --force-recreate embyboss`。网站后台的商品修改立即生效。Caddyfile 只有变化时才验证并重启网关；不要每次 Bot 更新都重启 Emby/MySQL。
+
+Git 提交号只能说明宿主机代码版本，不能证明运行容器已更新；必须确保 build 成功后再 recreate。命令块遇错就停止，不能在构建失败后继续用旧镜像宣称升级成功。
+
+### 17.10 停售与回滚
+
+暂停新购买：将 `payments.enabled` 改为 `false` 并重建 Bot。订单查询、Webhook、已支付发码、通知重试及对账仍继续；**停售不等于停止后台任务，也不会自动撤销已有 Stripe Checkout**。审批未完成时已有失败订单仍可能记录 `payment_failure`，需要按请求编号查原因，不能靠清空数据库消除日志。
+
+回滚代码前，先停售并保存当前数据。备份镜像标签记录在 17.2 的备份目录名中，但只有确认该镜像兼容当前数据库迁移及订单字段时才能使用。不要为了消除报错执行 Alembic 降级、删除支付表、恢复付款前的旧数据库，或切回测试密钥处理正式订单，这些操作可能丢失订单和权益。无法确认兼容性时，保持当前服务对账交付并修复代码。
+
+既有订单仍需保留对应 Stripe 环境密钥和原兑换码密钥；通过管理员「对账」「补发原码」处理交付问题。普通售后不提供退款申请或后台退款按钮，但外部退款、拒付及支付平台要求仍需核查；未兑换码可能暂停使用，已兑换订单进入人工处理，不应自行封禁受赠者。
+
+### 17.11 常见故障
+
+先在业务服务器获取脱敏诊断：
+
+~~~bash
+cd /opt/Tgbot
+docker compose logs --since=10m --tail=300 embyboss 2>&1 | grep -F 'payment_failure'
+~~~
+
+日志仅保留操作、异常类型、错误码、已知参数、HTTP 状态和 `request_id=req_...`。用请求编号在**对应环境**的 Stripe Workbench 请求日志定位原始错误；不要仅凭截图中的「请求失败」判断原因。
+
+| 现象 | 核查与处理 |
+| --- | --- |
+| `no configuration file provided` | 在错误目录运行 Compose，先 `cd /opt/Tgbot`。 |
+| Git 提示本地 Compose 修改将被覆盖 | 按 17.2 备份再合并；冲突要保留本机挂载和新增环境映射。 |
+| `Stripe credentials are missing or do not match payment mode` | 核对 `sk_test_`/`sk_live_` 与 `live_mode`；公钥 `pk_` 不能用。检查 Compose 映射及 shell 覆盖值，然后 recreate。 |
+| `Payment encryption key must be a base64 encoded 32-byte key` | 按 17.3 校验解码长度，不是随意填 32 字符；已发码时找回原密钥备份，不能重新生成替换。 |
+| 本机 200，公网 502/504 | 检查 CDN 回源协议、源站 IP、18080 端口、Host 和 Caddy 上游；不是开放 8838。 |
+| 200 但页面长度为 0，没有 `payments.css` | 检查是否命中正确 Host 路由，比较宿主机/容器 Caddyfile 摘要，验证新文件后重启网关刷新挂载。 |
+| 登录请求已过期 | 五分钟超时、旧深链接或浏览器不一致；刷新后重新发起并返回原浏览器，不反复删除 Telegram session。 |
+| 登录/下单 403 | 核对 `public_url` 与实际 HTTPS 地址、Cookie/Origin 转发和浏览器会话；勿通过关闭 CSRF 绕过。内部路由的 404 是隔离预期。 |
+| `test_buyer_not_allowed` | 测试模式仅允许 `test_buyer_ids` 中的真实 Telegram ID；空列表拒绝所有测试下单。 |
+| `code=amount_too_small` | Stripe 确认金额过低，按该商户最低金额调整商品价格并重新确认；不能仅凭 ¥1 或 ¥10 推断统一门槛。 |
+| `param=payment_method_types` / `stripe_payment_methods_unavailable` | 支付方式参数被拒绝。常见是正式支付宝/微信未获批，也可能是币种或商户条件不兼容；按 `request_id` 查看准确原因。测试获批不代表正式获批。 |
+| `order_mode_mismatch` / `code_mode_mismatch` | 订单/码不属于当前环境；核对当前模式和实际运行代码。旧测试创建/对账任务在新版本中结束，不代表任何正式款项到账。 |
+| Webhook 400 或签名失败 | 使用端点自己的 `whsec_`，确保原始请求体和 `Stripe-Signature` 没被代理修改；裸 curl 不带签名返回 400 是正常的，不能算回调验收通过。 |
+| 已扣款，页面仍待支付/待发码 | 核对 Stripe 支付状态和 Webhook，后台提交对账。后台通常每分钟处理任务、每五分钟安排周期对账，网络和重试可能延迟；超过两分钟可开始排查，勿再次付款。 |
+| 微信付完停在 Stripe 页面 | 查看原订单页，确认状态自动更新；本站不能修改 Stripe 托管页。不能把跳转动画当成到账证据。 |
+| Bot 未收到发码消息 | 先到「我的订单」查看；如果已有原码，只重试通知。`AUTH_KEY_UNREGISTERED` 属于 Telegram 会话问题，需单独核查，不删除支付记录或更换兑换码密钥。 |
+| VIP/HLS 异常、`Invalid internal token` | 按第 16.2 节核查只读认证库、Caddy 内部令牌和路由；付款站点配置不能覆盖原线路规则。 |
+
+### 17.12 敏感信息与备份保护
+
+`.env`、`config.json`、Telegram session、MySQL 备份、Emby 认证数据库和完整兑换码均不得提交 Git 或贴入公开聊天。备份目录权限保持 700，文件保持仅所有者可读；升级前后的密钥与数据库备份必须配套保留。对外排查只提供脱敏日志、提交号、状态码和 Stripe 请求编号，不提供整个配置文件或完整回调内容。
+
+付款网站和订单页保持不缓存；不要把仅限内部的 API key、CDN 回源令牌、Stripe Secret key 或兑换码加密密钥发给浏览器。HTTPS 证书、业务域名和正确回源是部署前提，关闭防火墙、放行整个 Bot API 或关闭验签都不能作为故障修复方式。
