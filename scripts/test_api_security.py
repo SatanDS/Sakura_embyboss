@@ -91,6 +91,7 @@ class APISecurityTests(unittest.IsolatedAsyncioTestCase):
 
         await self.app(scope, receive, send)
         status = next(item["status"] for item in messages if item["type"] == "http.response.start")
+        self.response_headers = dict(next(item["headers"] for item in messages if item["type"] == "http.response.start"))
         response = b"".join(item.get("body", b"") for item in messages if item["type"] == "http.response.body")
         return status, json.loads(response)
 
@@ -242,6 +243,64 @@ class APISecurityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body["data"]["lv"], "c")
         self.playlist.sql_update_emby.assert_called_once()
+
+    async def test_real_ip_requires_loopback_and_shared_secret(self):
+        headers = {"X-Proxy-Peer-IP": "198.51.100.20", "X-Proxy-Forwarded-For": "192.0.2.1"}
+        for secret, peer in (("", "127.0.0.1"), ("wrong", "127.0.0.1"), (INTERNAL_KEY, "198.51.100.20")):
+            status, _ = await self.request("/emby/real_ip", peer=peer,
+                                           headers={**headers, "X-DuSheng-Line-Token": secret})
+            self.assertEqual(status, 403)
+        self.config.api.line_report_token = ""
+        status, _ = await self.request("/emby/real_ip", headers={**headers, "X-DuSheng-Line-Token": INTERNAL_KEY})
+        self.assertEqual(status, 403)
+
+    async def test_real_ip_ignores_public_forged_headers(self):
+        headers = {"X-DuSheng-Line-Token": INTERNAL_KEY, "X-Proxy-Peer-IP": "198.51.100.20",
+                   "X-Forwarded-For": "192.0.2.99", "X-Real-IP": "192.0.2.98",
+                   "X-Verified-Client-IP": "192.0.2.97"}
+        status, body = await self.request("/emby/real_ip", headers=headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(body, {"client_ip": "198.51.100.20"})
+        self.assertEqual(self.response_headers[b"x-verified-client-ip"], b"198.51.100.20")
+        self.assertEqual(self.response_headers[b"cache-control"], b"no-store")
+        self.identity._get_user_from_token.assert_not_awaited()
+        self.emby.emby_change_policy.assert_not_awaited()
+        self.bot.send_message.assert_not_awaited()
+
+    async def test_real_ip_runtime_configuration_add_remove_and_invalid(self):
+        headers = {"X-DuSheng-Line-Token": INTERNAL_KEY, "X-Proxy-Peer-IP": "198.51.100.20",
+                   "X-Proxy-Forwarded-For": "192.0.2.99, 203.0.113.10, 198.51.100.21"}
+        for proxies, expected in (([], "198.51.100.20"), (["198.51.100.0/24"], "203.0.113.10"),
+                                  ([], "198.51.100.20"), (["0.0.0.0/0"], "198.51.100.20"),
+                                  (["198.51.100.20", "bad"], "198.51.100.20")):
+            self.config.trusted_proxy_cidrs = proxies
+            status, body = await self.request("/emby/real_ip", headers=headers)
+            self.assertEqual(status, 200)
+            self.assertEqual(body["client_ip"], expected)
+
+    async def test_real_ip_ipv6_and_mapped_peer(self):
+        self.config.trusted_proxy_cidrs = ["198.51.100.0/24", "2001:db8:1::/64"]
+        for peer, chain, expected in (("::ffff:198.51.100.20", "::ffff:192.0.2.1", "192.0.2.1"),
+                                      ("2001:db8:1::2", "2001:db8:2::3", "2001:db8:2::3")):
+            status, body = await self.request("/emby/real_ip", headers={
+                "X-DuSheng-Line-Token": INTERNAL_KEY, "X-Proxy-Peer-IP": peer, "X-Proxy-Forwarded-For": chain,
+            })
+            self.assertEqual(status, 200)
+            self.assertEqual(body["client_ip"], expected)
+
+    async def test_real_ip_missing_invalid_peer_and_invalid_chain(self):
+        self.config.trusted_proxy_cidrs = ["198.51.100.20"]
+        headers = {"X-DuSheng-Line-Token": INTERNAL_KEY}
+        status, _ = await self.request("/emby/real_ip", headers=headers)
+        self.assertEqual(status, 400)
+        for peer in ("", "unknown", "198.51.100.20:80"):
+            status, _ = await self.request("/emby/real_ip", headers={**headers, "X-Proxy-Peer-IP": peer})
+            self.assertEqual(status, 400)
+        status, body = await self.request("/emby/real_ip", headers={
+            **headers, "X-Proxy-Peer-IP": "198.51.100.20", "X-Proxy-Forwarded-For": "192.0.2.1, invalid",
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(body["client_ip"], "198.51.100.20")
 
 
 if __name__ == "__main__":

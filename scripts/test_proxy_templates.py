@@ -24,6 +24,12 @@ class CaddyTemplateTests(unittest.TestCase):
 
         class BotFixture(BaseHTTPRequestHandler):
             def do_GET(self):
+                if self.path == '/emby/real_ip':
+                    self.send_response(200)
+                    self.send_header('X-Verified-Client-IP', self.headers['X-Proxy-Peer-IP'])
+                    self.end_headers()
+                    self.wfile.write(b'{}')
+                    return
                 received.append({"path": self.path, "headers": dict(self.headers), "method": self.command})
                 self.send_response(403 if self.path.startswith('/emby/') else 200)
                 self.end_headers()

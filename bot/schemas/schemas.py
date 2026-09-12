@@ -175,6 +175,7 @@ class Config(BaseModel):
     chanel: str
     bot_photo: str
     registration_notice: Optional[str] = None
+    trusted_proxy_cidrs: List[str] = Field(default_factory=list)
     open: Open
     admins: List[int] = Field(default_factory=list)
     money: str

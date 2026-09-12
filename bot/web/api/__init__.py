@@ -15,6 +15,7 @@ from .webhook.line_report import router as line_report_router
 from .user_info import route as user_info_route
 from .login import router as login_router
 from .payment import router as payment_router
+from .real_ip import router as real_ip_router
 from bot import bot_token, LOGGER, config
 
 emby_api_route = APIRouter(prefix="/emby", tags=["对接Emby的接口"])
@@ -109,6 +110,10 @@ emby_api_route.include_router(
 )
 emby_api_route.include_router(
     line_report_router,
+    dependencies=[Depends(verify_line_report_request)],
+)
+emby_api_route.include_router(
+    real_ip_router,
     dependencies=[Depends(verify_line_report_request)],
 )
 user_api_route.include_router(

@@ -3,6 +3,27 @@
 	auto_https off
 }
 
+(emby_real_ip) {
+	# Trust is managed by the Bot; the socket peer is supplied by Caddy,
+	# never by a client-controlled forwarding header.
+	request_header -X-Verified-Client-IP
+	forward_auth {args[0]} {
+		uri /emby/real_ip?
+		header_up -X-Forwarded-For
+		header_up -X-Real-IP
+		header_up -Forwarded
+		header_up -Authorization
+		header_up -X-Emby-Token
+		header_up -X-Emby-Authorization
+		header_up -Cookie
+		header_up -X-DuSheng-Origin-Token
+		header_up X-DuSheng-Line-Token {$DUSHENGCDN_ORIGIN_TOKEN}
+		header_up X-Proxy-Peer-IP {http.request.remote.host}
+		header_up X-Proxy-Forwarded-For {header.X-Forwarded-For}
+		copy_headers X-Verified-Client-IP
+	}
+}
+
 (playlist_ban) {
 	reverse_proxy {args[0]} {
 		method GET
@@ -73,6 +94,7 @@
 			handle @origin_invalid {
 				respond "Forbidden" 403
 			}
+			import emby_real_ip {args[4]}
 			header @emby_response_no_store Cache-Control "private, no-store"
 
 			handle @playlist_create {
@@ -114,6 +136,12 @@
 					header_up Authorization {header.Authorization}
 				}
 				reverse_proxy {args[3]} {
+					header_up X-Forwarded-For {header.X-Verified-Client-IP}
+					header_up X-Real-IP {header.X-Verified-Client-IP}
+					header_up -Forwarded
+					header_up -X-Verified-Client-IP
+					header_up -X-Proxy-Peer-IP
+					header_up -X-Proxy-Forwarded-For
 					header_up -X-DuSheng-Origin-Token
 					header_up -X-DuSheng-Line-Token
 				}
@@ -134,6 +162,12 @@
 					header_up Authorization {header.Authorization}
 				}
 				reverse_proxy {args[3]} {
+					header_up X-Forwarded-For {header.X-Verified-Client-IP}
+					header_up X-Real-IP {header.X-Verified-Client-IP}
+					header_up -Forwarded
+					header_up -X-Verified-Client-IP
+					header_up -X-Proxy-Peer-IP
+					header_up -X-Proxy-Forwarded-For
 					header_up -X-DuSheng-Origin-Token
 					header_up -X-DuSheng-Line-Token
 				}
@@ -153,6 +187,12 @@
 					header_up Authorization {header.Authorization}
 				}
 				reverse_proxy {args[3]} {
+					header_up X-Forwarded-For {header.X-Verified-Client-IP}
+					header_up X-Real-IP {header.X-Verified-Client-IP}
+					header_up -Forwarded
+					header_up -X-Verified-Client-IP
+					header_up -X-Proxy-Peer-IP
+					header_up -X-Proxy-Forwarded-For
 					header_up -X-DuSheng-Origin-Token
 					header_up -X-DuSheng-Line-Token
 				}
@@ -161,6 +201,12 @@
 			# 其余请求正常反代给 Emby。
 			handle {
 				reverse_proxy {args[3]} {
+					header_up X-Forwarded-For {header.X-Verified-Client-IP}
+					header_up X-Real-IP {header.X-Verified-Client-IP}
+					header_up -Forwarded
+					header_up -X-Verified-Client-IP
+					header_up -X-Proxy-Peer-IP
+					header_up -X-Proxy-Forwarded-For
 					header_up -X-DuSheng-Origin-Token
 					header_up -X-DuSheng-Line-Token
 				}

@@ -460,6 +460,75 @@ docker run -d \
   caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
 ~~~
 
+### 9.3 CDN 真实客户端 IP 与动态节点列表
+
+管理员私聊 Bot 发送 `/config`，进入「CDN 真实 IP」，可查看、添加、删除节点，或确认清空全部节点。支持 IPv4、IPv6 和 CIDR，多个地址用换行、空格或逗号分隔，最多保存 128 项。只填写你控制的实际回源代理，不填写用户 IP；不接受域名、端口或覆盖全部地址的 `/0` 网段。删除时使用列表中完整的 IP/CIDR。
+
+节点列表保存在 `config.json` 顶层 `trusted_proxy_cidrs`。旧配置默认 `[]`：继续使用连接来源地址，不信任转发标头。清空/删除节点只改变 IP 识别，不是封禁或防火墙操作；未配置节点仍可按原 VIP/普通线路权限访问。新请求立即读取最新列表，无需重启 Bot 或 Caddy，已建立的连接不会被主动切断。
+
+新版链路：
+
+~~~text
+客户端 → CDN（追加实际来源到 X-Forwarded-For）→ Caddy
+  → 本机 Bot /emby/real_ip（验证代理链并返回单个 IP）
+  → 原 VIP/播放列表鉴权 → Emby
+
+普通用户直接访问 8096 → Emby（不经过上述代理链）
+~~~
+
+Caddy 先校验现有 `X-DuSheng-Origin-Token`，再用本机调用与内部令牌请求 `/emby/real_ip`，把实际 TCP 对端和原始 XFF 传给 Bot。Bot 仅在直接对端可信时，从右向左跳过已知代理，停在第一个不可信地址；客户端在 XFF 左侧插入的假地址不能覆盖它。无有效代理链、格式无效或配置为空时退回连接来源 IP。解析不访问数据库、Telegram 或 Emby，转换后的 IP 仅用于转发，不替代播放令牌或 VIP 权益判断。
+
+**首次启用需要同时更新 Bot 和 Caddyfile。** 仅增加名单而没有更新 Caddy 不会生效。每个经 Caddy 的 Emby 请求新增一次本机 IP 查询；Bot API 不可用时，该代理路径也会失败，不能退回信任用户提供的 IP。直接 8096 不依赖此查询，支付站点也不使用此配置片段。
+
+已有服务器按以下顺序更新。备份原文件后拉取，先启动新 Bot，确认新增内部路由存在，再验证并重启 Caddy。不要把正式配置替换成示例文件，也不要丢掉自己的 Emby 域名和支付站点。此操作不重启 Emby/MySQL、不更改 8096 监听或防火墙。
+
+~~~bash
+(
+set -eu
+cd /opt/Tgbot
+umask 077
+ip_backup="/opt/tgbot-realip-backup-$(date +%Y%m%d-%H%M%S)"
+mkdir -m 700 "$ip_backup"
+cp -a config.json docker-compose.yml "$ip_backup/"
+cp -a caddy/caddyfile "$ip_backup/Caddyfile"
+git pull --ff-only --autostash origin master
+test -z "$(git diff --name-only --diff-filter=U)"
+python3 -m json.tool config.json >/dev/null
+docker compose config --quiet
+docker compose build embyboss
+docker compose up -d --no-deps --no-build --force-recreate embyboss
+
+ip_api_ready=0
+for attempt in $(seq 1 30); do
+  status="$(curl -sS --max-time 3 -o /dev/null -w '%{http_code}' \
+    http://127.0.0.1:8838/emby/real_ip || true)"
+  if [ "$status" = 403 ]; then ip_api_ready=1; break; fi
+  sleep 2
+done
+test "$ip_api_ready" -eq 1
+# 未带内部令牌返回 403 是预期，404 则表示仍在运行旧版本。
+gateway_image="$(docker inspect -f '{{.Image}}' emby-line-gateway)"
+docker run --rm --env-file /etc/dusheng/emby-line.env \
+  -v /opt/Tgbot/caddy/caddyfile:/etc/caddy/Caddyfile:ro \
+  "$gateway_image" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+docker restart emby-line-gateway
+host_hash="$(sha256sum caddy/caddyfile | awk '{print $1}')"
+container_hash="$(docker exec emby-line-gateway sha256sum /etc/caddy/Caddyfile | awk '{print $1}')"
+test "$host_hash" = "$container_hash"
+echo "REAL_IP_GATEWAY_READY；原配置备份：$ip_backup"
+)
+~~~
+
+随后在「CDN 真实 IP → 添加节点」填入实际回源 IP（包括备用节点）。若链路有 NPM、其他反向代理或多级 CDN，要把可信代理各跳的实际来源地址一起加入。节点经 NAT 回源时，填 Caddy 实际收到的出口地址；不要单凭域名 DNS 解析出的入口 IP 推断回源地址。每个可信代理必须正确追加上一跳的真实连接地址，不能用客户端自报地址覆盖整条链。
+
+DuShengCDN 当前渲染 `X-Real-IP: $remote_addr` 和 `X-Forwarded-For: $proxy_add_x_forwarded_for`。本方案依据 XFF 链识别，最终只把确认后的单个 IP 写入发往 Emby 的 XFF 和 X-Real-IP。Caddy 会覆盖外部伪造的 `X-Verified-Client-IP`、`X-Proxy-Peer-IP` 等内部字段，并在转发 Emby 前删除它们及内部令牌。不要在 CDN 自定义标头里另行写死这些字段。
+
+Emby 的代理标头设置因版本而异，可能显示为 `ProxyHeaderMode`，不一定有名为「已知代理」的地址框。先保持原网络配置并重新登录测试；如果仍记录代理地址，再核查该版本如何接受代理标头。靶机 Emby 4.10.0.40 在现有 `ProxyHeaderMode=AllAddresses` 配置下确认可记录转发 IP，普通直接登录也成功；这不是要求业务服务器改成信任所有来源。直接开放的 8096 不经过 Caddy 的标头清理，直接请求的防伪取决于 Emby 自身代理策略，不能拿这次代理链测试代替验证。**不要把可信 CDN 列表填进「远程访问 IP 允许列表」或「局域网网段」，也不要为此把 8096 改成仅监听 127.0.0.1。**
+
+验收时分别测试：手机流量经 VIP 域名登录/播放、普通用户直接 8096 登录/播放、名单添加和删除后的新请求，以及伪造 XFF/真实 IP 标头无法改变记录。既有 VIP 拦截和有/无 `/emby` 前缀、Range、HLS 也需保持正常。Bot `/userip` 读的是 Emby 播放历史，应播放后再查；旧节点 IP 历史不会自动改写，VPN 用户显示的仍是 VPN 公网出口。
+
+本地回归可用 `CADDY_BIN` 指定 Caddy 可执行文件，然后运行 `scripts/test_real_ip_proxy.py` 和 `scripts/test_proxy_templates.py`；运行 `scripts/run_offline_tests.py` 覆盖节点解析、管理权限及 API 鉴权。
+
 ## 10. DuShengCDN、NPM、DNS 與防火牆
 
 VIP 網域使用自己的CDN时比如 DuShengCDN/自建權威 DNS。CDN 站點設定：
