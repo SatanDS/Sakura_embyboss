@@ -1303,6 +1303,8 @@ docker compose logs --since=10m --tail=300 embyboss 2>&1 | grep -F 'payment_fail
 | 登录/下单 403 | 核对 `public_url` 与实际 HTTPS 地址、Cookie/Origin 转发和浏览器会话；勿通过关闭 CSRF 绕过。内部路由的 404 是隔离预期。 |
 | `test_buyer_not_allowed` | 测试模式仅允许 `test_buyer_ids` 中的真实 Telegram ID；空列表拒绝所有测试下单。 |
 | `code=amount_too_small` | Stripe 确认金额过低，按该商户最低金额调整商品价格并重新确认；不能仅凭 ¥1 或 ¥10 推断统一门槛。 |
+| 对账反复出现 `param=expires_at` | 没有本地收银台编号的旧订单，不能继续用原有效期创建 Checkout。更新后改为查询原收银台；匹配成功则正常对账、发码或确认过期，无法确认时进入待核查。归档不会停止对账，也不能证明没有付款。 |
+| `checkout_recovery_required` / 原付款链接待核查 | 原创建请求停止重试，每单只有一个持久化恢复任务。暂时网络失败继续重试查询；查无结果、多条匹配或查询不完整时保留订单、席位并通知所有者。核对对应 Stripe 环境后，在订单管理点击「重新对账」重试查询，或从 Stripe 重发原 Checkout 事件；不要延长旧单有效期、删除订单或手动标记已付款。 |
 | `param=payment_method_types` / `param=payment_method_configuration` / `stripe_payment_methods_unavailable` | 支付方式参数被拒绝。核对当前环境的已选渠道、币种和商户能力，按 `request_id` 查看准确原因。旧订单保留原支付参数，改开关不会改写旧 Checkout。 |
 | `payment_channels_unavailable` / `payment_channel_config_invalid` | Stripe 渠道未获批或返回的实际配置与开关不一致，保存未生效。重新加载核对，关闭不可用渠道后重试；不要通过手改订单快照或关闭校验解决。 |
 | `channels_changed` / `channel_mode_mismatch` | 其他页面已保存或服务切换了测试/正式环境。重新加载当前设置，核对后再次确认保存。 |

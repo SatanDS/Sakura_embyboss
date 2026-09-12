@@ -2,8 +2,15 @@
 
 import asyncio
 import re
+from datetime import datetime, timezone
 
 from .channels import CHANNEL_KEYS, LEGACY_CHANNELS, ChannelError, normalize_channels
+
+
+class CheckoutRecoveryError(ValueError):
+    def __init__(self, code):
+        self.code = code
+        super().__init__(code)
 
 
 class StripeGateway:
@@ -115,6 +122,66 @@ class StripeGateway:
             options={"idempotency_key": "checkout:" + order["id"]},
         )
         return self._plain(response)
+
+    async def find_checkout(self, order) -> str | None:
+        created_at = order.get("created_at")
+        expires_at = order.get("expires_timestamp")
+        order_id = order.get("id")
+        if (not isinstance(created_at, datetime) or type(expires_at) is not int
+                or not isinstance(order_id, str) or not order_id):
+            raise CheckoutRecoveryError("checkout_recovery_incomplete")
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        created_timestamp = int(created_at.timestamp())
+        if created_timestamp < 0 or expires_at < created_timestamp:
+            raise CheckoutRecoveryError("checkout_recovery_incomplete")
+        params = {
+            "created": {"gte": created_timestamp - 300, "lte": expires_at + 300},
+            "limit": 100,
+        }
+        payment_intent = order.get("stripe_payment_intent_id")
+        if payment_intent:
+            if (not isinstance(payment_intent, str) or len(payment_intent) > 255
+                    or not re.fullmatch(r"pi_[A-Za-z0-9]+", payment_intent)):
+                raise CheckoutRecoveryError("checkout_recovery_incomplete")
+            params["payment_intent"] = payment_intent
+        candidate = None
+        seen = set()
+        # Scan to completion even after a match; another session must not be
+        # silently discarded when deciding which remote payment to reconcile.
+        for _ in range(20):
+            response = await asyncio.to_thread(self.client.checkout.sessions.list, params)
+            try:
+                page = self._plain(response)
+            except (TypeError, ValueError):
+                raise CheckoutRecoveryError("checkout_recovery_incomplete") from None
+            if not isinstance(page, dict):
+                raise CheckoutRecoveryError("checkout_recovery_incomplete")
+            data, has_more = page.get("data"), page.get("has_more")
+            if (not isinstance(data, list) or len(data) > 100 or type(has_more) is not bool
+                    or has_more and not data):
+                raise CheckoutRecoveryError("checkout_recovery_incomplete")
+            for session in data:
+                if not isinstance(session, dict):
+                    raise CheckoutRecoveryError("checkout_recovery_incomplete")
+                session_id = session.get("id")
+                metadata = session.get("metadata")
+                reference = session.get("client_reference_id")
+                if (not isinstance(session_id, str) or len(session_id) > 255
+                        or not re.fullmatch(r"cs_(?:test_|live_)?[A-Za-z0-9]+", session_id)
+                        or session_id in seen
+                        or metadata is not None and not isinstance(metadata, dict)
+                        or reference is not None and not isinstance(reference, str)):
+                    raise CheckoutRecoveryError("checkout_recovery_incomplete")
+                seen.add(session_id)
+                if reference == order_id or (metadata or {}).get("order_id") == order_id:
+                    if candidate is not None:
+                        raise CheckoutRecoveryError("checkout_recovery_ambiguous")
+                    candidate = session_id
+            if not has_more:
+                return candidate
+            params = {**params, "starting_after": data[-1]["id"]}
+        raise CheckoutRecoveryError("checkout_recovery_incomplete")
 
     async def retrieve_checkout(self, session_id):
         response = await asyncio.to_thread(

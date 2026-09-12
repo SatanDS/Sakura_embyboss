@@ -166,6 +166,7 @@ _PUBLIC_ERROR_CODES = {
     "test_buyer_not_allowed", "code_mode_mismatch", "order_mode_mismatch",
     "stripe_mode_mismatch", "invalid_event", "event_too_large", "stripe_signature_invalid",
     "archive_not_allowed", "invalid_archive_request",
+    "checkout_recovery_required",
     "invalid_channels", "wallet_requires_card", "channels_changed", "payment_channels_disabled",
     "invalid_channel_request", "payment_channel_config_invalid", "payment_channels_unavailable", "channel_mode_mismatch",
 }

@@ -22,6 +22,7 @@ TERMS_TEXT = (
 )
 TERMS_HASH = hashlib.sha256(TERMS_TEXT.encode("utf-8")).hexdigest()
 FINAL_DISPUTES = {None, "won", "warning_closed"}
+CHECKOUT_RECOVERY_REQUIRED = "checkout_recovery_required"
 
 
 def _emby_model():
@@ -190,6 +191,7 @@ class PaymentService:
         )}
         result["expires_timestamp"] = int(order.expires_at.replace(tzinfo=timezone.utc).timestamp())
         result["product"] = result["product_snapshot"]
+        result["checkout_recovery_required"] = order.last_error == CHECKOUT_RECOVERY_REQUIRED
         return result
 
     def seed_products(self):
@@ -374,7 +376,58 @@ class PaymentService:
         order = self.create_order(buyer_tg, product_id, product_version, terms_version, accepted, now)
         if not order["checkout_url"]:
             await self._create_checkout(order["id"])
-        return self.get_order(order["id"], buyer_tg)
+        result = self.get_order(order["id"], buyer_tg)
+        if result["checkout_recovery_required"] and not result["checkout_url"]:
+            raise PaymentError(CHECKOUT_RECOVERY_REQUIRED)
+        return result
+
+    def _queue_checkout_recovery(self, order_id, *, retry=False):
+        with self.session_factory.begin() as session:
+            row = session.query(Order).filter_by(id=order_id).with_for_update().one()
+            if row.mode != self.mode:
+                raise PaymentError("order_mode_mismatch")
+            if row.stripe_session_id or row.payment_state != "pending":
+                return False
+            row.last_error = CHECKOUT_RECOVERY_REQUIRED
+            row.updated_at = utcnow()
+            task = enqueue(session, "recover-checkout:" + order_id, "recover_checkout", {"order_id": order_id})
+            if retry and task.state == "done":
+                task.state, task.attempts, task.last_error = "pending", 0, None
+                task.next_run = utcnow() - timedelta(seconds=1)
+            return True
+
+    def _review_unresolved_checkout(self, order_id):
+        with self.session_factory.begin() as session:
+            row = session.query(Order).filter_by(id=order_id).with_for_update().one()
+            if row.stripe_session_id or row.payment_state != "pending":
+                return
+            row.review_required = True
+            row.archived_at = None
+            row.last_error = CHECKOUT_RECOVERY_REQUIRED
+            row.updated_at = utcnow()
+            enqueue(session, "review:" + order_id + ":checkout-unresolved", "notify_review", {"order_id": order_id})
+
+    async def _recover_checkout(self, order_id):
+        order = self.get_order(order_id)
+        if order["mode"] != self.mode:
+            raise PaymentError("order_mode_mismatch")
+        if order["stripe_session_id"]:
+            return await self.reconcile_order(order_id)
+        if order["payment_state"] != "pending":
+            return
+        from .stripe_gateway import CheckoutRecoveryError
+        try:
+            session_id = await self.gateway.find_checkout(order)
+            if session_id:
+                return await self.reconcile_order(order_id, session_hint=session_id)
+        except CheckoutRecoveryError:
+            pass
+        except PaymentError as exc:
+            if exc.code not in {"stripe_order_mismatch", "stripe_session_invalid", "missing_payment_intent"}:
+                raise
+        # A missing or conflicting match is not evidence that payment never
+        # happened. Keep the order and its seat; late webhooks can still bind it.
+        self._review_unresolved_checkout(order_id)
 
     async def _create_checkout(self, order_id):
         order = self.get_order(order_id)
@@ -382,7 +435,19 @@ class PaymentService:
             raise PaymentError("order_mode_mismatch", "订单不属于当前支付环境")
         if order["stripe_session_id"] or order["payment_state"] != "pending":
             return
-        response = await self.gateway.create_checkout(order)
+        if order["checkout_recovery_required"]:
+            return
+        if order["expires_at"] <= utcnow() + timedelta(minutes=30, seconds=5):
+            self._queue_checkout_recovery(order_id)
+            return
+        from stripe import InvalidRequestError
+        try:
+            response = await self.gateway.create_checkout(order)
+        except InvalidRequestError as exc:
+            if exc.param != "expires_at":
+                raise
+            self._queue_checkout_recovery(order_id)
+            return
         with self.session_factory.begin() as session:
             row = session.query(Order).filter_by(id=order_id).with_for_update().one()
             self._validate_session(row, response)
@@ -390,6 +455,8 @@ class PaymentService:
                 raise PaymentError("session_mismatch")
             row.stripe_session_id = response["id"]
             row.checkout_url = response.get("url")
+            if row.last_error == CHECKOUT_RECOVERY_REQUIRED:
+                row.last_error = None
             row.updated_at = utcnow()
 
     def list_orders(self, buyer_tg=None, limit=100, *, mode=None, archived=False):
@@ -635,7 +702,10 @@ class PaymentService:
         session_id = order["stripe_session_id"] or session_hint
         if not session_id:
             await self._create_checkout(order_id)
-            session_id = self.get_order(order_id)["stripe_session_id"]
+            refreshed = self.get_order(order_id)
+            session_id = refreshed["stripe_session_id"]
+            if not session_id and (refreshed["checkout_recovery_required"] or refreshed["payment_state"] == "expired"):
+                return
         if not session_id:
             raise PaymentError("checkout_unresolved")
         provider = await self.gateway.retrieve_checkout(session_id)
@@ -647,6 +717,7 @@ class PaymentService:
             previous_payment_state = row.payment_state
             previous_review = (row.review_required, row.refunded, row.dispute_status)
             row.stripe_session_id = provider["id"]
+            row.checkout_url = provider.get("url") or row.checkout_url
             if intent_id:
                 row.stripe_payment_intent_id = intent_id
             row.refunded = bool(provider.get("charge_refunded", False))
@@ -709,7 +780,13 @@ class PaymentService:
                 enqueue(session, "review:" + order_id + ":held", "notify_review", {"order_id": order_id})
 
     def schedule_reconcile(self, order_id, actor_tg=None, *, audit=True):
-        self.get_order(order_id)
+        order = self.get_order(order_id)
+        if order["checkout_recovery_required"] and not order["stripe_session_id"]:
+            if audit:
+                self._queue_checkout_recovery(order_id, retry=True)
+                with self.session_factory.begin() as session:
+                    session.add(Audit(actor_tg=actor_tg, action="checkout_recovery_requested", target_id=order_id, details={}))
+            return {"ok": True}
         with self.session_factory.begin() as session:
             # Order pages poll every few seconds while an asynchronous payment
             # settles. Use a short deterministic bucket so polling cannot
@@ -727,7 +804,8 @@ class PaymentService:
                                                   Order.mode == self.mode).all()
             slot = int(utcnow().replace(tzinfo=timezone.utc).timestamp()) // 300
             for order in orders:
-                if order.payment_state == "expired":
+                if order.payment_state == "expired" or (
+                        not order.stripe_session_id and order.last_error == CHECKOUT_RECOVERY_REQUIRED):
                     continue
                 enqueue(session, f"reconcile:{order.id}:{slot}", "reconcile_order", {"order_id": order.id})
             return len(orders)
@@ -758,6 +836,8 @@ class PaymentService:
             try:
                 if task_type == "create_checkout":
                     await self._create_checkout(payload["order_id"])
+                elif task_type == "recover_checkout":
+                    await self._recover_checkout(payload["order_id"])
                 elif task_type == "stripe_event":
                     await self._process_event(payload["event_id"])
                 elif task_type == "reconcile_order":
@@ -774,17 +854,17 @@ class PaymentService:
                 error = exc.code if isinstance(exc, PaymentError) else type(exc).__name__
                 from bot import LOGGER
                 from .diagnostics import log_payment_error
-                # Reconciliation/create tasks left over from the opposite
-                # Stripe environment are intentionally terminal after a
-                # test-to-live switch. Retrying them forever only creates log
-                # noise; mode isolation already prevents any provider call.
+                # Periodic reconciliation recreates ordinary tasks after a
+                # mode switch. Recovery has a single durable task, so retain
+                # it silently until its original environment is restored.
                 stale_mode_task = (
                     isinstance(exc, PaymentError)
                     and exc.code == "order_mode_mismatch"
-                    and task_type in {"reconcile_order", "create_checkout"}
+                    and task_type in {"reconcile_order", "create_checkout", "recover_checkout"}
                 )
                 if stale_mode_task:
-                    error = None
+                    if task_type != "recover_checkout":
+                        error = None
                 else:
                     log_payment_error(LOGGER, "task_" + task_type, exc)
             with self.session_factory.begin() as session:
@@ -794,6 +874,7 @@ class PaymentService:
                     task.last_error = error
                     task.lease_token, task.lease_until = None, None
                     if error:
-                        task.next_run = utcnow() + timedelta(seconds=min(3600, 2 ** min(attempts, 11)))
+                        delay = 300 if error == "order_mode_mismatch" else min(3600, 2 ** min(attempts, 11))
+                        task.next_run = utcnow() + timedelta(seconds=delay)
             processed += 1
         return processed

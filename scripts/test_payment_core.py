@@ -7,7 +7,7 @@ import importlib.util
 import sys
 import types
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -364,7 +364,7 @@ class PaymentCoreTests(unittest.TestCase):
             task = session.query(self.models.Task).filter_by(unique_key="checkout:" + order["id"]).one()
             task.next_run = self.service.utcnow() - timedelta(seconds=5)
         self.gateway.create_checkout = AsyncMock(side_effect=stripe.InvalidRequestError(
-            "private_response", param="expires_at", http_status=400,
+            "private_response", param="currency", http_status=400,
             headers={"request-id": "req_worker123"}))
         messages = []
         sink = type(logger).add(logger, messages.append, format="{message}")
@@ -378,9 +378,196 @@ class PaymentCoreTests(unittest.TestCase):
             self.assertEqual(session.get(self.models.Order, order["id"]).payment_state, "pending")
             self.assertEqual(session.query(self.models.Code).count(), 0)
         self.assertIn("operation=task_create_checkout", str(messages))
-        self.assertIn("param=expires_at", str(messages))
+        self.assertIn("param=currency", str(messages))
         self.assertIn("request_id=req_worker123", str(messages))
         self.assertNotIn("private_response", str(messages))
+
+    def _old_registration_order(self):
+        with self.sessions.begin() as session:
+            session.get(self.models.Product, "p1").kind = "register"
+        # SQLite in-memory schema inspection shares the active connection;
+        # the disposable MySQL check covers real account-count queries.
+        with patch.object(self.service, "actual_account_count", return_value=0):
+            return self.ps.create_order(42, "p1", 1, self.service.TERMS_VERSION, True,
+                                        now=self.service.utcnow() - timedelta(days=2))
+
+    def test_expired_checkout_retries_drain_without_create_or_task_growth(self):
+        order = self._old_registration_order()
+        self.ps.set_orders_archived([order["id"]], 1, True)
+        self.gateway.create_checkout = AsyncMock()
+        self.gateway.find_checkout = AsyncMock(return_value=None)
+        self.ps.notification_handler = AsyncMock()
+        with self.sessions.begin() as session:
+            for index in range(22):
+                self.service.enqueue(session, "old-retry:" + str(index), "reconcile_order", {"order_id": order["id"]})
+        asyncio.run(self.ps.process_tasks(limit=100))
+        saved = self.ps.get_order(order["id"])
+        self.assertEqual(saved["payment_state"], "pending")
+        self.assertTrue(saved["checkout_recovery_required"])
+        self.assertTrue(saved["review_required"])
+        self.assertIsNone(saved["archived_at"])
+        self.assertEqual(saved["expires_at"], order["expires_at"])
+        self.gateway.create_checkout.assert_not_awaited()
+        self.gateway.find_checkout.assert_awaited_once()
+        self.ps.notification_handler.assert_awaited_once()
+        with self.sessions() as session:
+            count = session.query(self.models.Task).count()
+            self.assertEqual(session.query(self.models.Task).filter_by(state="pending").count(), 0)
+            self.assertEqual(session.get(self.models.RegistrationReservation, "order:" + order["id"]).state, "active")
+            self.assertTrue(session.get(self.models.Order, order["id"]).seat_reserved)
+            self.assertEqual(session.query(self.models.Code).count(), 0)
+        asyncio.run(self.ps.reconcile_orders())
+        self.ps.schedule_reconcile(order["id"], 42, audit=False)
+        asyncio.run(self.ps.reconcile_order(order["id"]))
+        asyncio.run(self.ps._create_checkout(order["id"]))
+        with self.sessions() as session:
+            self.assertEqual(session.query(self.models.Task).count(), count)
+
+    def test_expiry_parameter_rejection_queues_recovery_once_and_fresh_create_still_works(self):
+        import stripe
+        order = self.ps.create_order(42, "p1", 1, self.service.TERMS_VERSION, True)
+        self.gateway.create_checkout = AsyncMock(side_effect=stripe.InvalidRequestError("private", param="expires_at"))
+        asyncio.run(self.ps._create_checkout(order["id"]))
+        asyncio.run(self.ps._create_checkout(order["id"]))
+        self.gateway.create_checkout.assert_awaited_once()
+        with self.sessions() as session:
+            self.assertEqual(session.query(self.models.Task).filter_by(task_type="recover_checkout").count(), 1)
+        fresh = self.ps.create_order(1, "p1", 1, self.service.TERMS_VERSION, True)
+        self.gateway.create_checkout.side_effect = None
+        self.gateway.create_checkout.return_value = self._provider_checkout(fresh)
+        asyncio.run(self.ps._create_checkout(fresh["id"]))
+        self.assertEqual(self.ps.get_order(fresh["id"])["stripe_session_id"], "cs_" + fresh["id"])
+
+    def test_recovery_starts_before_creation_minimum_without_changing_expiry(self):
+        order = self.ps.create_order(42, "p1", 1, self.service.TERMS_VERSION, True,
+                                     now=self.service.utcnow() - timedelta(minutes=2))
+        self.gateway.create_checkout = AsyncMock()
+        with self.assertRaises(self.service.PaymentError) as ctx:
+            asyncio.run(self.ps.create_checkout(42, "p1", 1, self.service.TERMS_VERSION, True))
+        self.assertEqual(ctx.exception.code, "checkout_recovery_required")
+        self.gateway.create_checkout.assert_not_awaited()
+        self.assertEqual(self.ps.get_order(order["id"])["expires_at"], order["expires_at"])
+
+    def test_recovery_restores_paid_order_and_issues_exactly_one_code(self):
+        order = self._old_registration_order()
+        self.gateway.create_checkout = AsyncMock()
+        self.gateway.find_checkout = AsyncMock(return_value="cs_" + order["id"])
+        self.gateway.retrieve_checkout = AsyncMock(return_value=self._provider_checkout(order, paid=True))
+        self.ps.notification_handler = AsyncMock()
+        asyncio.run(self.ps.process_tasks(limit=10))
+        asyncio.run(self.ps.reconcile_order(order["id"]))
+        self.ps.fulfill_order(order["id"])
+        self.assertFalse(self.ps.get_order(order["id"])["checkout_recovery_required"])
+        self.assertEqual(self.ps.get_order(order["id"])["fulfillment_state"], "issued")
+        self.gateway.create_checkout.assert_not_awaited()
+        with self.sessions() as session:
+            self.assertEqual(session.query(self.models.Code).count(), 1)
+
+    def test_recovery_releases_seat_only_for_validated_expired_session(self):
+        order = self._old_registration_order()
+        self.gateway.find_checkout = AsyncMock(return_value="cs_" + order["id"])
+        self.gateway.retrieve_checkout = AsyncMock(return_value={**self._provider_checkout(order), "status": "expired"})
+        asyncio.run(self.ps.process_tasks(limit=10))
+        self.assertEqual(self.ps.get_order(order["id"])["payment_state"], "expired")
+        with self.sessions() as session:
+            self.assertFalse(session.get(self.models.Order, order["id"]).seat_reserved)
+            self.assertEqual(session.get(self.models.RegistrationReservation, "order:" + order["id"]).state, "released")
+
+    def test_missing_recovery_match_does_not_overwrite_concurrent_paid_webhook(self):
+        order = self._old_registration_order()
+        self.ps._queue_checkout_recovery(order["id"])
+        self.gateway.retrieve_checkout = AsyncMock(return_value=self._provider_checkout(order, paid=True))
+        async def lookup(_order):
+            await self.ps.reconcile_order(order["id"], session_hint="cs_" + order["id"])
+            return None
+        self.gateway.find_checkout = AsyncMock(side_effect=lookup)
+        asyncio.run(self.ps._recover_checkout(order["id"]))
+        saved = self.ps.get_order(order["id"])
+        self.assertEqual(saved["payment_state"], "paid")
+        self.assertFalse(saved["review_required"])
+        self.assertFalse(saved["checkout_recovery_required"])
+
+    def test_recovery_keeps_unrelated_review_and_refund_protection(self):
+        order = self._old_registration_order()
+        with self.sessions.begin() as session:
+            session.get(self.models.Order, order["id"]).review_required = True
+        self.gateway.find_checkout = AsyncMock(return_value="cs_" + order["id"])
+        self.gateway.retrieve_checkout = AsyncMock(return_value=self._provider_checkout(order, paid=True))
+        self.ps._queue_checkout_recovery(order["id"])
+        asyncio.run(self.ps._recover_checkout(order["id"]))
+        self.assertTrue(self.ps.get_order(order["id"])["review_required"])
+        self.gateway.retrieve_checkout.return_value = self._provider_checkout(order, paid=True, refunded=True)
+        asyncio.run(self.ps.reconcile_order(order["id"]))
+        self.ps.fulfill_order(order["id"])
+        self.assertEqual(self.ps.get_order(order["id"])["code_state"], "held")
+
+    def test_manual_recovery_after_buyer_poll_and_late_webhook_remain_available(self):
+        order = self._old_registration_order()
+        self.gateway.find_checkout = AsyncMock(return_value=None)
+        self.ps.notification_handler = AsyncMock()
+        asyncio.run(self.ps.process_tasks(limit=10))
+        self.ps.schedule_reconcile(order["id"], 42, audit=False)
+        self.ps.schedule_reconcile(order["id"], 1)
+        self.ps.schedule_reconcile(order["id"], 1)
+        asyncio.run(self.ps.process_tasks(limit=10))
+        self.assertEqual(self.gateway.find_checkout.await_count, 2)
+        self.ps.notification_handler.assert_awaited_once()
+        self.gateway.retrieve_checkout = AsyncMock(return_value=self._provider_checkout(order, paid=True))
+        event = {"id": "evt_recovered", "type": "checkout.session.completed", "livemode": False,
+                 "data": {"object": {"id": "cs_" + order["id"], "metadata": {"order_id": order["id"]}}}}
+        self.ps.ingest_webhook(event, "signature")
+        self.ps.ingest_webhook(event, "signature")
+        asyncio.run(self.ps.process_tasks(limit=10))
+        self.assertEqual(self.ps.get_order(order["id"])["fulfillment_state"], "issued")
+        with self.sessions() as session:
+            self.assertEqual(session.query(self.models.Code).count(), 1)
+
+    def test_recovery_network_failure_retries_one_durable_task(self):
+        order = self._old_registration_order()
+        self.gateway.find_checkout = AsyncMock(side_effect=TimeoutError())
+        self.ps._queue_checkout_recovery(order["id"])
+        asyncio.run(self.ps.process_tasks(limit=10))
+        asyncio.run(self.ps.reconcile_orders())
+        self.ps.schedule_reconcile(order["id"], 42, audit=False)
+        with self.sessions() as session:
+            tasks = session.query(self.models.Task).filter_by(task_type="recover_checkout").all()
+            self.assertEqual(len(tasks), 1)
+            self.assertEqual((tasks[0].state, tasks[0].last_error), ("pending", "TimeoutError"))
+        self.assertEqual(self.ps.get_order(order["id"])["payment_state"], "pending")
+
+    def test_recovery_conflicts_and_bad_amount_never_confirm_payment(self):
+        from bot.payments.stripe_gateway import CheckoutRecoveryError
+        order = self._old_registration_order()
+        self.ps._queue_checkout_recovery(order["id"])
+        self.gateway.find_checkout = AsyncMock(side_effect=CheckoutRecoveryError("checkout_recovery_ambiguous"))
+        asyncio.run(self.ps._recover_checkout(order["id"]))
+        self.gateway.find_checkout.side_effect = None
+        self.gateway.find_checkout.return_value = "cs_" + order["id"]
+        self.gateway.retrieve_checkout = AsyncMock(return_value={**self._provider_checkout(order, paid=True), "amount_total": 1})
+        asyncio.run(self.ps._recover_checkout(order["id"]))
+        self.assertEqual(self.ps.get_order(order["id"])["payment_state"], "pending")
+        self.assertTrue(self.ps.get_order(order["id"])["review_required"])
+        with self.sessions() as session:
+            self.assertEqual(session.query(self.models.Code).count(), 0)
+            self.assertTrue(session.get(self.models.Order, order["id"]).seat_reserved)
+
+    def test_recovery_task_from_other_mode_never_calls_stripe(self):
+        order = self._old_registration_order()
+        self.ps._queue_checkout_recovery(order["id"])
+        self.settings.mode = "live"
+        self.gateway.find_checkout = AsyncMock(return_value=None)
+        self.ps.notification_handler = AsyncMock()
+        asyncio.run(self.ps.process_tasks(limit=10))
+        self.gateway.find_checkout.assert_not_awaited()
+        with self.sessions.begin() as session:
+            pending = session.query(self.models.Task).filter_by(state="pending").one()
+            self.assertEqual((pending.task_type, pending.last_error), ("recover_checkout", "order_mode_mismatch"))
+            pending.next_run = self.service.utcnow() - timedelta(seconds=1)
+        self.settings.mode = "test"
+        asyncio.run(self.ps.process_tasks(limit=10))
+        self.gateway.find_checkout.assert_awaited_once()
+        with self.sessions() as session:
+            self.assertEqual(session.query(self.models.Task).filter_by(state="pending").count(), 0)
 
     def test_order_lists_separate_modes_archives_and_buyers(self):
         test_order = self.ps.create_order(42, "p1", 1, self.service.TERMS_VERSION, True)

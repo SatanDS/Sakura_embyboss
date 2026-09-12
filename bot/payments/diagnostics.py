@@ -14,6 +14,7 @@ _OPERATIONS = frozenset({
     "request", "worker", "checkout", "webhook", "webhook_tasks",
     "task_create_checkout", "task_stripe_event", "task_reconcile_order",
     "task_fulfill_order", "task_notify_code", "task_notify_review",
+    "task_recover_checkout",
 })
 
 

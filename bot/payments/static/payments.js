@@ -32,6 +32,7 @@
     stripe_credentials_invalid: "Stripe 密钥验证失败，请联系管理员检查支付配置。",
     stripe_permission_denied: "Stripe 拒绝了当前收款权限，请联系管理员核查。",
     service_unavailable: "暂时无法创建或查询付款，请稍后重试或联系管理员。",
+    checkout_recovery_required: "原订单的付款状态正在核查，请在我的订单中查看；已付款请勿重复支付。",
     archive_not_allowed: "所选订单包含正式收款、已发码或待核查记录，不能归档。请刷新后重新选择。",
     invalid_archive_request: "请核对并确认 1 至 100 笔订单。",
     invalid_channels: "支付渠道配置无效，请重新加载后选择。",
@@ -313,6 +314,7 @@
     const restricted = order.refunded || ["held", "review"].includes(order.code_state);
     let message = "";
     if (restricted) message = "该订单需要核查，兑换码暂不可用。请联系管理员。";
+    else if (order.checkout_recovery_required) message = "原付款链接正在核查。已付款请勿再次支付；状态未更新时请联系管理员对账。";
     else if (order.review_required) message = "该订单需要人工核查，请联系管理员确认处理进度。";
     else if (order.code_state === "redeemed") message = "此兑换码已使用，不能再次兑换。";
     else if (order.payment_state === "paid" && order.fulfillment_state !== "issued") message = "付款已确认，兑换码正在发放。请稍后刷新查看。";

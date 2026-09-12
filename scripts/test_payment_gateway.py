@@ -8,6 +8,7 @@ import json
 import sys
 import types
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -38,14 +39,16 @@ class PaymentGatewayTests(unittest.IsolatedAsyncioTestCase):
             "product_snapshot": {"title": "VIP 1 month"},
             "amount_fen": 1288,
             "expires_timestamp": 2000000000,
+            "created_at": datetime.fromtimestamp(1999998200, timezone.utc).replace(tzinfo=None),
         }
         self.client_patch = patch("stripe.StripeClient", autospec=True)
         self.client_factory = self.client_patch.start()
         self.addCleanup(self.client_patch.stop)
         self.client = self.client_factory.return_value
-        self.client.checkout = SimpleNamespace(sessions=SimpleNamespace(create=Mock(
-            return_value={"id": "cs_test_fixture", "url": "https://checkout.stripe.com/fixture"},
-        )))
+        self.client.checkout = SimpleNamespace(sessions=SimpleNamespace(
+            create=Mock(return_value={"id": "cs_test_fixture", "url": "https://checkout.stripe.com/fixture"}),
+            list=Mock(return_value={"data": [], "has_more": False}),
+        ))
         self.client.payment_method_configurations = SimpleNamespace(create=Mock())
         self.gateway = GATEWAY.StripeGateway(self.settings)
 
@@ -258,6 +261,140 @@ class PaymentGatewayTests(unittest.IsolatedAsyncioTestCase):
                     await self.gateway.create_checkout(order)
                 self.assertEqual(error.exception.code, "payment_channel_config_invalid")
         self.client.checkout.sessions.create.assert_not_called()
+
+    async def test_recovery_lists_only_the_fixed_order_window_without_creating_objects(self):
+        self.assertIsNone(await self.gateway.find_checkout(self.order))
+        self.client.checkout.sessions.list.assert_called_once_with({
+            "created": {"gte": 1999997900, "lte": 2000000300}, "limit": 100,
+        })
+        self.client.checkout.sessions.create.assert_not_called()
+        self.client.payment_method_configurations.create.assert_not_called()
+
+    async def test_recovery_handles_aware_and_naive_utc_creation_dates_consistently(self):
+        await self.gateway.find_checkout(self.order)
+        expected = self.client.checkout.sessions.list.call_args
+        local_time = self.order["created_at"].replace(tzinfo=timezone.utc).astimezone(
+            timezone(timedelta(hours=8)))
+        await self.gateway.find_checkout(dict(self.order, created_at=local_time))
+        self.assertEqual(self.client.checkout.sessions.list.call_args, expected)
+
+    async def test_recovery_can_filter_by_known_payment_intent(self):
+        await self.gateway.find_checkout(dict(self.order, stripe_payment_intent_id="pi_fixture"))
+        self.assertEqual(self.client.checkout.sessions.list.call_args.args[0], {
+            "created": {"gte": 1999997900, "lte": 2000000300},
+            "limit": 100, "payment_intent": "pi_fixture",
+        })
+
+    async def test_recovery_scans_all_pages_after_a_candidate_and_preserves_query_params(self):
+        self.client.checkout.sessions.list.side_effect = [
+            {"data": [{"id": "cs_test_first", "client_reference_id": self.order["id"]}], "has_more": True},
+            {"data": [{"id": "cs_test_other", "metadata": {"order_id": "another_order"}}], "has_more": True},
+            {"data": [], "has_more": False},
+        ]
+        self.assertEqual(await self.gateway.find_checkout(self.order), "cs_test_first")
+        base = {"created": {"gte": 1999997900, "lte": 2000000300}, "limit": 100}
+        self.assertEqual([call.args[0] for call in self.client.checkout.sessions.list.call_args_list], [
+            base, {**base, "starting_after": "cs_test_first"}, {**base, "starting_after": "cs_test_other"},
+        ])
+        self.client.checkout.sessions.create.assert_not_called()
+
+    async def test_recovery_does_not_filter_by_status_or_require_both_references(self):
+        references = [
+            {"client_reference_id": self.order["id"]},
+            {"metadata": {"order_id": self.order["id"]}},
+            {"client_reference_id": self.order["id"], "metadata": {"order_id": "wrong_order"}},
+            {"client_reference_id": "wrong_order", "metadata": {"order_id": self.order["id"]}},
+            {"client_reference_id": self.order["id"], "metadata": None},
+        ]
+        for status, payment_status in (("complete", "paid"), ("expired", "unpaid"), ("open", "unpaid")):
+            for reference in references:
+                with self.subTest(status=status, reference=reference):
+                    self.client.checkout.sessions.list.return_value = {"data": [{
+                        "id": "cs_test_candidate", "status": status, "payment_status": payment_status, **reference,
+                    }], "has_more": False}
+                    self.assertEqual(await self.gateway.find_checkout(self.order), "cs_test_candidate")
+        self.client.checkout.sessions.create.assert_not_called()
+
+    async def test_recovery_returns_none_when_all_results_belong_to_other_orders(self):
+        self.client.checkout.sessions.list.return_value = {"data": [
+            {"id": "cs_test_other", "client_reference_id": "another_order", "metadata": {"order_id": "other"}},
+            {"id": "cs_test_unrelated", "metadata": {}},
+        ], "has_more": False}
+        self.assertIsNone(await self.gateway.find_checkout(self.order))
+
+    async def test_recovery_rejects_multiple_candidates_on_one_page_or_across_pages(self):
+        first = {"id": "cs_test_first", "client_reference_id": self.order["id"]}
+        second = {"id": "cs_test_second", "metadata": {"order_id": self.order["id"]}}
+        for pages in ([{"data": [first, second], "has_more": False}], [
+                {"data": [first], "has_more": True}, {"data": [second], "has_more": False}]):
+            self.client.checkout.sessions.list.side_effect = pages
+            with self.assertRaises(GATEWAY.CheckoutRecoveryError) as error:
+                await self.gateway.find_checkout(self.order)
+            self.assertEqual(error.exception.code, "checkout_recovery_ambiguous")
+            self.assertEqual(str(error.exception), "checkout_recovery_ambiguous")
+
+    async def test_recovery_rejects_malformed_results_and_repeated_pagination(self):
+        malformed = [
+            None, {}, {"data": [], "has_more": 0}, {"data": None, "has_more": False},
+            {"data": [], "has_more": True}, {"data": [None], "has_more": False},
+            {"data": [{"id": "pi_wrong"}], "has_more": False},
+            {"data": [{"id": "cs_test_"}], "has_more": False},
+            {"data": [{"id": "cs_test_" + "x" * 256}], "has_more": False},
+            {"data": [{"id": "cs_test_bad", "metadata": "invalid"}], "has_more": False},
+            {"data": [{"id": "cs_test_bad", "client_reference_id": 123}], "has_more": False},
+            {"data": [{"id": "cs_test_" + str(i)} for i in range(101)], "has_more": False},
+            SimpleNamespace(to_dict_recursive=lambda: []),
+        ]
+        for response in malformed:
+            with self.subTest(response=response):
+                self.client.checkout.sessions.list.return_value = response
+                with self.assertRaises(GATEWAY.CheckoutRecoveryError) as error:
+                    await self.gateway.find_checkout(self.order)
+                self.assertEqual(str(error.exception), "checkout_recovery_incomplete")
+        self.client.checkout.sessions.list.side_effect = [
+            {"data": [{"id": "cs_test_repeat"}], "has_more": True},
+            {"data": [{"id": "cs_test_repeat"}], "has_more": False},
+        ]
+        with self.assertRaises(GATEWAY.CheckoutRecoveryError) as error:
+            await self.gateway.find_checkout(self.order)
+        self.assertEqual(error.exception.code, "checkout_recovery_incomplete")
+
+    async def test_recovery_api_failures_never_turn_into_a_missing_session(self):
+        for pages in ([RuntimeError("Stripe unavailable")], [
+                {"data": [{"id": "cs_test_found", "client_reference_id": self.order["id"]}], "has_more": True},
+                RuntimeError("Stripe unavailable")]):
+            self.client.checkout.sessions.list.side_effect = pages
+            with self.assertRaisesRegex(RuntimeError, "Stripe unavailable"):
+                await self.gateway.find_checkout(self.order)
+        self.client.checkout.sessions.create.assert_not_called()
+
+    async def test_recovery_enforces_page_budget_even_after_a_candidate(self):
+        self.client.checkout.sessions.list.side_effect = [
+            {"data": [{"id": "cs_test_" + str(i), "client_reference_id": self.order["id"] if i == 0 else None}],
+             "has_more": True} for i in range(21)
+        ]
+        with self.assertRaises(GATEWAY.CheckoutRecoveryError) as error:
+            await self.gateway.find_checkout(self.order)
+        self.assertEqual(error.exception.code, "checkout_recovery_incomplete")
+        self.assertEqual(self.client.checkout.sessions.list.call_count, 20)
+        self.client.checkout.sessions.create.assert_not_called()
+
+    async def test_recovery_accepts_a_complete_twentieth_page(self):
+        self.client.checkout.sessions.list.side_effect = [
+            {"data": [{"id": "cs_test_" + str(i), "metadata": {"order_id": self.order["id"] if i == 19 else "other"}}],
+             "has_more": i < 19} for i in range(20)
+        ]
+        self.assertEqual(await self.gateway.find_checkout(self.order), "cs_test_19")
+        self.assertEqual(self.client.checkout.sessions.list.call_count, 20)
+
+    async def test_recovery_rejects_invalid_order_bounds_without_querying_stripe(self):
+        for fields in ({"created_at": None}, {"created_at": "invalid"}, {"expires_timestamp": True},
+                       {"expires_timestamp": 1}, {"id": None}, {"stripe_payment_intent_id": "bad"}):
+            with self.subTest(fields=fields):
+                with self.assertRaises(GATEWAY.CheckoutRecoveryError) as error:
+                    await self.gateway.find_checkout(dict(self.order, **fields))
+                self.assertEqual(error.exception.code, "checkout_recovery_incomplete")
+        self.client.checkout.sessions.list.assert_not_called()
 
 
 if __name__ == "__main__":
