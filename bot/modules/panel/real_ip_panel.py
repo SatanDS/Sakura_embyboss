@@ -39,6 +39,15 @@ def _proxy_snapshot():
     return list(getattr(config, "trusted_proxy_cidrs", []))
 
 
+async def _proxy_feedback(call, text, reply_to=None):
+    # Reply at the bottom of the chat; editing the old photo caption alone
+    # leaves the result above the administrator's submitted addresses.
+    try:
+        await sendMessage(reply_to if reply_to is not None else call, text, buttons=_proxy_keyboard())
+    finally:
+        await editMessage(call, text, buttons=_proxy_keyboard())
+
+
 def _save_proxies(values, actor_id):
     previous = _proxy_snapshot()
     config.trusted_proxy_cidrs = values
@@ -80,6 +89,7 @@ async def _edit_proxy_list(call, action):
         return await sendMessage(call, "已有节点编辑请求，请回复之前的输入提示，或发送 /cancel 取消。")
     _proxy_editors.add(actor_id)
     previous = _proxy_snapshot()
+    prompt = call.message
     try:
         verb = "添加" if action == "add" else "删除"
         prompt = await call.message.reply(
@@ -102,9 +112,9 @@ async def _edit_proxy_list(call, action):
         if not _can_manage_proxies(call) or (message and getattr(message.from_user, "id", None) != actor_id):
             return await sendMessage(call, "管理权限已变更，节点列表未更新。")
         if not message or (message.text or "").strip() == "/cancel":
-            return await editMessage(call, "已取消，节点列表未更新。", buttons=_proxy_keyboard())
+            return await _proxy_feedback(call, "已取消，节点列表未更新。", reply_to=message or prompt)
         if _proxy_snapshot() != previous:
-            return await editMessage(call, "节点列表已被其他操作修改，请查看最新列表后重新操作。", buttons=_proxy_keyboard())
+            return await _proxy_feedback(call, "节点列表已被其他操作修改，请查看最新列表后重新操作。", reply_to=message)
         try:
             values = _proxy_inputs(message.text)
             current = validate_proxy_cidrs(previous)
@@ -115,17 +125,29 @@ async def _edit_proxy_list(call, action):
                     raise ValueError("部分地址不在当前列表中，请查看节点列表后填写完整 IP 或 CIDR。")
                 updated = [value for value in current if value not in values]
         except ValueError:
-            return await editMessage(
+            return await _proxy_feedback(
                 call, "输入无效：请填写有效的节点 IP 或 CIDR，最多 128 项；不支持域名、端口或 /0 网段。\n"
                 "删除时须填写当前列表中已存在的完整 IP 或 CIDR。节点列表未更新。",
-                buttons=_proxy_keyboard(),
+                reply_to=message,
+            )
+        if updated == current:
+            return await _proxy_feedback(
+                call, f"本次未新增节点：提交的 {len(values)} 个节点均已存在。\n当前共 {len(current)} 个回源节点。",
+                reply_to=message,
             )
         saved = _save_proxies(updated, actor_id)
-        text = (f"已保存，共 {len(updated)} 个回源节点。新请求立即使用新列表，无需重启 Bot。"
-                if saved else "保存失败，节点列表未更新。请检查配置文件写入权限后重试。")
-        return await editMessage(call, text, buttons=_proxy_keyboard())
+        if not saved:
+            text = "保存失败，节点列表未更新。请检查配置文件写入权限后重试。"
+        elif action == "add":
+            added = len(updated) - len(current)
+            text = (f"添加成功：新增 {added} 个节点，{len(values) - added} 个已存在。\n"
+                    f"已保存，当前共 {len(updated)} 个回源节点。新请求立即生效，无需重启。")
+        else:
+            text = (f"删除成功：已删除 {len(current) - len(updated)} 个节点。\n"
+                    f"已保存，当前共 {len(updated)} 个回源节点。新请求立即生效，无需重启。")
+        return await _proxy_feedback(call, text, reply_to=message)
     except ListenerTimeout:
-        return await editMessage(call, "输入已超时，节点列表未更新。", buttons=_proxy_keyboard())
+        return await _proxy_feedback(call, "输入已超时，节点列表未更新。", reply_to=prompt)
     finally:
         _proxy_editors.discard(actor_id)
 
@@ -154,12 +176,13 @@ async def real_ip_settings(_, call):
         pending = _proxy_clear_requests.pop(actor_id, None)
         token = action.removeprefix("clear_confirm_")
         if not pending or pending[0] != token or monotonic() > pending[2]:
-            return await editMessage(call, "清空确认已失效，请重新操作。", buttons=_proxy_keyboard())
+            return await _proxy_feedback(call, "清空确认已失效，请重新操作。")
         if _proxy_snapshot() != pending[1]:
-            return await editMessage(call, "节点列表已被其他操作修改，请查看最新列表后重新确认。", buttons=_proxy_keyboard())
+            return await _proxy_feedback(call, "节点列表已被其他操作修改，请查看最新列表后重新确认。")
         saved = _save_proxies([], actor_id)
-        text = "已清空节点列表，新请求使用连接来源 IP。" if saved else "保存失败，节点列表未更新。"
-        return await editMessage(call, text, buttons=_proxy_keyboard())
+        text = (f"已清空 {len(pending[1])} 个节点，当前共 0 个。新请求使用连接来源 IP。"
+                if saved else "保存失败，节点列表未更新。")
+        return await _proxy_feedback(call, text)
     return await editMessage(
         call, f"CDN 真实 IP\n\n当前回源节点：{len(_proxy_snapshot())} 项\n"
         "添加实际向服务器回源的 CDN 或代理节点 IP，也可填写 CIDR 网段。不要填写普通用户 IP。\n"

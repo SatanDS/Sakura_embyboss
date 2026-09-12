@@ -62,6 +62,11 @@ class ProxyEditorTests(unittest.IsolatedAsyncioTestCase):
         await self.invoke()
         self.assertEqual(self.config.trusted_proxy_cidrs, self.original + ["198.51.100.4/32", "2001:db8::1/128"])
         self.env["save_config"].assert_called_once_with()
+        reply = self.env["sendMessage"].call_args
+        self.assertIs(reply.args[0], self.message)
+        self.assertIn("新增 2 个节点，1 个已存在", reply.args[1])
+        self.assertIn("当前共 3 个", reply.args[1])
+        self.assertIsNotNone(reply.kwargs['buttons'])
         listener = self.chat.listen.call_args.kwargs
         self.assertEqual(listener["user_id"], 10)
         self.assertIsInstance(self.call.message.reply.call_args.kwargs["reply_markup"], ForceReply)
@@ -70,7 +75,21 @@ class ProxyEditorTests(unittest.IsolatedAsyncioTestCase):
         self.message.text = "198.51.100.4 2001:db8:0:0::1"
         await self.invoke("remove")
         self.assertEqual(self.config.trusted_proxy_cidrs, self.original)
+        reply = self.env["sendMessage"].call_args
+        self.assertIs(reply.args[0], self.message)
+        self.assertIn("已删除 2 个节点", reply.args[1])
+        self.assertIn("当前共 1 个", reply.args[1])
         self.assertFalse(self.env["_proxy_editors"])
+
+    async def test_duplicate_add_replies_without_resaving(self):
+        self.message.text = "192.0.2.1 192.0.2.1/32"
+        await self.invoke()
+        self.env["save_config"].assert_not_called()
+        reply = self.env["sendMessage"].call_args
+        self.assertIs(reply.args[0], self.message)
+        self.assertIn("本次未新增", reply.args[1])
+        self.assertIn("1 个节点均已存在", reply.args[1])
+        self.assertEqual(self.config.trusted_proxy_cidrs, self.original)
 
     async def test_non_admin_or_group_callback_cannot_edit(self):
         for user_id, chat_id in ((99, 99), (10, -1001)):
@@ -101,8 +120,14 @@ class ProxyEditorTests(unittest.IsolatedAsyncioTestCase):
             self.message.text = content
             await self.invoke()
             self.assertEqual(self.config.trusted_proxy_cidrs, self.original)
+            reply = self.env["sendMessage"].call_args
+            self.assertIs(reply.args[0], self.message)
+            self.assertIn("节点列表未更新", reply.args[1])
+            self.assertNotIn("添加成功", reply.args[1])
         self.chat.listen.side_effect = ListenerTimeout(120)
         await self.invoke()
+        self.assertIn("输入已超时", self.env["sendMessage"].call_args.args[1])
+        self.assertIs(self.env["sendMessage"].call_args.args[0], self.call.message.reply.return_value)
         self.env["save_config"].assert_not_called()
         self.assertFalse(self.env["_proxy_editors"])
 
@@ -116,6 +141,9 @@ class ProxyEditorTests(unittest.IsolatedAsyncioTestCase):
         await self.invoke("add")
         self.assertEqual(self.config.trusted_proxy_cidrs, self.original)
         self.assertNotIn("已保存", self.env["editMessage"].call_args.args[1])
+        reply = self.env["sendMessage"].call_args
+        self.assertIs(reply.args[0], self.message)
+        self.assertIn("保存失败", reply.args[1])
 
     async def test_concurrent_edit_and_duplicate_editor_do_not_overwrite(self):
         self.env["_proxy_editors"].add(10)
@@ -139,8 +167,19 @@ class ProxyEditorTests(unittest.IsolatedAsyncioTestCase):
         await self.invoke("clear_confirm_" + token)
         self.assertEqual(self.config.trusted_proxy_cidrs, [])
         self.env["save_config"].assert_called_once()
+        reply = self.env["sendMessage"].call_args
+        self.assertIs(reply.args[0], self.call)
+        self.assertIn("已清空 1 个节点", reply.args[1])
         await self.invoke("clear_confirm_" + token)
         self.env["save_config"].assert_called_once()
+
+    async def test_feedback_failure_preserves_saved_nodes_and_updates_panel(self):
+        self.env["sendMessage"].return_value = "message delivery failed"
+        await self.invoke()
+        self.assertEqual(self.config.trusted_proxy_cidrs, self.original + ["198.51.100.4/32", "2001:db8::1/128"])
+        self.env["save_config"].assert_called_once()
+        self.assertIn("添加成功", self.env["editMessage"].call_args.args[1])
+        self.assertFalse(self.env["_proxy_editors"])
 
     async def test_clear_cancel_expiry_permission_change_and_race_preserve_nodes(self):
         await self.invoke("clear")
