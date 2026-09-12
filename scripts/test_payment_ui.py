@@ -49,8 +49,9 @@ class PaymentUITests(unittest.TestCase):
         self.assertIn("DuSheng-Pay_", (ROOT / "bot/modules/commands/exchange.py").read_text(encoding="utf-8"))
         self.assertIn("DuSheng-...", (ROOT / "README.md").read_text(encoding="utf-8"))
 
-    def test_payment_identity_keeps_two_line_uid_visible_on_mobile(self):
-        self.assertIn(".identity{max-width:130px}", self.styles)
+    def test_payment_identity_has_centered_profile_name_and_uid(self):
+        self.assertIn("align-items:center;text-align:center", self.styles)
+        self.assertIn('state.user.display_name || "Telegram 用户"', self.javascript)
 
 
 if __name__ == "__main__":

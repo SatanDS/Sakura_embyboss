@@ -84,7 +84,9 @@
     try { state.user = await api("/me"); if (!state.user.telegram_id) state.user = null; }
     catch (error) { if (error.status !== 401) throw error; state.user = null; }
     show($("login-button"), !state.user); show($("logout-button"), !!state.user); show($("identity"), !!state.user);
-    text($("identity").querySelector(".identity-name"), state.user ? "ID" : "");
+    const identityName = state.user ? (state.user.username ? `@${state.user.username}` : state.user.display_name || "Telegram 用户") : "";
+    const nameElement = $("identity").querySelector(".identity-name");
+    text(nameElement, identityName); nameElement.title = identityName;
     text($("identity").querySelector(".identity-uid"), state.user ? `UID（${state.user.telegram_id}）` : "");
     show($("admin-nav"), ["admin", "owner"].includes(state.user?.role));
   }

@@ -9,6 +9,7 @@ import urllib.parse
 import asyncio
 from datetime import datetime, timezone
 
+from cacheout import Cache
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
@@ -33,6 +34,10 @@ except ImportError:  # lightweight API tests stub bot.sql_helper without ORM met
     def session_csrf(value):
         return ""
     LOGIN_SECONDS, SESSION_SECONDS = 300, 86400
+
+
+_PROFILE_TIMEOUT_SECONDS = 3
+_profile_cache = Cache(maxsize=2048, ttl=300)
 
 
 class SecurePaymentRoute(APIRoute):
@@ -276,11 +281,34 @@ async def payment_auth_poll(request: Request):
     return response
 
 
+async def _telegram_profile(user_id: int):
+    cached = _profile_cache.get(user_id)
+    if cached is not None:
+        return cached
+    profile = {"username": "", "display_name": "Telegram 用户"}
+    try:
+        user = await asyncio.wait_for(bot.get_users(user_id), timeout=_PROFILE_TIMEOUT_SECONDS)
+        username = getattr(user, "username", None)
+        if isinstance(username, str):
+            profile["username"] = username.strip()
+        names = [getattr(user, name, None) for name in ("first_name", "last_name")]
+        display_name = " ".join(name.strip() for name in names if isinstance(name, str) and name.strip())
+        if display_name:
+            profile["display_name"] = display_name
+    except Exception:
+        # Profile lookup is cosmetic; Telegram outages must not break checkout.
+        _profile_cache.set(user_id, profile, ttl=30)
+        return profile
+    _profile_cache.set(user_id, profile)
+    return profile
+
+
 @router.get("/me")
 async def payment_me(request: Request):
     user_id = _session_user(request)
     role = "owner" if user_id == owner else ("admin" if user_id in admins else "user")
-    return {"telegram_id": user_id, "role": role, "csrf_token": _csrf_token(request, user_id)}
+    profile = await _telegram_profile(user_id)
+    return {"telegram_id": user_id, "role": role, "csrf_token": _csrf_token(request, user_id), **profile}
 
 
 @router.post("/auth/logout")

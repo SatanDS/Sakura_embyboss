@@ -1,6 +1,7 @@
 """Browser payment login regressions; no Telegram, MySQL, or production config."""
 
 import ast
+import asyncio
 import importlib.util
 import json
 import sys
@@ -113,7 +114,9 @@ class PaymentHTTPTests(unittest.IsolatedAsyncioTestCase):
         self.base.metadata.create_all(self.engine)
         self.sessions = sessionmaker(bind=self.engine, expire_on_commit=False)
         self.authenticator = self.auth_module.BrowserAuth(self.sessions)
-        sys.modules["bot"].bot = types.SimpleNamespace(send_message=AsyncMock())
+        sys.modules["bot"].bot = types.SimpleNamespace(
+            send_message=AsyncMock(), get_users=AsyncMock(return_value=types.SimpleNamespace(
+                username="viewer", first_name="Test", last_name="Viewer")))
         sys.modules["bot"].config = types.SimpleNamespace()
         sys.modules["bot"].LOGGER = logger
         sys.modules["bot"].owner = 1001
@@ -298,6 +301,56 @@ class PaymentHTTPTests(unittest.IsolatedAsyncioTestCase):
                                          headers={"origin": "https://pay.test", "X-CSRF-Token": csrf})
         self.assertEqual(status, 200)
         self.assertEqual((await self.request("/payments/me", cookies=copied))[0], 401)
+
+    async def test_me_returns_authenticated_telegram_profile_and_caches_lookup(self):
+        csrf = await self.login()
+        status, identity, _ = await self.request("/payments/me")
+        self.assertEqual((status, identity), (200, {
+            "telegram_id": 1001, "role": "owner", "csrf_token": csrf,
+            "username": "viewer", "display_name": "Test Viewer",
+        }))
+        self.api.bot.get_users.assert_awaited_once_with(1001)
+
+    async def test_me_uses_nickname_when_telegram_username_is_unset(self):
+        self.api.bot.get_users.return_value = types.SimpleNamespace(
+            username=None, first_name=" 小明 ", last_name=None)
+        await self.login(user=1002)
+        status, identity, _ = await self.request("/payments/me")
+        self.assertEqual((status, identity["username"], identity["display_name"]), (200, "", "小明"))
+        self.assertEqual((identity["telegram_id"], identity["role"]), (1002, "admin"))
+        self.api.bot.get_users.assert_awaited_once_with(1002)
+
+    async def test_me_profile_failure_preserves_identity_and_checkout(self):
+        self.api.bot.get_users.side_effect = RuntimeError("private Telegram transport failure")
+        csrf = await self.login(user=1003)
+        status, identity, _ = await self.request("/payments/me")
+        self.assertEqual((status, identity), (200, {
+            "telegram_id": 1003, "role": "user", "csrf_token": csrf,
+            "username": "", "display_name": "Telegram 用户",
+        }))
+        self.api.bot.get_users.assert_awaited_once_with(1003)
+        status, _, _ = await self.request("/payments/checkout", method="POST",
+            headers={"origin": "https://pay.test", "X-CSRF-Token": csrf},
+            body={"product_id": "p1", "product_version": 1, "terms_version": "v1", "accepted": True})
+        self.assertEqual(status, 200)
+        self.service.create_checkout.assert_awaited_once()
+
+    async def test_me_profile_timeout_does_not_block_login(self):
+        async def stalled_lookup(_user_id):
+            await asyncio.sleep(1)
+
+        self.api.bot.get_users.side_effect = stalled_lookup
+        with patch.object(self.api, "_PROFILE_TIMEOUT_SECONDS", 0.01):
+            await asyncio.wait_for(self.login(), timeout=0.5)
+        status, identity, _ = await self.request("/payments/me")
+        self.assertEqual((status, identity["username"], identity["display_name"]),
+                         (200, "", "Telegram 用户"))
+        self.api.bot.get_users.assert_awaited_once_with(1001)
+
+    async def test_me_requires_authentication_before_profile_lookup(self):
+        status, identity, _ = await self.request("/payments/me")
+        self.assertEqual((status, identity), (401, {"detail": "login_required"}))
+        self.api.bot.get_users.assert_not_awaited()
 
     async def test_strict_consent_and_disabled_sales_keep_orders_readable(self):
         csrf = await self.login()
