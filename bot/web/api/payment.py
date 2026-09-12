@@ -8,6 +8,7 @@ import time
 import urllib.parse
 import asyncio
 from datetime import datetime, timezone
+from typing import Literal
 
 from cacheout import Cache
 from fastapi import APIRouter, Header, HTTPException, Request
@@ -164,6 +165,7 @@ _PUBLIC_ERROR_CODES = {
     "capacity_full", "no_capacity", "not_found", "code_held", "code_unavailable",
     "test_buyer_not_allowed", "code_mode_mismatch", "order_mode_mismatch",
     "stripe_mode_mismatch", "invalid_event", "event_too_large", "stripe_signature_invalid",
+    "archive_not_allowed", "invalid_archive_request",
 }
 
 
@@ -211,6 +213,12 @@ class ProductRequest(BaseModel):
 
 class ReviewRequest(BaseModel):
     note: str = Field(min_length=3, max_length=1000)
+
+
+class ArchiveRequest(BaseModel):
+    order_ids: list[str] = Field(min_length=1, max_length=100)
+    archived: StrictBool
+    accepted: StrictBool
 
 
 async def _notify(task_type, payload):
@@ -381,8 +389,14 @@ async def create_checkout(body: CheckoutRequest, request: Request):
 
 
 @router.get("/orders")
-async def payment_orders(request: Request):
-    return {"orders": _service().list_orders(_session_user(request))}
+async def payment_orders(request: Request, mode: Literal['current', 'live', 'test', 'all'] = 'current',
+                         archived: Literal['active', 'archived', 'all'] = 'active'):
+    buyer = _session_user(request)
+    service = _service()
+    selected_mode = service.mode if mode == 'current' else mode
+    return {"orders": service.list_orders(buyer, mode=selected_mode,
+                                         archived={'active': False, 'archived': True, 'all': None}[archived]),
+            "current_mode": service.mode}
 
 
 @router.get("/orders/{order_id}")
@@ -448,9 +462,26 @@ def _require_owner(request: Request):
 
 
 @router.get("/admin/orders")
-async def admin_orders(request: Request):
+async def admin_orders(request: Request, mode: Literal['current', 'live', 'test', 'all'] = 'current',
+                       archived: Literal['active', 'archived', 'all'] = 'active'):
     _require_admin(request)
-    return {"orders": _service().list_orders(limit=500)}
+    service = _service()
+    selected_mode = service.mode if mode == 'current' else mode
+    return {"orders": service.list_orders(limit=500, mode=selected_mode,
+                                         archived={'active': False, 'archived': True, 'all': None}[archived]),
+            "current_mode": service.mode}
+
+
+@router.post('/admin/orders/archive')
+async def admin_archive_orders(body: ArchiveRequest, request: Request):
+    actor = _require_owner(request)
+    if body.accepted is not True:
+        raise HTTPException(status_code=400, detail='invalid_archive_request')
+    try:
+        return _service().set_orders_archived(body.order_ids, actor, archived=body.archived)
+    except Exception as exc:
+        _log_provider_error('request', exc)
+        raise HTTPException(status_code=409, detail=_public_error(exc))
 
 
 @router.get("/admin/products")

@@ -3,6 +3,9 @@
 (() => {
   const $ = (id) => document.getElementById(id);
   const page = document.body.dataset.page;
+  const selectedOrders = new Set();
+  let orderRequest = 0;
+  let archiveAction = null;
   const state = { user: null, products: [], orders: [], terms: null, kind: "register", selected: null, editing: null, review: null, code: null, poll: null, orderPoll: null, orderPollStarted: 0, refreshing: false, checkoutInFlight: false };
   const labels = { pending: "待支付", paid: "已支付", expired: "已过期", issued: "已发码", claimed: "兑换处理中", redeemed: "已兑换", held: "暂停使用", review: "待核查", fulfilled: "已发码", failed: "待处理" };
   const errors = {
@@ -24,6 +27,8 @@
     stripe_credentials_invalid: "Stripe 密钥验证失败，请联系管理员检查支付配置。",
     stripe_permission_denied: "Stripe 拒绝了当前收款权限，请联系管理员核查。",
     service_unavailable: "暂时无法创建或查询付款，请稍后重试或联系管理员。",
+    archive_not_allowed: "所选订单包含正式收款、已发码或待核查记录，不能归档。请刷新后重新选择。",
+    invalid_archive_request: "请核对并确认 1 至 100 笔订单。",
   };
   const money = (fen) => new Intl.NumberFormat("zh-CN", { style: "currency", currency: "CNY" }).format(Number(fen || 0) / 100);
   const date = (value) => {
@@ -192,8 +197,20 @@
     const orders = filteredOrders(admin); const tbody = $(admin ? "admin-orders-body" : "orders-body"); tbody.replaceChildren();
     for (const order of orders) {
       const product = productOf(order); const row = node("tr"); const identity = node("td");
+      if (admin && state.user?.role === "owner") {
+        const cell = node("td", undefined, "selection-cell"); const checkbox = node("input"); checkbox.type = "checkbox";
+        checkbox.setAttribute("aria-label", "选择订单 " + order.id); checkbox.disabled = !order.archived_at && !canArchive(order);
+        checkbox.checked = selectedOrders.has(order.id);
+        checkbox.addEventListener("change", () => {
+          if (checkbox.checked && selectedOrders.size >= 100) { checkbox.checked = false; toast("每次最多选择 100 笔订单"); return; }
+          if (checkbox.checked) selectedOrders.add(order.id); else selectedOrders.delete(order.id);
+          updateArchiveSelection();
+        });
+        cell.append(checkbox); row.append(cell);
+      }
       if (admin) { identity.append(node("span", order.id, "mono"), node("span", `TG ${order.buyer_tg}`, "secondary-line")); }
       else { const link = node("a", product.title || "会员套餐", "order-link"); link.href = `/payments/order/${encodeURIComponent(order.id)}`; identity.append(link, node("span", order.id, "secondary-line mono")); }
+      identity.append(node("span", `${order.mode === "test" ? "测试" : "正式"}${order.archived_at ? " · 已归档" : ""}`, "order-mode"));
       row.append(identity);
       if (admin) row.append(node("td", product.title || "会员套餐"));
       row.append(node("td", money(order.amount_fen)));
@@ -211,9 +228,64 @@
     }
     show($(admin ? "admin-orders-empty" : "orders-empty"), orders.length === 0);
     if (!admin) text($("orders-count"), `共 ${orders.length} 笔订单`);
+    else {
+      text($("metric-orders"), orders.length);
+      text($("metric-paid"), money(orders.filter(order => order.mode === "live" && order.payment_state === "paid").reduce((sum, order) => sum + Number(order.amount_fen), 0)));
+      text($("metric-review"), orders.filter(order => order.review_required).length);
+      updateArchiveSelection();
+    }
     iconRefresh();
   }
-  async function loadOrders() { if (!requireLogin()) return; state.orders = (await api("/orders")).orders || []; show($("orders-view")); renderOrders(); }
+  function orderScope(admin) {
+    const prefix = admin ? "admin" : "buyer";
+    return new URLSearchParams({ mode: $(`${prefix}-order-mode`).value, archived: $(`${prefix}-order-archive`).value });
+  }
+  async function loadOrders() {
+    if (!requireLogin()) return;
+    const request = ++orderRequest; const result = await api("/orders?" + orderScope(false));
+    if (request !== orderRequest) return;
+    state.orders = result.orders || []; show($("orders-view")); renderOrders();
+  }
+  function canArchive(order) {
+    return order.mode === "test" || (order.mode === "live" && ["pending", "expired"].includes(order.payment_state)
+      && order.fulfillment_state === "pending" && !order.refunded && !order.dispute_status && !order.review_required);
+  }
+  function updateArchiveSelection() {
+    if (page !== "admin") return;
+    const selected = state.orders.filter(order => selectedOrders.has(order.id));
+    text($("archive-selection-count"), selected.length);
+    $("archive-selected").disabled = !selected.some(order => !order.archived_at && canArchive(order));
+    $("restore-selected").disabled = !selected.some(order => order.archived_at);
+    const visible = filteredOrders(true).filter(order => order.archived_at || canArchive(order));
+    const checked = visible.filter(order => selectedOrders.has(order.id)).length;
+    $("archive-select-all").checked = visible.length > 0 && checked === visible.length;
+    $("archive-select-all").indeterminate = checked > 0 && checked < visible.length;
+    $("archive-select-all").disabled = visible.length === 0;
+  }
+  function confirmArchive(archived) {
+    const orders = filteredOrders(true).filter(order => selectedOrders.has(order.id)
+      && (archived ? !order.archived_at && canArchive(order) : !!order.archived_at));
+    if (!orders.length) return;
+    archiveAction = { order_ids: orders.map(order => order.id), archived };
+    $("archive-form").reset(); show($("archive-error"), false);
+    text($("archive-title"), archived ? "归档订单" : "恢复订单");
+    text($("archive-submit-label"), archived ? "确认归档" : "确认恢复");
+    text($("archive-summary"), `共 ${orders.length} 笔，其中测试 ${orders.filter(order => order.mode === "test").length} 笔、正式 ${orders.filter(order => order.mode === "live").length} 笔。`);
+    $("archive-order-list").replaceChildren(...orders.map(order => node("li", order.id)));
+    $("archive-dialog").showModal();
+  }
+  async function saveArchive(event) {
+    event.preventDefault();
+    if (!archiveAction || !$("archive-form").reportValidity() || $("archive-submit").disabled) return;
+    $("archive-submit").disabled = true; show($("archive-error"), false);
+    try {
+      const result = await api("/admin/orders/archive", { method: "POST", body: JSON.stringify({ ...archiveAction, accepted: true }) });
+      $("archive-dialog").close(); selectedOrders.clear();
+      toast(`已${archiveAction.archived ? "归档" : "恢复"} ${result.changed} 笔订单`);
+      try { await loadAdmin(); } catch (error) { displayError("page-error", error); }
+    } catch (error) { displayError("archive-error", error); }
+    finally { $("archive-submit").disabled = false; }
+  }
   async function loadOrder() {
     if (!requireLogin()) return;
     const order = await api(`/orders/${encodeURIComponent(document.body.dataset.orderId)}`); const product = productOf(order);
@@ -271,10 +343,13 @@
   async function loadAdmin() {
     if (!requireLogin()) return;
     if (!["admin", "owner"].includes(state.user.role)) throw new Error("当前账号没有销售管理权限。");
-    const [orders, products] = await Promise.all([api("/admin/orders"), api("/admin/products")]);
+    selectedOrders.clear(); updateArchiveSelection();
+    const request = ++orderRequest;
+    const [orders, products] = await Promise.all([api("/admin/orders?" + orderScope(true)), api("/admin/products")]);
+    if (request !== orderRequest) return;
     state.orders = orders.orders || []; state.products = products.products || [];
-    text($("metric-orders"), state.orders.length); text($("metric-paid"), money(state.orders.filter((order) => order.payment_state === "paid").reduce((sum, order) => sum + Number(order.amount_fen), 0)));
-    text($("metric-review"), state.orders.filter((order) => order.review_required).length); show($("new-product"), state.user.role === "owner");
+    show($("new-product"), state.user.role === "owner"); show($("archive-tools"), state.user.role === "owner");
+    show($("archive-select-heading"), state.user.role === "owner");
     show($("admin-view")); renderOrders(true); renderAdminProducts();
   }
   function renderAdminProducts() {
@@ -327,7 +402,20 @@
   $("pay-button").addEventListener("click", checkout);
   document.querySelectorAll("[data-kind]").forEach((button) => button.addEventListener("click", () => { state.kind = button.dataset.kind; document.querySelectorAll("[data-kind]").forEach((tab) => tab.setAttribute("aria-selected", String(tab === button))); renderProducts(); }));
   $("tier-filter")?.addEventListener("change", renderProducts);
-  for (const id of ["order-search", "order-filter", "admin-order-search", "admin-order-filter"]) $(id)?.addEventListener(id.endsWith("search") ? "input" : "change", () => renderOrders(page === "admin"));
+  for (const id of ["order-search", "order-filter", "admin-order-search", "admin-order-filter"]) $(id)?.addEventListener(id.endsWith("search") ? "input" : "change", () => { selectedOrders.clear(); renderOrders(page === "admin"); });
+  for (const id of ["admin-order-mode", "admin-order-archive", "buyer-order-mode", "buyer-order-archive"]) $(id)?.addEventListener("change", async () => {
+    show($("page-error"), false);
+    try { if (page === "admin") await loadAdmin(); else await loadOrders(); }
+    catch (error) { displayError("page-error", error); }
+  });
+  $("archive-select-all")?.addEventListener("change", () => {
+    selectedOrders.clear();
+    if ($("archive-select-all").checked) filteredOrders(true).filter(order => order.archived_at || canArchive(order)).slice(0, 100).forEach(order => selectedOrders.add(order.id));
+    renderOrders(true);
+  });
+  $("archive-selected")?.addEventListener("click", () => confirmArchive(true));
+  $("restore-selected")?.addEventListener("click", () => confirmArchive(false));
+  $("archive-form").addEventListener("submit", saveArchive);
   $("reveal-code")?.addEventListener("click", revealCode);
   $("copy-code")?.addEventListener("click", async () => { if (!state.code) return; try { await navigator.clipboard.writeText(state.code); toast("兑换码已复制"); } catch (_) { toast("复制失败，请选中兑换码后手动复制。"); } });
   document.querySelectorAll("[data-admin-tab]").forEach((button) => button.addEventListener("click", () => { document.querySelectorAll("[data-admin-tab]").forEach((tab) => tab.setAttribute("aria-selected", String(tab === button))); show($("admin-orders-panel"), button.dataset.adminTab === "orders"); show($("admin-products-panel"), button.dataset.adminTab === "products"); }));

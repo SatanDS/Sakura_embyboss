@@ -11,10 +11,10 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 from loguru import logger
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -211,6 +211,221 @@ class PaymentCoreTests(unittest.TestCase):
         self.assertIn("param=expires_at", str(messages))
         self.assertIn("request_id=req_worker123", str(messages))
         self.assertNotIn("private_response", str(messages))
+
+    def test_order_lists_separate_modes_archives_and_buyers(self):
+        test_order = self.ps.create_order(42, "p1", 1, self.service.TERMS_VERSION, True)
+        test_other = self.ps.create_order(1, "p1", 1, self.service.TERMS_VERSION, True)
+        self.ps.set_orders_archived([test_order["id"]], 1, True)
+        self.settings.mode = "live"
+        live_order = self.ps.create_order(42, "p1", 1, self.service.TERMS_VERSION, True)
+        self.assertNotEqual(test_order["id"], live_order["id"])
+        self.assertEqual([o["id"] for o in self.ps.list_orders()], [live_order["id"]])
+        self.assertEqual([o["id"] for o in self.ps.list_orders(mode="test")], [test_other["id"]])
+        self.assertEqual([o["id"] for o in self.ps.list_orders(42, mode="test", archived=True)], [test_order["id"]])
+        self.assertEqual(len(self.ps.list_orders(mode="all", archived=None)), 3)
+        self.assertEqual(len(self.ps.list_orders(42, mode="all", archived=None)), 2)
+        self.assertIsNotNone(self.ps.get_order(test_order["id"], 42)["archived_at"])
+        with self.assertRaises(self.service.PaymentError):
+            self.ps.get_order(test_order["id"], 1)
+
+    def test_archive_is_idempotent_and_audits_only_changed_rows(self):
+        order = self.ps.create_order(42, "p1", 1, self.service.TERMS_VERSION, True)
+        self.assertEqual(self.ps.set_orders_archived([order["id"], order["id"]], 1, True), {"ok": True, "changed": 1})
+        archived_at = self.ps.get_order(order["id"])["archived_at"]
+        self.assertEqual(self.ps.set_orders_archived([order["id"]], 1, True)["changed"], 0)
+        self.assertEqual(self.ps.get_order(order["id"])["archived_at"], archived_at)
+        self.assertEqual(self.ps.set_orders_archived([order["id"]], 1, False)["changed"], 1)
+        self.assertEqual(self.ps.set_orders_archived([order["id"]], 1, False)["changed"], 0)
+        with self.sessions() as session:
+            audits = session.query(self.models.Audit).order_by(self.models.Audit.created_at).all()
+            self.assertEqual([a.action for a in audits], ["order_archived", "order_restored"])
+            self.assertEqual({a.actor_tg for a in audits}, {1})
+
+    def test_archive_missing_id_rolls_back_the_whole_batch(self):
+        order = self.ps.create_order(42, "p1", 1, self.service.TERMS_VERSION, True)
+        with self.assertRaises(self.service.PaymentError) as ctx:
+            self.ps.set_orders_archived([order["id"], "missing"], 1, True)
+        self.assertEqual(ctx.exception.code, "not_found")
+        self.assertIsNone(self.ps.get_order(order["id"])["archived_at"])
+        with self.sessions() as session:
+            self.assertEqual(session.query(self.models.Audit).count(), 0)
+
+    def test_archive_rejects_invalid_batch_and_filter_arguments(self):
+        for ids in ([], ["x"] * 101, [None], ["x" * 33], "order-id"):
+            with self.subTest(ids=ids), self.assertRaises(self.service.PaymentError) as ctx:
+                self.ps.set_orders_archived(ids, 1, True)
+            self.assertEqual(ctx.exception.code, "invalid_archive_request")
+        with self.assertRaises(self.service.PaymentError):
+            self.ps.set_orders_archived(["x"], 1, "false")
+        with self.assertRaises(self.service.PaymentError):
+            self.ps.list_orders(mode="unknown")
+        with self.assertRaises(self.service.PaymentError):
+            self.ps.list_orders(archived="false")
+
+    def test_archive_protects_paid_or_disputed_live_orders_atomically(self):
+        test_order = self.ps.create_order(42, "p1", 1, self.service.TERMS_VERSION, True)
+        self.settings.mode = "live"
+        live_order = self.ps.create_order(42, "p1", 1, self.service.TERMS_VERSION, True)
+        for change in ({"payment_state": "paid"}, {"refunded": True},
+                       {"dispute_status": "won"}, {"review_required": True}):
+            with self.sessions.begin() as session:
+                row = session.get(self.models.Order, live_order["id"])
+                row.payment_state, row.refunded, row.dispute_status, row.review_required = "pending", False, None, False
+                for key, value in change.items():
+                    setattr(row, key, value)
+            with self.subTest(change=change), self.assertRaises(self.service.PaymentError) as ctx:
+                self.ps.set_orders_archived([test_order["id"], live_order["id"]], 1, True)
+            self.assertEqual(ctx.exception.code, "archive_not_allowed")
+            self.assertIsNone(self.ps.get_order(test_order["id"])["archived_at"])
+            self.assertIsNone(self.ps.get_order(live_order["id"])["archived_at"])
+
+    def test_archive_preserves_issued_codes_tasks_reservations_and_redemption(self):
+        with self.sessions.begin() as session:
+            session.get(self.models.Product, "p1").kind = "register"
+        # Production account inventory uses another MySQL connection; SQLite
+        # in-memory pools reuse one connection during inspector queries.
+        with patch.object(self.service, "actual_account_count", return_value=0):
+            order = self.ps.create_order(42, "p1", 1, self.service.TERMS_VERSION, True)
+        with self.sessions.begin() as session:
+            session.get(self.models.Order, order["id"]).payment_state = "paid"
+        self.ps.fulfill_order(order["id"])
+        token = self.ps.reveal_code(order["id"], 42)
+        with self.sessions.begin() as session:
+            code = session.query(self.models.Code).one()
+            code.state, code.redeemer_tg, code.redeemed_at = "redeemed", 42, self.service.utcnow()
+            code_id = code.id
+        ledger = self.service.append_months.__globals__
+        entitlement, period = ledger["AccountEntitlement"], ledger["AccountPeriod"]
+        entitlement.__table__.create(self.engine, checkfirst=True)
+        period.__table__.create(self.engine, checkfirst=True)
+        with self.sessions.begin() as session:
+            session.add(entitlement(tg=42, blocked_reason="admin", active_tier="vip", revision=3))
+            session.add(period(tg=42, starts_at=datetime(2026, 9, 1), ends_at=datetime(2026, 10, 1),
+                               tier="vip", kind="months", source_key="payment-code:" + code_id))
+        def snapshot():
+            with self.engine.connect() as conn:
+                return {name: conn.execute(text("SELECT * FROM " + name)).all() for name in (
+                    "payment_codes", "payment_tasks", "payment_registration_reservations", "payment_capacity",
+                    "payment_account_entitlements", "payment_account_periods")}
+        before = snapshot()
+        self.ps.set_orders_archived([order["id"]], 1, True)
+        self.assertEqual(snapshot(), before)
+        self.assertTrue(self.ps.get_order(order["id"], 42)["code_state"] == "redeemed")
+        self.assertEqual(self.ps.reveal_code(order["id"], 42), token)
+        with self.assertRaises(self.service.PaymentError) as ctx:
+            self.ps.claim_code(token, 42)
+        self.assertEqual(ctx.exception.code, "code_used")
+        with self.sessions() as session:
+            self.assertTrue(session.get(self.models.Order, order["id"]).seat_reserved)
+
+    def test_live_order_with_existing_code_cannot_be_archived_even_if_marked_unpaid(self):
+        self.settings.mode = "live"
+        order = self.ps.create_order(42, "p1", 1, self.service.TERMS_VERSION, True)
+        with self.sessions.begin() as session:
+            session.get(self.models.Order, order["id"]).payment_state = "paid"
+        self.ps.fulfill_order(order["id"])
+        with self.sessions.begin() as session:
+            session.get(self.models.Order, order["id"]).payment_state = "expired"
+        with self.assertRaises(self.service.PaymentError) as ctx:
+            self.ps.set_orders_archived([order["id"]], 1, True)
+        self.assertEqual(ctx.exception.code, "archive_not_allowed")
+
+    def test_archived_unpaid_order_is_reused_and_counts_against_sales_limit(self):
+        with self.sessions.begin() as session:
+            session.get(self.models.Product, "p1").sales_limit = 1
+        order = self.ps.create_order(42, "p1", 1, self.service.TERMS_VERSION, True)
+        self.ps.set_orders_archived([order["id"]], 1, True)
+        self.assertEqual(self.ps.create_order(42, "p1", 1, self.service.TERMS_VERSION, True)["id"], order["id"])
+        with self.assertRaises(self.service.PaymentError) as ctx:
+            self.ps.create_order(1, "p1", 1, self.service.TERMS_VERSION, True)
+        self.assertEqual(ctx.exception.code, "sold_out")
+        self.settings.mode = "live"
+        self.assertEqual(self.ps.create_order(42, "p1", 1, self.service.TERMS_VERSION, True)["mode"], "live")
+
+    def _provider_checkout(self, order, *, paid=False, refunded=False):
+        return {"id": "cs_" + order["id"], "mode": "payment", "livemode": order["mode"] == "live",
+                "currency": "cny", "amount_total": order["amount_fen"], "client_reference_id": order["id"],
+                "metadata": {"order_id": order["id"]}, "payment_intent": "pi_" + order["id"] if paid else None,
+                "payment_status": "paid" if paid else "unpaid", "charge_refunded": refunded}
+
+    def test_archived_live_order_resurfaces_only_when_payment_arrives_and_fulfills_once(self):
+        self.settings.mode = "live"
+        order = self.ps.create_order(42, "p1", 1, self.service.TERMS_VERSION, True)
+        self.ps.set_orders_archived([order["id"]], 1, True)
+        self.gateway.retrieve_checkout = AsyncMock(return_value=self._provider_checkout(order))
+        asyncio.run(self.ps.reconcile_order(order["id"], session_hint="cs_" + order["id"]))
+        self.assertIsNotNone(self.ps.get_order(order["id"])["archived_at"])
+        self.assertEqual(asyncio.run(self.ps.reconcile_orders()), 1)
+        self.gateway.retrieve_checkout.return_value = self._provider_checkout(order, paid=True)
+        asyncio.run(self.ps.reconcile_order(order["id"]))
+        self.assertIsNone(self.ps.get_order(order["id"])["archived_at"])
+        self.assertEqual(self.ps.get_order(order["id"])["payment_state"], "paid")
+        self.ps.fulfill_order(order["id"])
+        self.ps.fulfill_order(order["id"])
+        with self.sessions() as session:
+            self.assertEqual(session.query(self.models.Code).count(), 1)
+            self.assertEqual(session.query(self.models.Task).filter_by(unique_key="fulfill:" + order["id"]).count(), 1)
+
+    def test_archived_test_order_can_fulfill_and_new_review_resurfaces_it(self):
+        order = self.ps.create_order(42, "p1", 1, self.service.TERMS_VERSION, True)
+        with self.sessions.begin() as session:
+            session.get(self.models.Order, order["id"]).payment_state = "paid"
+        self.ps.set_orders_archived([order["id"]], 1, True)
+        self.ps.fulfill_order(order["id"])
+        self.assertIsNotNone(self.ps.get_order(order["id"])["archived_at"])
+        self.gateway.retrieve_checkout = AsyncMock(return_value=self._provider_checkout(order, paid=True))
+        asyncio.run(self.ps.reconcile_order(order["id"], session_hint="cs_" + order["id"]))
+        self.assertIsNotNone(self.ps.get_order(order["id"])["archived_at"])
+        self.gateway.retrieve_checkout.return_value = self._provider_checkout(order, paid=True, refunded=True)
+        asyncio.run(self.ps.reconcile_order(order["id"]))
+        self.assertIsNone(self.ps.get_order(order["id"])["archived_at"])
+        self.assertTrue(self.ps.get_order(order["id"])["review_required"])
+        self.assertEqual(self.ps.get_order(order["id"])["code_state"], "held")
+        self.ps.set_orders_archived([order["id"]], 1, True)
+        asyncio.run(self.ps.reconcile_order(order["id"]))
+        self.assertIsNotNone(self.ps.get_order(order["id"])["archived_at"])
+
+    def test_restore_keeps_financial_state_even_if_no_longer_archivable(self):
+        order = self.ps.create_order(42, "p1", 1, self.service.TERMS_VERSION, True)
+        self.ps.set_orders_archived([order["id"]], 1, True)
+        with self.sessions.begin() as session:
+            row = session.get(self.models.Order, order["id"])
+            row.mode, row.payment_state, row.review_required = "live", "paid", True
+        self.assertEqual(self.ps.set_orders_archived([order["id"]], 1, False)["changed"], 1)
+        restored = self.ps.get_order(order["id"])
+        self.assertEqual((restored["mode"], restored["payment_state"], restored["review_required"]), ("live", "paid", True))
+
+    def test_archive_migration_preserves_history_and_can_resume(self):
+        from alembic.migration import MigrationContext
+        from alembic.operations import Operations
+        spec = importlib.util.spec_from_file_location("payment_archive_migration", ROOT /
+            "bot/sql_helper/alembic/versions/20260912_07_add_payment_order_archive.py")
+        migration = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(migration)
+        for existing_column in (False, True):
+            engine = create_engine("sqlite:///:memory:")
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text("CREATE TABLE payment_orders (id VARCHAR(32) PRIMARY KEY, payment_state VARCHAR(24)" +
+                                      (", archived_at DATETIME" if existing_column else "") + ")"))
+                    conn.execute(text("INSERT INTO payment_orders (id, payment_state) VALUES ('legacy', 'paid')"))
+                    with Operations.context(MigrationContext.configure(conn)):
+                        migration.upgrade()
+                        migration.upgrade()
+                    self.assertEqual(conn.execute(text("SELECT id, payment_state, archived_at FROM payment_orders")).one(),
+                                     ("legacy", "paid", None))
+                    self.assertEqual([i["name"] for i in inspect(conn).get_indexes("payment_orders")],
+                                     ["ix_payment_orders_archived_at"])
+            finally:
+                engine.dispose()
+        # Fresh installs create the latest metadata in the initial payment migration.
+        order = self.ps.create_order(42, "p1", 1, self.service.TERMS_VERSION, True)
+        self.ps.set_orders_archived([order["id"]], 1, True)
+        archived_at = self.ps.get_order(order["id"])["archived_at"]
+        with self.engine.begin() as conn, Operations.context(MigrationContext.configure(conn)):
+            migration.upgrade()
+            migration.upgrade()
+        self.assertEqual(self.ps.get_order(order["id"])["archived_at"], archived_at)
 
 
 if __name__ == "__main__":

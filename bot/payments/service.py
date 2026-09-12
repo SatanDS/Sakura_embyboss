@@ -166,7 +166,7 @@ class PaymentService:
     def _order(order):
         result = {key: getattr(order, key) for key in (
             "id", "buyer_tg", "product_id", "product_snapshot", "amount_fen", "currency", "terms_version",
-            "mode",
+            "mode", "archived_at",
             "accepted_at", "payment_state", "fulfillment_state", "checkout_url", "expires_at", "created_at",
             "stripe_session_id", "stripe_payment_intent_id", "refunded", "dispute_status", "review_required",
         )}
@@ -234,13 +234,15 @@ class PaymentService:
                 raise PaymentError("product_unavailable", "套餐尚未上架或已经停售")
             if type(product_version) is not int or product.version != product_version:
                 raise PaymentError("product_changed", "套餐信息已改变，请重新确认")
-            pending = session.query(Order).filter_by(buyer_tg=buyer_tg, product_id=product_id, payment_state="pending").filter(
+            pending = session.query(Order).filter_by(buyer_tg=buyer_tg, product_id=product_id,
+                                                    payment_state="pending", mode=self.mode).filter(
                 Order.expires_at > now).order_by(Order.created_at.desc()).all()
             for previous in pending:
                 if previous.product_snapshot["version"] == product.version and previous.terms_version == terms_version:
                     return self._order(previous)
             sold = session.query(func.count()).select_from(Order).filter(
-                Order.product_id == product_id, Order.payment_state.in_(("pending", "paid"))).scalar()
+                Order.product_id == product_id, Order.mode == self.mode,
+                Order.payment_state.in_(("pending", "paid"))).scalar()
             if product.sales_limit is not None and sold >= product.sales_limit:
                 raise PaymentError("sold_out", "套餐已售完")
             order = Order(id=new_id(), buyer_tg=buyer_tg, product_id=product.id,
@@ -280,12 +282,47 @@ class PaymentService:
             row.checkout_url = response.get("url")
             row.updated_at = utcnow()
 
-    def list_orders(self, buyer_tg=None, limit=100):
+    def list_orders(self, buyer_tg=None, limit=100, *, mode=None, archived=False):
+        mode = self.mode if mode is None else mode
+        if mode not in {"live", "test", "all"} or (archived is not None and type(archived) is not bool):
+            raise PaymentError("invalid_order_filter", "订单筛选条件无效")
         with self.session_factory() as session:
             query = session.query(Order)
             if buyer_tg is not None:
                 query = query.filter_by(buyer_tg=buyer_tg)
+            if mode != "all":
+                query = query.filter_by(mode=mode)
+            if archived is not None:
+                query = query.filter(Order.archived_at.isnot(None) if archived else Order.archived_at.is_(None))
             return [self._order(order) for order in query.order_by(Order.created_at.desc()).limit(min(500, max(1, limit))).all()]
+
+    def set_orders_archived(self, order_ids, actor_tg, archived):
+        if (not isinstance(order_ids, (list, tuple)) or not 1 <= len(order_ids) <= 100
+                or any(not isinstance(value, str) or not 1 <= len(value) <= 32 for value in order_ids)
+                or type(actor_tg) is not int or actor_tg <= 0 or type(archived) is not bool):
+            raise PaymentError("invalid_archive_request", "请选择 1 至 100 个订单")
+        order_ids = sorted(set(order_ids))
+        with self.session_factory.begin() as session:
+            rows = session.query(Order).filter(Order.id.in_(order_ids)).order_by(Order.id).with_for_update().all()
+            if len(rows) != len(order_ids):
+                raise PaymentError("not_found", "部分订单不存在，未修改任何订单")
+            if archived:
+                coded_ids = {value for (value,) in session.query(Code.order_id).filter(Code.order_id.in_(order_ids)).all()}
+                for row in rows:
+                    if row.mode == "test":
+                        continue
+                    if (row.mode != "live" or row.payment_state not in {"pending", "expired"}
+                            or row.id in coded_ids or row.refunded or row.dispute_status or row.review_required):
+                        raise PaymentError("archive_not_allowed", "只能归档测试订单或尚未收款发码的正式订单")
+            now, changed = utcnow(), 0
+            for row in rows:
+                if (row.archived_at is not None) == archived:
+                    continue
+                row.archived_at = now if archived else None
+                session.add(Audit(actor_tg=actor_tg, action="order_archived" if archived else "order_restored",
+                                  target_id=row.id, details={"mode": row.mode, "payment_state": row.payment_state}))
+                changed += 1
+            return {"ok": True, "changed": changed}
 
     def get_order(self, order_id, buyer_tg=None):
         with self.session_factory() as session:
@@ -497,6 +534,8 @@ class PaymentService:
             _capacity_lock(session)
             row = session.query(Order).filter_by(id=order_id).with_for_update().one()
             intent_id = self._validate_session(row, provider)
+            previous_payment_state = row.payment_state
+            previous_review = (row.review_required, row.refunded, row.dispute_status)
             row.stripe_session_id = provider["id"]
             if intent_id:
                 row.stripe_payment_intent_id = intent_id
@@ -529,6 +568,10 @@ class PaymentService:
                 if row.seat_reserved:
                     release_registration(session, "order:" + order_id)
                     row.seat_reserved = False
+            if ((row.payment_state == "paid" and previous_payment_state != "paid")
+                    or (row.review_required and previous_review !=
+                        (row.review_required, row.refunded, row.dispute_status))):
+                row.archived_at = None
             row.last_error = None
             row.updated_at = utcnow()
 

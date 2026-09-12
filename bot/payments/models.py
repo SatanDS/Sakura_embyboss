@@ -51,6 +51,7 @@ class Order(Base):
     review_required = Column(Boolean, nullable=False, default=False)
     last_error = Column(String(120), nullable=True)
     paid_at = Column(DateTime, nullable=True)
+    archived_at = Column(DateTime, nullable=True, index=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 

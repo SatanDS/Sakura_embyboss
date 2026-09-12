@@ -10,7 +10,7 @@ import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 from http.cookies import SimpleCookie
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 from urllib.parse import parse_qs, urlsplit
 
 from fastapi import FastAPI
@@ -131,10 +131,11 @@ class PaymentHTTPTests(unittest.IsolatedAsyncioTestCase):
         self.api = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.api)
         self.settings = types.SimpleNamespace(cookie_secure=True, public_url="https://pay.test",
-                                              enabled=True, terms_version="v1", validate=lambda: None)
+                                              enabled=True, terms_version="v1", mode="live", validate=lambda: None)
         self.api._settings = lambda: self.settings
         self.api._auth = lambda: self.authenticator
-        self.service = types.SimpleNamespace(list_orders=lambda buyer: [{"id": "o1", "buyer_tg": buyer}],
+        self.service = types.SimpleNamespace(mode="live", list_orders=Mock(side_effect=lambda buyer=None, **kw: [{"id": "o1", "buyer_tg": buyer}]),
+                                            set_orders_archived=Mock(return_value={"ok": True, "changed": 1}),
                                             create_checkout=AsyncMock(return_value={"id": "o1", "checkout_url": "https://checkout.stripe.com/c/pay/test"}))
         self.api._service = lambda: self.service
         self.app = FastAPI()
@@ -208,6 +209,7 @@ class PaymentHTTPTests(unittest.IsolatedAsyncioTestCase):
         sys.modules.update(self.original_modules)
 
     async def request(self, path, *, method="GET", body=None, headers=None, cookies=None):
+        parsed_path = urlsplit(path)
         request_headers = {"host": "pay.test", **(headers or {})}
         jar = self.cookies if cookies is None else cookies
         if jar:
@@ -216,8 +218,8 @@ class PaymentHTTPTests(unittest.IsolatedAsyncioTestCase):
         if body is not None:
             request_headers["content-type"] = "application/json"
         scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
-                 "method": method, "scheme": "https", "path": path, "raw_path": path.encode(),
-                 "query_string": b"", "root_path": "", "headers": [(key.lower().encode(), value.encode()) for key, value in request_headers.items()],
+                 "method": method, "scheme": "https", "path": parsed_path.path, "raw_path": parsed_path.path.encode(),
+                 "query_string": parsed_path.query.encode(), "root_path": "", "headers": [(key.lower().encode(), value.encode()) for key, value in request_headers.items()],
                  "client": ("127.0.0.1", 12345), "server": ("pay.test", 443)}
         sent = []
 
@@ -365,6 +367,58 @@ class PaymentHTTPTests(unittest.IsolatedAsyncioTestCase):
         status, body, response_headers = await self.request("/payments/orders")
         self.assertEqual((status, body["orders"][0]["buyer_tg"]), (200, 1001))
         self.assertIn((b"cache-control", b"no-store"), response_headers)
+
+    async def test_order_listing_modes_and_archive_filters_remain_buyer_scoped(self):
+        await self.login(user=1003)
+        status, data, _ = await self.request('/payments/orders')
+        self.assertEqual((status, data['current_mode']), (200, 'live'))
+        self.service.list_orders.assert_called_with(1003, mode='live', archived=False)
+        await self.request('/payments/orders?mode=test&archived=archived')
+        self.service.list_orders.assert_called_with(1003, mode='test', archived=True)
+        await self.request('/payments/orders?mode=all&archived=all')
+        self.service.list_orders.assert_called_with(1003, mode='all', archived=None)
+        for query in ('mode=wrong', 'archived=wrong'):
+            status, _, _ = await self.request('/payments/orders?' + query)
+            self.assertEqual(status, 422)
+
+    async def test_admin_listing_filter_and_archive_owner_csrf_boundary(self):
+        csrf = await self.login(user=1002)
+        status, _, _ = await self.request('/payments/admin/orders?mode=test&archived=archived')
+        self.assertEqual(status, 200)
+        self.service.list_orders.assert_called_with(limit=500, mode='test', archived=True)
+        body = {'order_ids': ['o1'], 'archived': True, 'accepted': True}
+        headers = {'origin': 'https://pay.test', 'X-CSRF-Token': csrf}
+        status, _, _ = await self.request('/payments/admin/orders/archive', method='POST', body=body, headers=headers)
+        self.assertEqual(status, 403)
+        self.service.set_orders_archived.assert_not_called()
+        self.cookies.clear()
+        csrf = await self.login(user=1001)
+        status, _, _ = await self.request('/payments/admin/orders/archive', method='POST', body=body)
+        self.assertEqual(status, 403)
+        status, _, _ = await self.request('/payments/admin/orders/archive', method='POST', body=body,
+            headers={'origin': 'https://evil.test', 'X-CSRF-Token': csrf})
+        self.assertEqual(status, 403)
+        self.service.set_orders_archived.assert_not_called()
+        status, data, _ = await self.request('/payments/admin/orders/archive', method='POST', body=body,
+            headers={'origin': 'https://pay.test', 'X-CSRF-Token': csrf})
+        self.assertEqual((status, data), (200, {'ok': True, 'changed': 1}))
+        self.service.set_orders_archived.assert_called_once_with(['o1'], 1001, archived=True)
+
+    async def test_archive_requires_explicit_consent_and_bounded_selection(self):
+        csrf = await self.login()
+        headers = {'origin': 'https://pay.test', 'X-CSRF-Token': csrf}
+        baseline = {'order_ids': ['o1'], 'archived': True, 'accepted': True}
+        for changes, expected in (({'accepted': False}, 400), ({'accepted': 'true'}, 422),
+                                  ({'archived': 'false'}, 422), ({'order_ids': []}, 422),
+                                  ({'order_ids': ['x'] * 101}, 422)):
+            status, _, _ = await self.request('/payments/admin/orders/archive', method='POST',
+                body={**baseline, **changes}, headers=headers)
+            self.assertEqual(status, expected)
+        self.service.set_orders_archived.assert_not_called()
+        status, _, _ = await self.request('/payments/admin/orders/archive', method='POST',
+            body={**baseline, 'archived': False}, headers=headers)
+        self.assertEqual(status, 200)
+        self.service.set_orders_archived.assert_called_once_with(['o1'], 1001, archived=False)
 
     async def test_checkout_provider_error_is_logged_and_response_stays_private(self):
         import stripe
