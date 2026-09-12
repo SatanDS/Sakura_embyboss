@@ -37,6 +37,7 @@ def judge_start_ikb(is_admin: bool, account: bool) -> InlineKeyboardMarkup:
     if _open.checkin:
         d.append(['🎯 签到', 'checkin'])
     lines = array_chunk(d, 2)
+    lines.append([['💵購買續期註冊碼', 'https://xf.dusheng.lol/payments/shop', 'url']])
     if is_admin: lines.append([['👮🏻‍♂️ admin', 'manage']])
     keyword = ikb(lines)
     return keyword
