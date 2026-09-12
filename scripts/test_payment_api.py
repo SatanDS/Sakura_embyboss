@@ -137,6 +137,11 @@ class PaymentHTTPTests(unittest.IsolatedAsyncioTestCase):
         self.service = types.SimpleNamespace(mode="live", list_orders=Mock(side_effect=lambda buyer=None, **kw: [{"id": "o1", "buyer_tg": buyer}]),
                                             set_orders_archived=Mock(return_value={"ok": True, "changed": 1}),
                                             create_checkout=AsyncMock(return_value={"id": "o1", "checkout_url": "https://checkout.stripe.com/c/pay/test"}))
+        self.channel_config = {'mode': 'live', 'version': 1, 'channels': {
+            'card': False, 'apple_pay': False, 'google_pay': False, 'alipay': True, 'wechat_pay': True}}
+        self.service.get_channels = Mock(return_value=self.channel_config)
+        self.service.save_channels = AsyncMock(return_value={**self.channel_config, 'version': 2})
+        self.service.list_products = Mock(return_value=[])
         self.api._service = lambda: self.service
         self.app = FastAPI()
         self.app.include_router(self.api.router)
@@ -419,6 +424,63 @@ class PaymentHTTPTests(unittest.IsolatedAsyncioTestCase):
             body={**baseline, 'archived': False}, headers=headers)
         self.assertEqual(status, 200)
         self.service.set_orders_archived.assert_called_once_with(['o1'], 1001, archived=False)
+
+    async def test_public_catalog_reports_only_channel_flags_not_provider_config(self):
+        status, data, _ = await self.request('/payments/products')
+        self.assertEqual(status, 200)
+        self.assertEqual(data['payment_channels'], self.channel_config['channels'])
+        self.assertNotIn('stripe_configuration_id', data)
+
+    async def test_channel_configuration_reads_require_admin_and_writes_require_owner(self):
+        status, _, _ = await self.request('/payments/admin/channels')
+        self.assertEqual(status, 401)
+        await self.login(user=1003)
+        status, _, _ = await self.request('/payments/admin/channels')
+        self.assertEqual(status, 403)
+        self.cookies.clear()
+        csrf = await self.login(user=1002)
+        status, data, _ = await self.request('/payments/admin/channels')
+        self.assertEqual((status, data), (200, self.channel_config))
+        body = {'mode': 'live', 'version': 1, 'channels': self.channel_config['channels'], 'request_id': 'a' * 32, 'accepted': True}
+        headers = {'origin': 'https://pay.test', 'X-CSRF-Token': csrf}
+        status, _, _ = await self.request('/payments/admin/channels', method='POST', body=body, headers=headers)
+        self.assertEqual(status, 403)
+        self.service.save_channels.assert_not_awaited()
+        self.cookies.clear()
+        csrf = await self.login(user=1001)
+        status, data, _ = await self.request('/payments/admin/channels', method='POST', body=body,
+            headers={'origin': 'https://pay.test', 'X-CSRF-Token': csrf})
+        self.assertEqual(status, 200)
+        self.assertEqual(data['version'], 2)
+        self.service.save_channels.assert_awaited_once_with(1001, {key: value for key, value in body.items() if key != 'accepted'})
+
+    async def test_channel_write_requires_origin_csrf_consent_and_strict_booleans(self):
+        csrf = await self.login()
+        body = {'mode': 'live', 'version': 1, 'channels': self.channel_config['channels'], 'request_id': 'a' * 32, 'accepted': True}
+        headers = {'origin': 'https://pay.test', 'X-CSRF-Token': csrf}
+        for invalid_headers in ({}, {**headers, 'origin': 'https://evil.test'}, {**headers, 'X-CSRF-Token': 'wrong'}):
+            status, _, _ = await self.request('/payments/admin/channels', method='POST', body=body, headers=invalid_headers)
+            self.assertEqual(status, 403)
+        for changes, expected in (({'accepted': False}, 400), ({'accepted': 'true'}, 422),
+                                  ({'version': True}, 422), ({'request_id': 'bad'}, 422),
+                                  ({'channels': {**body['channels'], 'card': 'true'}}, 422),
+                                  ({'channels': {**body['channels'], 'paypal': True}}, 422)):
+            status, _, _ = await self.request('/payments/admin/channels', method='POST', body={**body, **changes}, headers=headers)
+            self.assertEqual(status, expected)
+        self.service.save_channels.assert_not_awaited()
+
+    async def test_channel_publish_error_reports_category_without_provider_payload(self):
+        import stripe
+        csrf = await self.login()
+        for param in ("payment_method_configuration", "apple_pay[display_preference][preference]",
+                      "google_pay[display_preference][preference]", "wechat_pay[display_preference][preference]"):
+            with self.subTest(param=param):
+                self.service.save_channels.side_effect = stripe.InvalidRequestError("private-provider-payload", param=param)
+                status, body, _ = await self.request('/payments/admin/channels', method='POST',
+                    headers={'origin': 'https://pay.test', 'X-CSRF-Token': csrf},
+                    body={'mode': 'live', 'version': 1, 'channels': self.channel_config['channels'],
+                          'request_id': 'a' * 32, 'accepted': True})
+                self.assertEqual((status, body), (409, {'detail': 'stripe_payment_methods_unavailable'}))
 
     async def test_checkout_provider_error_is_logged_and_response_stays_private(self):
         import stripe

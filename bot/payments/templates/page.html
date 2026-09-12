@@ -71,7 +71,7 @@
       </section>
       {% elif page == 'admin' %}
       <section id="admin-view" hidden aria-label="销售管理">
-        <div class="segments admin-tabs" role="tablist" aria-label="管理视图"><button type="button" role="tab" aria-selected="true" data-admin-tab="orders">订单管理</button><button type="button" role="tab" aria-selected="false" data-admin-tab="products">套餐管理</button></div>
+        <div class="segments admin-tabs" role="tablist" aria-label="管理视图"><button type="button" role="tab" aria-selected="true" data-admin-tab="orders">订单管理</button><button type="button" role="tab" aria-selected="false" data-admin-tab="products">套餐管理</button><button type="button" role="tab" aria-selected="false" data-admin-tab="channels">支付渠道</button></div>
         <section id="admin-orders-panel">
           <div class="metrics"><div><span>列表订单数</span><strong id="metric-orders">0</strong></div><div><span>正式已支付金额（列表）</span><strong id="metric-paid">¥0.00</strong></div><div><span>列表待核查</span><strong id="metric-review">0</strong></div></div>
           <div class="order-scope"><label>支付环境<select id="admin-order-mode"><option value="current">当前环境</option><option value="live">正式</option><option value="test">测试</option><option value="all">全部环境</option></select></label><label>归档状态<select id="admin-order-archive"><option value="active">未归档</option><option value="archived">已归档</option><option value="all">全部记录</option></select></label><div id="archive-tools" class="row-actions" hidden><button id="archive-selected" class="button" type="button" disabled><i data-lucide="archive"></i>归档所选<span id="archive-selection-count">0</span></button><button id="restore-selected" class="button" type="button" disabled><i data-lucide="archive-restore"></i>恢复所选</button></div></div>
@@ -80,10 +80,27 @@
           <p id="admin-orders-empty" class="empty-state" hidden>暂无符合条件的订单</p>
         </section>
         <section id="admin-products-panel" hidden><div class="section-toolbar"><h2>套餐目录</h2><button id="new-product" class="button primary" type="button" hidden><i data-lucide="plus"></i>新增套餐</button></div><div class="table-scroll"><table><thead><tr><th>套餐</th><th>用途 / 等级</th><th>时长</th><th>价格</th><th>销售上限</th><th>状态</th><th><span class="sr-only">操作</span></th></tr></thead><tbody id="admin-products-body"></tbody></table></div><p id="admin-products-empty" class="empty-state" hidden>暂无套餐</p></section>
+        <section id="admin-channels-panel" hidden aria-label="支付渠道设置">
+          <div class="section-toolbar"><h2>支付渠道</h2><span id="channel-mode" class="badge"></span></div>
+          <div id="channel-loading" class="subtle" role="status">正在加载</div>
+          <form id="channel-form" class="channel-settings" hidden>
+            <fieldset id="channel-fields">
+              <label class="channel-row"><span class="channel-icon"><i data-lucide="credit-card"></i></span><span><strong>银行卡</strong><small>信用卡 / 借记卡</small></span><input id="channel-card" name="card" type="checkbox" role="switch" aria-label="银行卡"></label>
+              <label class="channel-row channel-wallet"><span class="channel-icon"><i data-lucide="wallet"></i></span><span><strong>Apple Pay</strong><small>需要启用银行卡，且买家设备支持</small></span><input id="channel-apple_pay" name="apple_pay" type="checkbox" role="switch" aria-label="Apple Pay"></label>
+              <label class="channel-row channel-wallet"><span class="channel-icon"><i data-lucide="wallet-cards"></i></span><span><strong>Google Pay</strong><small>需要启用银行卡，且买家设备支持</small></span><input id="channel-google_pay" name="google_pay" type="checkbox" role="switch" aria-label="Google Pay"></label>
+              <label class="channel-row"><span class="channel-icon"><i data-lucide="scan-line"></i></span><span><strong>支付宝</strong><small>Alipay</small></span><input id="channel-alipay" name="alipay" type="checkbox" role="switch" aria-label="支付宝"></label>
+              <label class="channel-row"><span class="channel-icon"><i data-lucide="qr-code"></i></span><span><strong>微信支付</strong><small>WeChat Pay</small></span><input id="channel-wechat_pay" name="wechat_pay" type="checkbox" role="switch" aria-label="微信支付"></label>
+            </fieldset>
+            <p class="subtle">只向新订单开放已启用的渠道；已创建的付款链接保留原渠道。钱包是否出现取决于 Stripe、买家地区和设备。全部关闭将暂停新下单，已有订单仍可付款和发码。</p>
+            <div id="channel-owner-actions" hidden><label class="checkbox-row"><input id="channel-accepted" type="checkbox" required><span>我已核对当前支付环境和渠道，确认保存。</span></label><div class="row-actions"><button id="channel-save" class="button primary" type="submit"><i data-lucide="save"></i><span id="channel-save-label">保存渠道</span></button><button id="channel-reload" class="icon-button" type="button" title="重新加载已保存设置" aria-label="重新加载已保存设置"><i data-lucide="refresh-cw"></i></button></div></div>
+          </form>
+          <p id="channel-error" class="notice danger" role="alert" hidden></p>
+          <p id="channel-success" class="notice success" role="status" hidden></p>
+        </section>
       </section>
       {% endif %}
     </main>
-    <footer><span>© {{ brand_name }}</span><span>支付宝 / 微信支付 · 由 Stripe 处理付款</span></footer>
+    <footer><span>© {{ brand_name }}</span><span id="payment-methods-footer">由 Stripe 处理付款</span></footer>
   </div>
   <dialog id="login-dialog" aria-labelledby="login-title"><div class="dialog-heading"><h2 id="login-title">登录会员中心</h2><button class="icon-button" data-close type="button" title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></div><div class="login-mark"><i data-lucide="send"></i></div><p id="login-status" class="text-center" role="status">正在创建登录请求</p><div id="login-code-wrap" class="login-code" hidden><span class="subtle">确认码</span><strong id="login-code" class="mono"></strong></div><a id="telegram-link" class="button primary full-width" target="_blank" rel="noopener noreferrer" hidden>前往 Telegram 确认<i data-lucide="arrow-up-right"></i></a><button id="retry-login" type="button" class="button full-width" hidden>重新登录</button></dialog>
   <dialog id="checkout-dialog" aria-labelledby="checkout-title"><div class="dialog-heading"><h2 id="checkout-title">确认购买</h2><button class="icon-button" data-close type="button" title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></div><div class="checkout-summary"><div><h3 id="checkout-product"></h3><p id="checkout-description" class="subtle"></p></div><strong id="checkout-price"></strong></div><p id="checkout-terms" class="legal-copy"></p><label class="checkbox-row"><input id="accept-terms" type="checkbox"><span>我已阅读并同意购买须知，确认所选套餐及不退款规则。</span></label><p id="checkout-error" class="notice danger" hidden role="alert"></p><button id="pay-button" type="button" class="button primary full-width" disabled><span id="pay-button-label">前往付款</span><i data-lucide="arrow-up-right"></i></button></dialog>

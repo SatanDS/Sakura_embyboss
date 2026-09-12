@@ -939,7 +939,7 @@ docker exec embyboss python3 -c 'import sqlite3;d=sqlite3.connect("file:/emby-au
 
 Stripe 设置入口为 [正式付款方式](https://dashboard.stripe.com/settings/payment_methods) 和 [测试付款方式](https://dashboard.stripe.com/test/settings/payment_methods)。也可从 Dashboard 的「设置 → 支付 → 付款方式」进入；先选对商户账户及正式/测试环境。
 
-**当前代码同时指定支付宝 `alipay` 和微信支付 `wechat_pay`，没有只启用其中一种的配置开关。** 正式收款前必须确认这两项均获批并可用于当前商户的 CNY Checkout。支付宝审核未通过、微信仍在审批时，先保持停售；仅换正式密钥或重启无法解决商户能力限制。测试环境能用，不代表正式环境获批。
+支持银行卡、Apple Pay、Google Pay、支付宝和微信支付。所有者可在「销售管理 → 支付渠道」决定开放哪些方式，详见 17.14；只开放当前商户已获批、且支持 CNY Checkout 的渠道。支付宝或微信尚未获批时可以关闭它们，使用已获批的银行卡和钱包。测试环境能用，不代表正式环境获批；开启开关也不能绕过 Stripe 的商户、币种、地区或设备限制。
 
 本项目使用 Stripe 托管 Checkout，CNY 单次付款，每单一份商品、一张码，不自动续费。没有个人收款码回调或人工确认收款功能，用户截图、点击「已付款」和成功页都不能代替服务端到账验证。Telegram 内数字服务遵循 Stars 规则，本节部署的是独立网站。
 
@@ -1214,7 +1214,7 @@ echo 'INTERNAL_ROUTES_NOT_EXPOSED'
 
 ### 17.7 测试验收
 
-使用白名单中的测试账号，分别完成支付宝和微信的 Stripe 测试付款。测试环境不代表实际扣款；完整兑换、并发和故障测试在隔离的数据库/Emby 中进行。
+先按 17.14 保存测试环境的支付渠道，再使用白名单中的测试账号，逐一完成准备开放渠道的 Stripe 测试付款。Apple Pay、Google Pay 使用符合 Stripe 要求的设备和已配置的钱包验证；测试环境不代表实际扣款，完整兑换、并发和故障测试在隔离的数据库/Emby 中进行。
 
 - 未勾选购买须知不能下单；商品改价或须知版本变化后须重新确认。
 - Checkout 打开时显示等待提示；原浏览器保留订单页。付款后订单页每 4 秒查状态，最长约 10 分钟，超时后可手动刷新；不能把一直转圈当作已到账。
@@ -1235,11 +1235,11 @@ python3 -B scripts/run_offline_tests.py
 
 ### 17.8 切换正式收款
 
-**两种支付方式均通过正式审核后才执行。** 测试白名单只在 `live_mode: false` 生效，不能用它限制正式模式的购买者。
+**准备开放的支付方式均通过正式审核后才执行；未获批渠道保持关闭。** 测试白名单只在 `live_mode: false` 生效，不能用它限制正式模式的购买者。
 
 1. 先将 `payments.enabled` 改为 `false`，重建 Bot 停止创建新订单；让测试付款和发码任务处理完成。测试侧仍待支付的 Checkout 在 Stripe 测试后台确认取消/过期，并完成对账；不能直接删除订单或数据库。检查测试商品价格，正式开放前将不售卖的测试商品下架，避免沿用测试价。
 2. 按 17.2 的备份部分保存当前数据库、配置、密钥和镜像。独立测试部署不要合并测试库到正式库；若此前直接在业务库测试，先核查测试账号权益和已发码情况，再切换。
-3. 在 Stripe **正式环境**确认支付宝、微信支付和 CNY 能力，取得 `sk_live_...` Secret key；创建正式 Webhook 端点，使用 17.3 的完整事件列表。已有正确的正式端点可继续用，无需每次升级重建。
+3. 在 Stripe **正式环境**确认准备开放渠道的 CNY 收款能力，取得 `sk_live_...` Secret key；创建正式 Webhook 端点，使用 17.3 的完整事件列表。已有正确的正式端点可继续用，无需每次升级重建。
 4. 修改 `.env` 的 Stripe Secret key 和 Webhook 签名密钥。正式端点也以 `whsec_` 开头，不能靠前缀判断它是测试还是正式，必须核对端点所属环境。测试和正式端点可以先后使用同一公网 URL，但当前实例一次只校验一套签名密钥。
 
 ~~~dotenv
@@ -1258,7 +1258,7 @@ TGBOT_STRIPE_WEBHOOK_SECRET=whsec_REPLACE_WITH_LIVE_ENDPOINT_SECRET
 ~~~
 
 6. 重新执行 17.3 的独立配置校验，确认 `LIVE_MODE = True`、`SALES_ENABLED = False`、`CODE_KEY_BYTES = 32`。然后执行 17.5 重建 Bot 并检查日志和公网。它不会启动新的购买，但已存在 Checkout 仍可能付款，原订单交付任务也继续运行。
-7. 确认商品正式售价和上下架状态后，将 `payments.enabled` 改为 `true`，再次校验并重建 Bot。分别用微信和支付宝完成一笔允许金额的**真实付款**，在正式 Stripe 后台核对金额、币种、成功状态和 Webhook 投递，再确认 Bot 的发码、通知、兑换。全部通过后再对外宣传开放。
+7. 所有者进入「销售管理 → 支付渠道」，核对页面显示「正式环境」，关闭未获批渠道并保存；测试渠道设置不会自动复制到正式环境。确认商品正式售价和上下架状态后，将 `payments.enabled` 改为 `true`，再次校验并重建 Bot。对每个准备开放的渠道完成一笔允许金额的**真实付款**，在正式 Stripe 后台核对金额、币种、成功状态和 Webhook 投递，再确认 Bot 的发码、通知、兑换。全部通过后再对外宣传开放。
 
 正式模式下测试订单/测试码不能兑换是预期行为。测试和正式的 Stripe 密钥、Webhook 不可混用；不要修改旧订单的 `mode` 字段绕过检查。停止使用的测试端点应在测试任务核对完毕后停用，避免测试事件继续投递到正式实例。
 
@@ -1268,7 +1268,7 @@ TGBOT_STRIPE_WEBHOOK_SECRET=whsec_REPLACE_WITH_LIVE_ENDPOINT_SECRET
 
 仅更新代码时执行 17.2 完成备份、拉取和构建，然后执行 17.3 校验、17.5 重建和连通检查。保留当前 `live_mode`、`.env`、价格和已售订单，不重新生成密钥，不覆盖本机 Compose/Caddy 配置。代码已经包含配置字段默认值，缺少可选字段通常不需要重建整个 `config.json`。
 
-仅修改密钥或 `config.json` 时，无需再次 build，但必须 `docker compose up -d --no-deps --no-build --force-recreate embyboss`。网站后台的商品修改立即生效。Caddyfile 只有变化时才验证并重启网关；不要每次 Bot 更新都重启 Emby/MySQL。
+仅修改密钥或 `config.json` 时，无需再次 build，但必须 `docker compose up -d --no-deps --no-build --force-recreate embyboss`。网站后台的商品和支付渠道设置保存后生效，无需重启；旧订单继续使用创建时的快照。Caddyfile 只有变化时才验证并重启网关；不要每次 Bot 更新都重启 Emby/MySQL。
 
 Git 提交号只能说明宿主机代码版本，不能证明运行容器已更新；必须确保 build 成功后再 recreate。命令块遇错就停止，不能在构建失败后继续用旧镜像宣称升级成功。
 
@@ -1303,7 +1303,11 @@ docker compose logs --since=10m --tail=300 embyboss 2>&1 | grep -F 'payment_fail
 | 登录/下单 403 | 核对 `public_url` 与实际 HTTPS 地址、Cookie/Origin 转发和浏览器会话；勿通过关闭 CSRF 绕过。内部路由的 404 是隔离预期。 |
 | `test_buyer_not_allowed` | 测试模式仅允许 `test_buyer_ids` 中的真实 Telegram ID；空列表拒绝所有测试下单。 |
 | `code=amount_too_small` | Stripe 确认金额过低，按该商户最低金额调整商品价格并重新确认；不能仅凭 ¥1 或 ¥10 推断统一门槛。 |
-| `param=payment_method_types` / `stripe_payment_methods_unavailable` | 支付方式参数被拒绝。常见是正式支付宝/微信未获批，也可能是币种或商户条件不兼容；按 `request_id` 查看准确原因。测试获批不代表正式获批。 |
+| `param=payment_method_types` / `param=payment_method_configuration` / `stripe_payment_methods_unavailable` | 支付方式参数被拒绝。核对当前环境的已选渠道、币种和商户能力，按 `request_id` 查看准确原因。旧订单保留原支付参数，改开关不会改写旧 Checkout。 |
+| `payment_channels_unavailable` / `payment_channel_config_invalid` | Stripe 渠道未获批或返回的实际配置与开关不一致，保存未生效。重新加载核对，关闭不可用渠道后重试；不要通过手改订单快照或关闭校验解决。 |
+| `channels_changed` / `channel_mode_mismatch` | 其他页面已保存或服务切换了测试/正式环境。重新加载当前设置，核对后再次确认保存。 |
+| `payment_channels_disabled` | 当前环境全部渠道已关闭。所有者启用至少一种可用方式并保存；`payments.enabled` 仍须开启才能新下单。 |
+| 已启用 Apple Pay / Google Pay，但收银台没有显示 | 检查银行卡开关、买家地区、浏览器、设备和钱包是否满足 Stripe 条件，使用新订单验证。钱包开关是允许显示，不保证所有设备都出现；中国大陆等地区可能受 Stripe 限制。 |
 | `order_mode_mismatch` / `code_mode_mismatch` | 订单/码不属于当前环境；核对当前模式和实际运行代码。旧测试创建/对账任务在新版本中结束，不代表任何正式款项到账。 |
 | Webhook 400 或签名失败 | 使用端点自己的 `whsec_`，确保原始请求体和 `Stripe-Signature` 没被代理修改；裸 curl 不带签名返回 400 是正常的，不能算回调验收通过。 |
 | 已扣款，页面仍待支付/待发码 | 核对 Stripe 支付状态和 Webhook，后台提交对账。后台通常每分钟处理任务、每五分钟安排周期对账，网络和重试可能延迟；超过两分钟可开始排查，勿再次付款。 |
@@ -1330,3 +1334,27 @@ docker compose logs --since=10m --tail=300 embyboss 2>&1 | grep -F 'payment_fail
 归档记录仍受正常兑换权限、用途和支付环境校验。归档订单仍参与同环境的订单复用与销售限制，不能通过反复归档获取额外销售名额。操作写入审计，重复提交不产生重复归档或重复发码；不要用删除支付表、删权益表或手工把订单改成「已支付」来清空页面。
 
 升级前按 17.2 备份 MySQL，构建并重建 Bot；启动会自动执行 `20260912_07` 迁移，新增 `payment_orders.archived_at` 及索引，已有记录默认未归档，不会自动处理任何订单。Caddy 和 Emby 无需重启。
+
+### 17.14 支付渠道开关与钱包验收
+
+所有者打开 `https://实际支付域名/payments/admin`，进入「支付渠道」。核对右上角的测试/正式环境，调整开关，勾选确认并点击「保存渠道」。普通管理员仅可查看；保存需要所有者登录、同源请求和 CSRF 校验。服务器端会拒绝缺少确认、非布尔开关、过期版本或错误环境的请求。
+
+| 渠道 | 开放条件 |
+| --- | --- |
+| 银行卡 | 当前 Stripe 商户支持对应银行卡的 CNY 单次付款；可单独启用 |
+| Apple Pay | 同时启用银行卡，买家的设备、地区和钱包满足 Stripe 要求 |
+| Google Pay | 同时启用银行卡，买家的浏览器、地区和钱包满足 Stripe 要求 |
+| 支付宝 | 当前环境已获批且支持本商品的 CNY Checkout |
+| 微信支付 | 当前环境已获批且支持本商品的 CNY Checkout，使用网页扫码模式 |
+
+关闭银行卡时会同时关闭两个钱包，服务端也会校验此依赖。全部渠道关闭会暂停新下单，但已创建的付款链接仍可能到账，Webhook、对账、发码和通知继续运行。`payments.enabled: false` 同样会阻止新下单，即使存在已启用渠道。
+
+渠道保存在 MySQL，测试和正式环境各一份，重启不丢失。首次升级为兼容旧部署保留「支付宝、微信开启；银行卡、两个钱包关闭」的默认值，**升级不会自动开放新渠道**。支付宝/微信未获批的商户应先保持停售，再由所有者关闭未获批渠道并保存正式设置。
+
+每次渠道变更会发布独立的 Stripe 付款方式配置，并核对返回的环境、可用性及实际开关；不修改商户默认配置或既有订单使用的配置。银行卡和钱包通过该配置传入托管 Checkout，钱包不作为 `payment_method_types` 值。Link 和未选择的渠道保持关闭。发布失败或并发保存冲突时保留原设置，按页面反馈处理；网络超时后可直接重试保存。
+
+订单保存创建时的渠道快照。已有订单、已打开的链接，以及系统为防止重复付款而复用的待支付订单，继续使用原渠道；渠道切换后不能拿这些旧链接判断新开关是否生效。在 Stripe 核实旧订单未付款且已过期、完成对账后，再创建新订单验证。不要手动改写快照、删除待支付订单，或在 Stripe Dashboard 中修改本程序创建的历史配置。
+
+升级按 17.2 备份数据库并构建，再按 17.5 重建 Bot。启动自动执行 `20260912_08`，新增 `payment_channel_configs` 和订单 `payment_channels_snapshot` 字段；历史订单保留空快照以维持原 Checkout 重试参数。数据库和兑换码密钥必须保留，不需要修改 Caddy 或重启 Emby。
+
+验收需要覆盖：非所有者不能保存、关闭渠道不出现在新收银台、全部关闭不能下新单、旧单仍能到账发码、重复回调和补发仍返回原码。银行卡验证正常付款及所需的 3D Secure 流程；钱包分别在兼容设备上验证实际出现、付款、回调及发码。离线模拟和数据库测试不代表商户钱包真实可用，正式宣传前仍需完成每个开放渠道的小额真实付款。参考 [Stripe 付款方式配置](https://docs.stripe.com/payments/payment-method-configurations) 和 [钱包测试要求](https://docs.stripe.com/testing/wallets)。

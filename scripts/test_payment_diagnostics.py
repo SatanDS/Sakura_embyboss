@@ -54,6 +54,15 @@ class PaymentDiagnosticTests(unittest.TestCase):
         self.assertEqual(fields["code"], "-")
         self.assertNotIn("sensitive-argument", str(fields))
 
+    def test_channel_parameters_remain_allowlisted_without_configuration_values(self):
+        for param in ("payment_method_configuration", "apple_pay[display_preference][preference]",
+                      "google_pay[display_preference][preference]", "card[display_preference][preference]"):
+            with self.subTest(param=param):
+                error = stripe.InvalidRequestError("private-response", param=param)
+                self.assertEqual(DIAGNOSTICS.payment_error_fields(error)["param"], param)
+        error = stripe.InvalidRequestError("private-response", param="payment_method_configuration[pmc_private]")
+        self.assertEqual(DIAGNOSTICS.payment_error_fields(error)["param"], "-")
+
     def test_operation_names_are_allowlisted(self):
         messages = []
         sink = type(logger).add(logger, messages.append, format="{message}")

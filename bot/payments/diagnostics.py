@@ -6,6 +6,7 @@ import re
 _SECRET = re.compile(r"(?:sk_|pk_|rk_|whsec_|pay_|cs_|pi_|bearer)", re.IGNORECASE)
 _CHECKOUT_PARAM = re.compile(
     r"(?:amount|currency|expires_at|mode|success_url|cancel_url|payment_method_types(?:\[\d+\])?"
+    r"|payment_method_configuration|(?:card|apple_pay|google_pay|alipay|wechat_pay|link)\[display_preference\]\[preference\]"
     r"|payment_method_options\[wechat_pay\]\[client\]"
     r"|line_items\[\d+\](?:\[quantity\]|\[price_data\]\[(?:unit_amount|currency)\]))"
 )

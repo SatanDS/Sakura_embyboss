@@ -6,6 +6,11 @@
   const selectedOrders = new Set();
   let orderRequest = 0;
   let archiveAction = null;
+  const channelLabels = { card: "银行卡", apple_pay: "Apple Pay", google_pay: "Google Pay", alipay: "支付宝", wechat_pay: "微信支付" };
+  let channelSettings = null;
+  let channelRequestId = null;
+  let channelSaving = false;
+  let channelLoading = false;
   const state = { user: null, products: [], orders: [], terms: null, kind: "register", selected: null, editing: null, review: null, code: null, poll: null, orderPoll: null, orderPollStarted: 0, refreshing: false, checkoutInFlight: false };
   const labels = { pending: "待支付", paid: "已支付", expired: "已过期", issued: "已发码", claimed: "兑换处理中", redeemed: "已兑换", held: "暂停使用", review: "待核查", fulfilled: "已发码", failed: "待处理" };
   const errors = {
@@ -23,12 +28,20 @@
     code_mode_mismatch: "兑换码不属于当前支付环境。",
     order_mode_mismatch: "订单不属于当前支付环境。",
     stripe_amount_too_small: "套餐金额低于 Stripe 允许的最低金额，请联系管理员调整价格。",
-    stripe_payment_methods_unavailable: "Stripe 正式账户尚未启用支付宝或微信支付，请在 Stripe 付款方式设置中开通后重试。",
+    stripe_payment_methods_unavailable: "Stripe 拒绝了所选支付方式，请联系管理员核查当前环境的渠道权限和币种支持。",
     stripe_credentials_invalid: "Stripe 密钥验证失败，请联系管理员检查支付配置。",
     stripe_permission_denied: "Stripe 拒绝了当前收款权限，请联系管理员核查。",
     service_unavailable: "暂时无法创建或查询付款，请稍后重试或联系管理员。",
     archive_not_allowed: "所选订单包含正式收款、已发码或待核查记录，不能归档。请刷新后重新选择。",
     invalid_archive_request: "请核对并确认 1 至 100 笔订单。",
+    invalid_channels: "支付渠道配置无效，请重新加载后选择。",
+    wallet_requires_card: "Apple Pay 和 Google Pay 需要同时启用银行卡。",
+    channels_changed: "支付渠道已被修改，请重新加载并核对后保存。",
+    payment_channels_disabled: "暂无开放的支付渠道，请稍后再试。",
+    invalid_channel_request: "请核对并确认支付渠道设置。",
+    payment_channel_config_invalid: "Stripe 返回的渠道配置与所选项不一致，设置尚未保存。",
+    payment_channels_unavailable: "所选支付渠道在当前 Stripe 环境不可用，请核查审核状态或关闭未获批渠道。",
+    channel_mode_mismatch: "支付环境已改变，请重新加载后核对。",
   };
   const money = (fen) => new Intl.NumberFormat("zh-CN", { style: "currency", currency: "CNY" }).format(Number(fen || 0) / 100);
   const date = (value) => {
@@ -124,6 +137,9 @@
   }
   async function loadShop() {
     const result = await api("/products"); state.products = result.products || []; state.terms = result.terms;
+    state.channels = result.payment_channels || null;
+    const names = Object.keys(channelLabels).filter(key => state.channels?.[key]).map(key => channelLabels[key]);
+    text($("payment-methods-footer"), names.length ? names.join(" / ") + " · 由 Stripe 处理付款" : "由 Stripe 处理付款");
     text($("terms-text"), result.terms?.text || "购买须知暂不可用，请稍后再试。");
     show($("shop-view")); renderProducts();
   }
@@ -139,7 +155,7 @@
       text(card.querySelector(".price strong"), money(product.price_fen)); text(card.querySelector(".product-months"), product.months);
       text(card.querySelector(".product-access"), product.tier === "vip" ? "包含 VIP 线路权益" : "普通线路权益");
       text(card.querySelector(".product-period"), product.kind === "register" ? "注册成功后开始计时" : "按顺序追加套餐周期");
-      const buy = card.querySelector(".product-buy"); buy.disabled = !state.terms?.version || Number(product.price_fen) <= 0;
+      const buy = card.querySelector(".product-buy"); buy.disabled = !state.terms?.version || Number(product.price_fen) <= 0 || (state.channels && !Object.values(state.channels).some(Boolean));
       buy.addEventListener("click", () => selectProduct(product)); $("products").append(card);
     }); iconRefresh();
   }
@@ -351,6 +367,51 @@
     show($("new-product"), state.user.role === "owner"); show($("archive-tools"), state.user.role === "owner");
     show($("archive-select-heading"), state.user.role === "owner");
     show($("admin-view")); renderOrders(true); renderAdminProducts();
+    if (document.querySelector('[data-admin-tab="channels"][aria-selected="true"]')) await loadChannels();
+  }
+  function updateChannelControls() {
+    if (!$("channel-fields")) return;
+    const editable = state.user?.role === "owner" && !channelSaving && !channelLoading;
+    $("channel-fields").disabled = !editable;
+    for (const key of ["apple_pay", "google_pay"]) {
+      $("channel-" + key).disabled = !editable || !$("channel-card").checked;
+    }
+    $("channel-save").disabled = !editable || !channelSettings;
+    $("channel-reload").disabled = channelSaving || channelLoading;
+    $("channel-accepted").disabled = !editable;
+  }
+  async function loadChannels() {
+    if (channelLoading || channelSaving) return;
+    channelLoading = true; updateChannelControls();
+    show($("channel-loading")); show($("channel-error"), false); show($("channel-success"), false);
+    try {
+      const result = await api("/admin/channels");
+      channelSettings = result; channelRequestId = null;
+      for (const key of Object.keys(channelLabels)) $("channel-" + key).checked = result.channels[key] === true;
+      $("channel-accepted").checked = false;
+      text($("channel-mode"), result.mode === "live" ? "正式环境" : "测试环境");
+      show($("channel-owner-actions"), state.user?.role === "owner"); show($("channel-form"));
+    } catch (error) {
+      channelSettings = null; show($("channel-form"), false); displayError("channel-error", error);
+    } finally {
+      channelLoading = false; show($("channel-loading"), false); updateChannelControls();
+    }
+  }
+  async function saveChannels(event) {
+    event.preventDefault();
+    if (channelSaving || !channelSettings || state.user?.role !== "owner" || !$("channel-form").reportValidity()) return;
+    const channels = Object.fromEntries(Object.keys(channelLabels).map(key => [key, $("channel-" + key).checked]));
+    if (!channelRequestId) channelRequestId = Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, "0")).join("");
+    channelSaving = true; updateChannelControls(); show($("channel-error"), false); show($("channel-success"), false);
+    text($("channel-save-label"), "正在保存…");
+    try {
+      const result = await api("/admin/channels", { method: "POST", body: JSON.stringify({ mode: channelSettings.mode, version: channelSettings.version, request_id: channelRequestId, channels, accepted: true }) });
+      channelSettings = result; channelRequestId = null; $("channel-accepted").checked = false;
+      for (const key of Object.keys(channelLabels)) $("channel-" + key).checked = result.channels[key] === true;
+      text($("channel-success"), Object.values(result.channels).some(Boolean) ? "渠道已保存，新订单使用当前设置。" : "渠道已全部关闭，新下单已暂停；已有订单继续处理。");
+      show($("channel-success"));
+    } catch (error) { displayError("channel-error", error); }
+    finally { channelSaving = false; text($("channel-save-label"), "保存渠道"); updateChannelControls(); }
   }
   function renderAdminProducts() {
     $("admin-products-body").replaceChildren();
@@ -418,7 +479,17 @@
   $("archive-form").addEventListener("submit", saveArchive);
   $("reveal-code")?.addEventListener("click", revealCode);
   $("copy-code")?.addEventListener("click", async () => { if (!state.code) return; try { await navigator.clipboard.writeText(state.code); toast("兑换码已复制"); } catch (_) { toast("复制失败，请选中兑换码后手动复制。"); } });
-  document.querySelectorAll("[data-admin-tab]").forEach((button) => button.addEventListener("click", () => { document.querySelectorAll("[data-admin-tab]").forEach((tab) => tab.setAttribute("aria-selected", String(tab === button))); show($("admin-orders-panel"), button.dataset.adminTab === "orders"); show($("admin-products-panel"), button.dataset.adminTab === "products"); }));
+  document.querySelectorAll("[data-admin-tab]").forEach((button) => button.addEventListener("click", () => {
+    document.querySelectorAll("[data-admin-tab]").forEach((tab) => tab.setAttribute("aria-selected", String(tab === button)));
+    for (const name of ["orders", "products", "channels"]) show($("admin-" + name + "-panel"), button.dataset.adminTab === name);
+    if (button.dataset.adminTab === "channels" && !channelSettings) loadChannels();
+  }));
+  $("channel-form")?.addEventListener("submit", saveChannels);
+  $("channel-reload")?.addEventListener("click", loadChannels);
+  $("channel-fields")?.addEventListener("change", () => {
+    if (!$("channel-card").checked) for (const key of ["apple_pay", "google_pay"]) $("channel-" + key).checked = false;
+    $("channel-accepted").checked = false; channelRequestId = null; show($("channel-success"), false); updateChannelControls();
+  });
   $("new-product")?.addEventListener("click", () => editProduct(null)); $("product-form").addEventListener("submit", saveProduct); $("review-form").addEventListener("submit", saveReview);
   window.addEventListener("pageshow", (event) => { if (event.persisted) window.location.reload(); else if (page === "order") scheduleOrderPoll(); });
   document.addEventListener("visibilitychange", () => { if (!document.hidden && page === "order" && $("payment-waiting") && !$("payment-waiting").hidden) scheduleOrderPoll(); });

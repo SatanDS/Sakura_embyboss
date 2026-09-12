@@ -33,6 +33,7 @@ class Order(Base):
     buyer_tg = Column(BigInteger, nullable=False, index=True)
     product_id = Column(String(32), nullable=False, index=True)
     product_snapshot = Column(JSON, nullable=False)
+    payment_channels_snapshot = Column(JSON, nullable=True)
     amount_fen = Column(Integer, nullable=False)
     currency = Column(String(3), nullable=False, default="cny")
     mode = Column(String(8), nullable=False, default="live", server_default="live")
@@ -115,6 +116,14 @@ class PaymentCapacity(Base):
     __tablename__ = "payment_capacity"
     id = Column(Integer, primary_key=True, autoincrement=False)
     revision = Column(BigInteger, nullable=False, default=0)
+
+
+class PaymentChannelConfig(Base):
+    __tablename__ = "payment_channel_configs"
+    mode = Column(String(8), primary_key=True)
+    version = Column(Integer, nullable=False, default=1)
+    channels = Column(JSON, nullable=False)
+    stripe_configuration_id = Column(String(255), nullable=True)
 
 
 class RegistrationReservation(Base):

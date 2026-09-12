@@ -166,6 +166,8 @@ _PUBLIC_ERROR_CODES = {
     "test_buyer_not_allowed", "code_mode_mismatch", "order_mode_mismatch",
     "stripe_mode_mismatch", "invalid_event", "event_too_large", "stripe_signature_invalid",
     "archive_not_allowed", "invalid_archive_request",
+    "invalid_channels", "wallet_requires_card", "channels_changed", "payment_channels_disabled",
+    "invalid_channel_request", "payment_channel_config_invalid", "payment_channels_unavailable", "channel_mode_mismatch",
 }
 
 
@@ -179,7 +181,9 @@ def _public_error(exc, fallback="service_unavailable"):
             return "stripe_amount_too_small"
         param = str(getattr(exc, "param", "") or "")
         if param == "payment_method_types" or param.startswith("payment_method_types[") \
-                or param.startswith("payment_method_options"):
+                or param.startswith("payment_method_options") or param == "payment_method_configuration" \
+                or param in {f"{key}[display_preference][preference]" for key in
+                             ("card", "apple_pay", "google_pay", "alipay", "wechat_pay", "link")}:
             return "stripe_payment_methods_unavailable"
         if isinstance(exc, AuthenticationError):
             return "stripe_credentials_invalid"
@@ -218,6 +222,24 @@ class ReviewRequest(BaseModel):
 class ArchiveRequest(BaseModel):
     order_ids: list[str] = Field(min_length=1, max_length=100)
     archived: StrictBool
+    accepted: StrictBool
+
+
+class ChannelSelection(BaseModel):
+    model_config = {'extra': 'forbid'}
+    card: StrictBool
+    apple_pay: StrictBool
+    google_pay: StrictBool
+    alipay: StrictBool
+    wechat_pay: StrictBool
+
+
+class ChannelSettingsRequest(BaseModel):
+    model_config = {'extra': 'forbid'}
+    mode: Literal['test', 'live']
+    version: StrictInt = Field(ge=1)
+    channels: ChannelSelection
+    request_id: str = Field(pattern=r'^[a-f0-9]{32}$')
     accepted: StrictBool
 
 
@@ -336,8 +358,9 @@ async def payment_logout(request: Request):
 @router.get("/products")
 async def payment_products():
     try:
+        service = _service()
         return {"terms": {"version": _settings().terms_version, "hash": _terms_hash(), "text": TERMS_TEXT},
-                "products": _service().list_products()}
+                "products": service.list_products(), "payment_channels": service.get_channels()["channels"]}
     except Exception as exc:
         raise HTTPException(status_code=503, detail=_public_error(exc))
 
@@ -488,6 +511,24 @@ async def admin_archive_orders(body: ArchiveRequest, request: Request):
 async def admin_products(request: Request):
     _require_admin(request)
     return {"products": _service().list_products(include_inactive=True)}
+
+
+@router.get('/admin/channels')
+async def admin_payment_channels(request: Request):
+    _require_admin(request)
+    return _service().get_channels()
+
+
+@router.post('/admin/channels')
+async def admin_save_payment_channels(body: ChannelSettingsRequest, request: Request):
+    actor = _require_owner(request)
+    if body.accepted is not True:
+        raise HTTPException(status_code=400, detail='invalid_channel_request')
+    try:
+        return await _service().save_channels(actor, body.model_dump(exclude={'accepted'}))
+    except Exception as exc:
+        _log_provider_error('request', exc)
+        raise HTTPException(status_code=409, detail=_public_error(exc))
 
 
 @router.post("/admin/products")

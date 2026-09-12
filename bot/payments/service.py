@@ -1,13 +1,17 @@
 """Transactional orders, verified Stripe fulfillment, and a durable task outbox."""
 
 import hashlib
+import json
 from datetime import datetime, timedelta, timezone
+from uuid import UUID
 
 from sqlalchemy import func, inspect, or_, text
 from sqlalchemy.exc import IntegrityError
 
 from .crypto import CodeCipher
-from .models import Audit, Code, Event, Order, PaymentCapacity, Product, RegistrationReservation, Task, new_id
+from .channels import ChannelError, LEGACY_CHANNELS, normalize_channels
+from .models import (Audit, Code, Event, Order, PaymentCapacity, PaymentChannelConfig,
+                     Product, RegistrationReservation, Task, new_id)
 from .entitlements import append_months, ensure_legacy_period, start_success, sync_projection, EntitlementError
 
 
@@ -38,13 +42,24 @@ def utcnow():
 
 
 def _capacity_lock(session):
-    if session.get(PaymentCapacity, 1) is None:
-        try:
-            with session.begin_nested():
-                session.add(PaymentCapacity(id=1, revision=0))
-                session.flush()
-        except IntegrityError:
-            pass
+    # Insert the singleton before reading it.  Under MySQL REPEATABLE READ, a
+    # preliminary SELECT can establish a stale snapshot while another creator
+    # waits on the row lock, allowing duplicate pending orders after the wait.
+    dialect = session.get_bind().dialect.name
+    if dialect == "mysql":
+        session.execute(text(
+            "INSERT INTO payment_capacity (id, revision) VALUES (1, 0) "
+            "ON DUPLICATE KEY UPDATE id = VALUES(id)"
+        ))
+    elif dialect == "postgresql":
+        session.execute(text(
+            "INSERT INTO payment_capacity (id, revision) VALUES (1, 0) "
+            "ON CONFLICT (id) DO NOTHING"
+        ))
+    else:
+        session.execute(text(
+            "INSERT OR IGNORE INTO payment_capacity (id, revision) VALUES (1, 0)"
+        ))
     # An UPDATE also serializes reservations on SQLite, where FOR UPDATE is ignored.
     session.query(PaymentCapacity).filter_by(id=1).update(
         {PaymentCapacity.revision: PaymentCapacity.revision + 1}, synchronize_session=False,
@@ -119,6 +134,9 @@ def seed_products(session):
                     session.add(Product(id=product_id, title=f"{title} {months} 个月", kind=kind,
                                         tier=tier, months=months, price_fen=0, active=False, version=1))
     _capacity_lock(session)
+    for mode in ("test", "live"):
+        if session.get(PaymentChannelConfig, mode) is None:
+            session.add(PaymentChannelConfig(mode=mode, version=1, channels=dict(LEGACY_CHANNELS)))
 
 
 class PaymentService:
@@ -166,7 +184,7 @@ class PaymentService:
     def _order(order):
         result = {key: getattr(order, key) for key in (
             "id", "buyer_tg", "product_id", "product_snapshot", "amount_fen", "currency", "terms_version",
-            "mode", "archived_at",
+            "mode", "archived_at", "payment_channels_snapshot",
             "accepted_at", "payment_state", "fulfillment_state", "checkout_url", "expires_at", "created_at",
             "stripe_session_id", "stripe_payment_intent_id", "refunded", "dispute_status", "review_required",
         )}
@@ -177,6 +195,92 @@ class PaymentService:
     def seed_products(self):
         with self.session_factory.begin() as session:
             seed_products(session)
+
+    @staticmethod
+    def _channel_data(row, mode):
+        return {"mode": mode, "version": row.version if row else 1,
+                "channels": normalize_channels(row.channels if row else LEGACY_CHANNELS)}
+
+    @staticmethod
+    def _locked_channels(session, mode):
+        # Call after the capacity lock, before any product lock.
+        row = session.query(PaymentChannelConfig).filter_by(mode=mode).with_for_update().first()
+        if row is None:
+            row = PaymentChannelConfig(mode=mode, version=1, channels=dict(LEGACY_CHANNELS))
+            session.add(row)
+            session.flush()
+        return row
+
+    def get_channels(self):
+        with self.session_factory() as session:
+            return self._channel_data(session.get(PaymentChannelConfig, self.mode), self.mode)
+
+    @staticmethod
+    def _channel_save_replayed(session, row, actor_tg, channels, version, request_id):
+        if row.channels != channels or row.version != version + 1:
+            return False
+        audit = session.query(Audit).filter_by(
+            actor_tg=actor_tg, action="payment_channels_saved", target_id="channels:" + row.mode,
+        ).filter(Audit.details["request_id"].as_string() == request_id,
+                 Audit.details["version"].as_integer() == row.version).first()
+        return audit is not None
+
+    async def save_channels(self, actor_tg, data):
+        if not isinstance(data, dict) or type(actor_tg) is not int or actor_tg <= 0:
+            raise PaymentError("invalid_channels", "支付渠道配置无效")
+        try:
+            channels = normalize_channels(data.get("channels"))
+        except ChannelError as exc:
+            raise PaymentError(exc.code) from exc
+        version = data.get("version")
+        if type(version) is not int or version < 1:
+            raise PaymentError("invalid_channels", "支付渠道版本无效")
+        try:
+            request_id = str(UUID(data["request_id"]))
+        except (KeyError, TypeError, ValueError, AttributeError):
+            raise PaymentError("invalid_channels", "支付渠道请求编号无效") from None
+        mode = self.mode
+        if data.get("mode", mode) != mode:
+            raise PaymentError("channel_mode_mismatch", "支付环境已改变，请刷新后重试")
+        with self.session_factory.begin() as session:
+            _capacity_lock(session)
+            row = self._locked_channels(session, mode)
+            if self._channel_save_replayed(session, row, actor_tg, channels, version, request_id):
+                return self._channel_data(row, mode)
+            if row.version != version:
+                raise PaymentError("channels_changed", "支付渠道已被修改，请刷新后重试")
+            if row.channels == channels and (row.stripe_configuration_id or not any(channels.values())):
+                return self._channel_data(row, mode)
+        # Publish an immutable Stripe configuration outside the database transaction.
+        # A competing administrator may win the revision check; their settings stay intact.
+        site = str(getattr(self.settings, "public_url", "")).rstrip("/")
+        material = json.dumps([site, mode, version, channels, request_id], sort_keys=True, separators=(",", ":"))
+        idempotency_key = "payment-channels:" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+        configuration_id = None
+        if any(channels.values()):
+            try:
+                configuration_id = await self.gateway.publish_channel_configuration(channels, idempotency_key)
+            except ChannelError as exc:
+                raise PaymentError(exc.code) from exc
+            if (not isinstance(configuration_id, str) or not configuration_id.startswith("pmc_")
+                    or not 4 < len(configuration_id) <= 255):
+                raise PaymentError("payment_channel_config_invalid", "支付平台未返回有效渠道配置")
+        with self.session_factory.begin() as session:
+            _capacity_lock(session)
+            row = self._locked_channels(session, mode)
+            if self.mode != mode:
+                raise PaymentError("channel_mode_mismatch", "支付环境已改变，请刷新后重试")
+            if self._channel_save_replayed(session, row, actor_tg, channels, version, request_id):
+                return self._channel_data(row, mode)
+            if row.version != version:
+                raise PaymentError("channels_changed", "支付渠道已被修改，请刷新后重试")
+            row.channels = channels
+            row.stripe_configuration_id = configuration_id
+            row.version += 1
+            session.add(Audit(actor_tg=actor_tg, action="payment_channels_saved", target_id="channels:" + mode,
+                              details={"version": row.version, "mode": mode, "channels": channels,
+                                       "request_id": request_id}))
+            return self._channel_data(row, mode)
 
     def list_products(self, include_inactive=False):
         with self.session_factory() as session:
@@ -229,6 +333,10 @@ class PaymentService:
         with self.session_factory.begin() as session:
             # Serialize creation before product locking to maintain a common capacity lock order.
             _capacity_lock(session)
+            channel_row = self._locked_channels(session, self.mode)
+            channels = normalize_channels(channel_row.channels)
+            if not any(channels.values()):
+                raise PaymentError("payment_channels_disabled", "当前暂无可用支付方式")
             product = session.query(Product).filter_by(id=product_id).with_for_update().first()
             if not product or not product.active or product.price_fen <= 0:
                 raise PaymentError("product_unavailable", "套餐尚未上架或已经停售")
@@ -236,7 +344,7 @@ class PaymentService:
                 raise PaymentError("product_changed", "套餐信息已改变，请重新确认")
             pending = session.query(Order).filter_by(buyer_tg=buyer_tg, product_id=product_id,
                                                     payment_state="pending", mode=self.mode).filter(
-                Order.expires_at > now).order_by(Order.created_at.desc()).all()
+                Order.expires_at > now).order_by(Order.created_at.desc()).with_for_update().all()
             for previous in pending:
                 if previous.product_snapshot["version"] == product.version and previous.terms_version == terms_version:
                     return self._order(previous)
@@ -247,6 +355,8 @@ class PaymentService:
                 raise PaymentError("sold_out", "套餐已售完")
             order = Order(id=new_id(), buyer_tg=buyer_tg, product_id=product.id,
                           product_snapshot=self._product(product), amount_fen=product.price_fen, currency="cny",
+                          payment_channels_snapshot={"version": channel_row.version, "channels": channels,
+                                                     "configuration_id": channel_row.stripe_configuration_id},
                           mode=self.mode,
                           terms_version=terms_version, terms_hash=TERMS_HASH, accepted_at=now,
                           payment_state="pending", fulfillment_state="pending", created_at=now, updated_at=now,
