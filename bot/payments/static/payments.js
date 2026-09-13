@@ -52,6 +52,7 @@
     return Number.isNaN(parsed.getTime()) ? "-" : new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).format(parsed);
   };
   const productOf = (order) => order.product || order.product_snapshot || {};
+  const productTitle = (product) => product.tier === "vip" ? (product.title || "").replace(/\bVIP\b/gi, "白名单") : product.title || "";
   const label = (value) => labels[value] || "处理中";
   const iconRefresh = () => window.lucide?.createIcons();
   const show = (element, visible = true) => { if (element) element.hidden = !visible; };
@@ -151,10 +152,10 @@
     $("products").replaceChildren(); show($("products-empty"), products.length === 0);
     products.forEach((product) => {
       const card = $("product-template").content.firstElementChild.cloneNode(true); card.dataset.tier = product.tier;
-      text(card.querySelector(".product-title"), product.title); text(card.querySelector(".product-kind"), product.kind === "register" ? "新账号 · 注册码" : "已有账号 · 续期码");
-      const tierBadge = card.querySelector(".product-tier"); text(tierBadge, product.tier === "vip" ? "VIP" : "普通"); tierBadge.classList.add(product.tier === "vip" ? "vip" : "normal");
+      text(card.querySelector(".product-title"), productTitle(product)); text(card.querySelector(".product-kind"), product.kind === "register" ? "新账号 · 注册码" : "已有账号 · 续期码");
+      const tierBadge = card.querySelector(".product-tier"); text(tierBadge, product.tier === "vip" ? "白名单" : "普通"); tierBadge.classList.add(product.tier === "vip" ? "vip" : "normal");
       text(card.querySelector(".price strong"), money(product.price_fen)); text(card.querySelector(".product-months"), product.months);
-      text(card.querySelector(".product-access"), product.tier === "vip" ? "包含 VIP 线路权益" : "普通线路权益");
+      text(card.querySelector(".product-access"), product.tier === "vip" ? "包含白名单线路权益" : "普通线路权益");
       text(card.querySelector(".product-period"), product.kind === "register" ? "注册成功后开始计时" : "按顺序追加套餐周期");
       const buy = card.querySelector(".product-buy"); buy.disabled = !state.terms?.version || Number(product.price_fen) <= 0 || (state.channels && !Object.values(state.channels).some(Boolean));
       buy.addEventListener("click", () => selectProduct(product)); $("products").append(card);
@@ -163,8 +164,8 @@
   function selectProduct(product) {
     if (!state.user) { startLogin(); return; }
     state.selected = product; $("accept-terms").checked = false; $("pay-button").disabled = true; show($("checkout-error"), false);
-    text($("checkout-product"), product.title); text($("checkout-price"), money(product.price_fen));
-    text($("checkout-description"), `${product.kind === "register" ? "注册码" : "续期码"} · ${product.tier === "vip" ? "VIP" : "普通"} · ${product.months} 个月 · 1 份`);
+    text($("checkout-product"), productTitle(product)); text($("checkout-price"), money(product.price_fen));
+    text($("checkout-description"), `${product.kind === "register" ? "注册码" : "续期码"} · ${product.tier === "vip" ? "白名单" : "普通"} · ${product.months} 个月 · 1 份`);
     text($("checkout-terms"), state.terms.text); $("checkout-dialog").showModal();
   }
   function primeCheckoutWindow(checkoutWindow) {
@@ -208,7 +209,7 @@
   function filteredOrders(admin) {
     const prefix = admin ? "admin-order" : "order";
     const query = $(`${prefix}-search`).value.trim().toLowerCase(); const filter = $(`${prefix}-filter`).value;
-    return state.orders.filter((order) => (!query || `${order.id} ${productOf(order).title} ${admin ? order.buyer_tg : ""}`.toLowerCase().includes(query)) && (filter === "all" || (filter === "review" ? order.review_required : order.payment_state === filter)));
+    return state.orders.filter((order) => (!query || `${order.id} ${productOf(order).title} ${productTitle(productOf(order))} ${admin ? order.buyer_tg : ""}`.toLowerCase().includes(query)) && (filter === "all" || (filter === "review" ? order.review_required : order.payment_state === filter)));
   }
   function renderOrders(admin = false) {
     const orders = filteredOrders(admin); const tbody = $(admin ? "admin-orders-body" : "orders-body"); tbody.replaceChildren();
@@ -226,10 +227,10 @@
         cell.append(checkbox); row.append(cell);
       }
       if (admin) { identity.append(node("span", order.id, "mono"), node("span", `TG ${order.buyer_tg}`, "secondary-line")); }
-      else { const link = node("a", product.title || "会员套餐", "order-link"); link.href = `/payments/order/${encodeURIComponent(order.id)}`; identity.append(link, node("span", order.id, "secondary-line mono")); }
+      else { const link = node("a", productTitle(product) || "会员套餐", "order-link"); link.href = `/payments/order/${encodeURIComponent(order.id)}`; identity.append(link, node("span", order.id, "secondary-line mono")); }
       identity.append(node("span", `${order.mode === "test" ? "测试" : "正式"}${order.archived_at ? " · 已归档" : ""}`, "order-mode"));
       row.append(identity);
-      if (admin) row.append(node("td", product.title || "会员套餐"));
+      if (admin) row.append(node("td", productTitle(product) || "会员套餐"));
       row.append(node("td", money(order.amount_fen)));
       const payment = node("td"); payment.append(statusBadge(order.review_required ? "review" : order.payment_state)); row.append(payment);
       if (!admin) { const fulfillment = node("td"); fulfillment.append(statusBadge(order.fulfillment_state, order.fulfillment_state === "issued" ? "已发码" : "待发码")); row.append(fulfillment); }
@@ -306,9 +307,9 @@
   async function loadOrder() {
     if (!requireLogin()) return;
     const order = await api(`/orders/${encodeURIComponent(document.body.dataset.orderId)}`); const product = productOf(order);
-    state.order = order; text($("detail-title"), product.title || "会员套餐"); text($("detail-id"), order.id); text($("detail-amount"), money(order.amount_fen));
+    state.order = order; text($("detail-title"), productTitle(product) || "会员套餐"); text($("detail-id"), order.id); text($("detail-amount"), money(order.amount_fen));
     const badge = statusBadge(order.review_required ? "review" : order.payment_state); badge.id = "detail-status"; $("detail-status").replaceWith(badge);
-    const facts = [["套餐用途", product.kind === "register" ? "注册新账号" : "续期已有账号"], ["线路等级", product.tier === "vip" ? "VIP" : "普通"], ["套餐时长", `${product.months} 个月`], ["创建时间", date(order.created_at)], ["发码状态", order.fulfillment_state === "issued" ? "已发码" : "待发码"], ["兑换状态", order.code_state ? label(order.code_state) : "尚未发码"]];
+    const facts = [["套餐用途", product.kind === "register" ? "注册新账号" : "续期已有账号"], ["线路等级", product.tier === "vip" ? "白名单" : "普通"], ["套餐时长", `${product.months} 个月`], ["创建时间", date(order.created_at)], ["发码状态", order.fulfillment_state === "issued" ? "已发码" : "待发码"], ["兑换状态", order.code_state ? label(order.code_state) : "尚未发码"]];
     if (order.redeemed_at) facts.push(["兑换时间", date(order.redeemed_at)]);
     $("order-facts").replaceChildren(...facts.map(([key, value]) => { const group = node("div"); group.append(node("dt", key), node("dd", value)); return group; }));
     const restricted = order.refunded || ["held", "review"].includes(order.code_state);
@@ -418,7 +419,7 @@
   function renderAdminProducts() {
     $("admin-products-body").replaceChildren();
     for (const product of state.products) {
-      const row = node("tr"); row.append(node("td", product.title), node("td", `${product.kind === "register" ? "注册" : "续期"} / ${product.tier === "vip" ? "VIP" : "普通"}`), node("td", `${product.months} 个月`), node("td", money(product.price_fen)), node("td", product.sales_limit ?? "不限"));
+      const row = node("tr"); row.append(node("td", productTitle(product)), node("td", `${product.kind === "register" ? "注册" : "续期"} / ${product.tier === "vip" ? "白名单" : "普通"}`), node("td", `${product.months} 个月`), node("td", money(product.price_fen)), node("td", product.sales_limit ?? "不限"));
       const active = node("td"); active.append(node("span", product.active ? "已上架" : "草稿 / 已下架", `badge ${product.active ? "success" : ""}`)); row.append(active);
       const actions = node("td"); if (state.user.role === "owner") actions.append(actionButton("pencil", "编辑套餐", () => editProduct(product))); row.append(actions); $("admin-products-body").append(row);
     }
@@ -428,6 +429,7 @@
     state.editing = product || null; const form = $("product-form"); form.reset();
     text($("product-dialog-title"), product ? "编辑套餐" : "新增套餐"); show($("product-error"), false);
     for (const field of ["title", "kind", "tier", "months"]) if (product?.[field] !== undefined) form.elements[field].value = product[field];
+    if (product) form.elements.title.value = productTitle(product);
     form.elements.price.value = product ? (product.price_fen / 100).toFixed(2) : ""; form.elements.sales_limit.value = product?.sales_limit ?? ""; form.elements.active.checked = product?.active || false;
     $("product-dialog").showModal();
   }

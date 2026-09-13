@@ -131,7 +131,7 @@ def seed_products(session):
             for months in (1, 3, 6, 12):
                 product_id = hashlib.sha256(f"sakura:{kind}:{tier}:{months}".encode()).hexdigest()[:32]
                 if session.get(Product, product_id) is None:
-                    title = ("VIP" if tier == "vip" else "普通") + ("注册码" if kind == "register" else "续期码")
+                    title = ("白名单" if tier == "vip" else "普通") + ("注册码" if kind == "register" else "续期码")
                     session.add(Product(id=product_id, title=f"{title} {months} 个月", kind=kind,
                                         tier=tier, months=months, price_fen=0, active=False, version=1))
     _capacity_lock(session)
