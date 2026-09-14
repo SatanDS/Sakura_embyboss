@@ -360,8 +360,10 @@ async def payment_logout(request: Request):
 async def payment_products():
     try:
         service = _service()
-        return {"terms": {"version": _settings().terms_version, "hash": _terms_hash(), "text": TERMS_TEXT},
-                "products": service.list_products(), "payment_channels": service.get_channels()["channels"]}
+        settings = _settings()
+        return {"terms": {"version": settings.terms_version, "hash": _terms_hash(), "text": TERMS_TEXT},
+                "products": service.list_products(), "payment_channels": service.get_channels()["channels"],
+                "sales_enabled": bool(settings.enabled)}
     except Exception as exc:
         raise HTTPException(status_code=503, detail=_public_error(exc))
 

@@ -139,6 +139,9 @@
   }
   async function loadShop() {
     const result = await api("/products"); state.products = result.products || []; state.terms = result.terms;
+    state.salesEnabled = result.sales_enabled !== false;
+    text($("shop-maintenance-notice"), "支付维护中，当前暂停新订单。请关闭此页面，恢复开放后再进行购买。");
+    show($("shop-maintenance-notice"), !state.salesEnabled);
     state.channels = result.payment_channels || null;
     const names = Object.keys(channelLabels).filter(key => state.channels?.[key]).map(key => channelLabels[key]);
     text($("payment-methods-footer"), names.length ? names.join(" / ") + " · 由 Stripe 处理付款" : "由 Stripe 处理付款");
@@ -157,7 +160,7 @@
       text(card.querySelector(".price strong"), money(product.price_fen)); text(card.querySelector(".product-months"), product.months);
       text(card.querySelector(".product-access"), product.tier === "vip" ? "包含白名单线路权益" : "普通线路权益");
       text(card.querySelector(".product-period"), product.kind === "register" ? "注册成功后开始计时" : "按顺序追加套餐周期");
-      const buy = card.querySelector(".product-buy"); buy.disabled = !state.terms?.version || Number(product.price_fen) <= 0 || (state.channels && !Object.values(state.channels).some(Boolean));
+      const buy = card.querySelector(".product-buy"); buy.disabled = !state.salesEnabled || !state.terms?.version || Number(product.price_fen) <= 0 || (state.channels && !Object.values(state.channels).some(Boolean));
       buy.addEventListener("click", () => selectProduct(product)); $("products").append(card);
     }); iconRefresh();
   }

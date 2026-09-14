@@ -53,6 +53,11 @@ class PaymentUITests(unittest.TestCase):
         self.assertIn("align-items:center;text-align:center", self.styles)
         self.assertIn('state.user.display_name || "Telegram 用户"', self.javascript)
 
+    def test_shop_has_maintenance_notice_for_temporarily_disabled_sales(self):
+        self.assertIn('id="shop-maintenance-notice"', self.template)
+        self.assertIn('result.sales_enabled !== false', self.javascript)
+        self.assertIn('当前暂停新订单', self.javascript)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

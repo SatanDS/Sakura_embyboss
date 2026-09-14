@@ -429,6 +429,7 @@ class PaymentHTTPTests(unittest.IsolatedAsyncioTestCase):
         status, data, _ = await self.request('/payments/products')
         self.assertEqual(status, 200)
         self.assertEqual(data['payment_channels'], self.channel_config['channels'])
+        self.assertTrue(data['sales_enabled'])
         self.assertNotIn('stripe_configuration_id', data)
 
     async def test_channel_configuration_reads_require_admin_and_writes_require_owner(self):
