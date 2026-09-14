@@ -142,6 +142,11 @@ class PaymentHTTPTests(unittest.IsolatedAsyncioTestCase):
         self.service.get_channels = Mock(return_value=self.channel_config)
         self.service.save_channels = AsyncMock(return_value={**self.channel_config, 'version': 2})
         self.service.list_products = Mock(return_value=[])
+        self.service.polygon_info = Mock(return_value={'enabled': False, 'configured': False, 'mode': 'live', 'version': 1, 'address': ''})
+        self.service.create_polygon_quote = AsyncMock(return_value={'id': 'q1', 'amount': '2.001234'})
+        self.service.confirm_polygon_quote = Mock(return_value={'id': 'q1', 'provider': 'polygon'})
+        self.service.polygon_order = Mock(return_value={'address': '0x' + '12' * 20})
+        self.service.save_polygon = AsyncMock(return_value={'enabled': True, 'version': 2})
         self.api._service = lambda: self.service
         self.app = FastAPI()
         self.app.include_router(self.api.router)
@@ -431,6 +436,50 @@ class PaymentHTTPTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data['payment_channels'], self.channel_config['channels'])
         self.assertTrue(data['sales_enabled'])
         self.assertNotIn('stripe_configuration_id', data)
+        self.assertNotIn('address', data['polygon'])
+
+    async def test_polygon_quote_requires_login_csrf_and_does_not_accept_client_price(self):
+        body = {'product_id': 'p1', 'product_version': 1, 'terms_version': 'v1'}
+        status, _, _ = await self.request('/payments/polygon/quotes', method='POST', body=body)
+        self.assertEqual(status, 403)
+        csrf = await self.login(user=1003)
+        headers = {'origin': 'https://pay.test', 'X-CSRF-Token': csrf}
+        for bad in ({**body, 'amount': '0.01'}, {**body, 'product_version': True}):
+            status, _, _ = await self.request('/payments/polygon/quotes', method='POST', body=bad, headers=headers)
+            self.assertEqual(status, 422)
+        self.service.create_polygon_quote.assert_not_awaited()
+        status, data, _ = await self.request('/payments/polygon/quotes', method='POST', body=body, headers=headers)
+        self.assertEqual((status, data['amount']), (200, '2.001234'))
+        self.service.create_polygon_quote.assert_awaited_once_with(1003, 'p1', 1, 'v1')
+
+    async def test_polygon_confirm_passes_authenticated_owner_and_strict_consent(self):
+        csrf = await self.login(user=1003)
+        headers = {'origin': 'https://pay.test', 'X-CSRF-Token': csrf}
+        for extra in ({'accepted': 'true'}, {'accepted': 1}, {'accepted': True, 'buyer': 1001}):
+            status, _, _ = await self.request('/payments/polygon/quotes/q1/confirm', method='POST',
+                headers=headers, body={'terms_version': 'v1', **extra})
+            self.assertEqual(status, 422)
+        status, _, _ = await self.request('/payments/polygon/quotes/q1/confirm', method='POST',
+            headers=headers, body={'terms_version': 'v1', 'accepted': True})
+        self.assertEqual(status, 200)
+        self.service.confirm_polygon_quote.assert_called_once_with(1003, 'q1', True, 'v1')
+
+    async def test_polygon_settings_are_owner_only_and_mode_bound(self):
+        csrf = await self.login(user=1002)
+        body = {'mode': 'live', 'version': 1, 'enabled': True, 'accepted': True}
+        status, _, _ = await self.request('/payments/admin/polygon', method='POST', body=body,
+            headers={'origin': 'https://pay.test', 'X-CSRF-Token': csrf})
+        self.assertEqual(status, 403)
+        self.cookies.clear()
+        csrf = await self.login(user=1001)
+        headers = {'origin': 'https://pay.test', 'X-CSRF-Token': csrf}
+        for extra, expected in (({'mode': 'test'}, 409), ({'accepted': False}, 400), ({'enabled': 'true'}, 422)):
+            status, _, _ = await self.request('/payments/admin/polygon', method='POST', body={**body, **extra}, headers=headers)
+            self.assertEqual(status, expected)
+        self.service.save_polygon.assert_not_awaited()
+        status, _, _ = await self.request('/payments/admin/polygon', method='POST', body=body, headers=headers)
+        self.assertEqual(status, 200)
+        self.service.save_polygon.assert_awaited_once_with(1001, 1, True)
 
     async def test_channel_configuration_reads_require_admin_and_writes_require_owner(self):
         status, _, _ = await self.request('/payments/admin/channels')

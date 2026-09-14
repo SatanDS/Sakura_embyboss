@@ -11,6 +11,7 @@ _CHECKOUT_PARAM = re.compile(
     r"|line_items\[\d+\](?:\[quantity\]|\[price_data\]\[(?:unit_amount|currency)\]))"
 )
 _OPERATIONS = frozenset({
+    "polygon_scan", "polygon_config", "task_polygon_transaction",
     "request", "worker", "checkout", "webhook", "webhook_tasks",
     "task_create_checkout", "task_stripe_event", "task_reconcile_order",
     "task_fulfill_order", "task_notify_code", "task_notify_review",

@@ -14,7 +14,7 @@ from cacheout import Cache
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field, StrictBool, StrictInt
 
 from bot import bot, config
@@ -83,6 +83,10 @@ async def payment_worker():
             # Payment is optional; a missing key or provider outage must not
             # terminate the Telegram worker.
             _log_provider_error("worker", exc)
+        try:
+            await _service().scan_polygon()
+        except Exception as exc:
+            _log_provider_error("polygon_scan", exc)
         await asyncio.sleep(60)
 
 
@@ -94,13 +98,13 @@ def _settings():
 def _service():
     from bot.sql_helper import Session
     from bot.payments.service import PaymentError, PaymentService
-    from bot.payments.stripe_gateway import StripeGateway
     settings = _settings()
-    # Stripe credentials are validated at network entry points. Existing
-    # order queries and fulfillment must still work while sales are paused.
+    # Each provider validates its own credentials. Polygon must remain usable
+    # even when Stripe is not configured; historical Stripe orders still route
+    # through the original gateway.
     if settings.enabled:
-        settings.validate()
-    service = PaymentService(Session, settings, StripeGateway(settings), _notify)
+        settings.validate_common()
+    service = PaymentService(Session, settings, None, _notify)
     service.seed_products()
     return service
 
@@ -161,12 +165,18 @@ def _error_code(exc):
 
 
 _PUBLIC_ERROR_CODES = {
-    "sales_disabled", "product_changed", "terms_required", "terms_changed", "sold_out",
+    "sales_disabled", "product_changed", "product_unavailable", "invalid_product", "terms_required", "terms_changed", "sold_out",
     "capacity_full", "no_capacity", "not_found", "code_held", "code_unavailable",
     "test_buyer_not_allowed", "code_mode_mismatch", "order_mode_mismatch",
     "stripe_mode_mismatch", "invalid_event", "event_too_large", "stripe_signature_invalid",
     "archive_not_allowed", "invalid_archive_request",
     "checkout_recovery_required",
+    "polygon_sales_disabled", "polygon_live_only", "polygon_invalid_address", "polygon_address_changed",
+    "polygon_rpc_unconfigured", "polygon_rpc_unavailable", "polygon_rpc_stale", "polygon_wrong_network",
+    "polygon_finality_unavailable", "polygon_pending_confirmation", "polygon_invalid_transaction",
+    "polygon_transaction_failed", "polygon_transfer_mismatch", "polygon_transfer_used", "polygon_quote_expired",
+    "polygon_quote_limit", "polygon_amount_slots_full", "polygon_pending_other_payment",
+    "binance_readonly_unconfigured", "binance_query_failed", "binance_address_mismatch", "binance_network_changed",
     "invalid_channels", "wallet_requires_card", "channels_changed", "payment_channels_disabled",
     "invalid_channel_request", "payment_channel_config_invalid", "payment_channels_unavailable", "channel_mode_mismatch",
 }
@@ -211,6 +221,7 @@ class ProductRequest(BaseModel):
     tier: str
     months: int = Field(ge=1, le=12)
     price_fen: int = Field(ge=0, le=99_999_999)
+    usdt_price_units: StrictInt | None = Field(default=None, ge=0, le=999_999_990_000)
     version: int | None = None
     active: bool = False
     sales_limit: int | None = Field(default=None, ge=1)
@@ -242,6 +253,43 @@ class ChannelSettingsRequest(BaseModel):
     channels: ChannelSelection
     request_id: str = Field(pattern=r'^[a-f0-9]{32}$')
     accepted: StrictBool
+
+
+class PolygonQuoteRequest(BaseModel):
+    model_config = {'extra': 'forbid'}
+    product_id: str = Field(min_length=1, max_length=32)
+    product_version: StrictInt = Field(ge=1)
+    terms_version: str = Field(min_length=1, max_length=64)
+
+
+class PolygonConfirmRequest(BaseModel):
+    model_config = {'extra': 'forbid'}
+    accepted: StrictBool
+    terms_version: str = Field(min_length=1, max_length=64)
+
+
+class PolygonSettingsRequest(BaseModel):
+    model_config = {'extra': 'forbid'}
+    mode: Literal['live', 'test']
+    version: StrictInt = Field(ge=1)
+    enabled: StrictBool
+    accepted: StrictBool
+
+
+class PolygonTransactionRequest(BaseModel):
+    model_config = {'extra': 'forbid'}
+    tx_hash: str = Field(pattern=r'^0x[0-9a-fA-F]{64}$')
+
+
+_polygon_request_limits = Cache(maxsize=4096, ttl=60)
+
+
+def _polygon_limit(user, operation):
+    key = (user, operation)
+    count = _polygon_request_limits.get(key, 0)
+    if count >= 6:
+        raise HTTPException(status_code=429, detail="too_many_requests")
+    _polygon_request_limits.set(key, count + 1)
 
 
 async def _notify(task_type, payload):
@@ -363,7 +411,8 @@ async def payment_products():
         settings = _settings()
         return {"terms": {"version": settings.terms_version, "hash": _terms_hash(), "text": TERMS_TEXT},
                 "products": service.list_products(), "payment_channels": service.get_channels()["channels"],
-                "sales_enabled": bool(settings.enabled)}
+                "sales_enabled": bool(settings.enabled),
+                "polygon": {key: value for key, value in service.polygon_info().items() if key != "address"}}
     except Exception as exc:
         raise HTTPException(status_code=503, detail=_public_error(exc))
 
@@ -423,6 +472,60 @@ async def payment_orders(request: Request, mode: Literal['current', 'live', 'tes
     return {"orders": service.list_orders(buyer, mode=selected_mode,
                                          archived={'active': False, 'archived': True, 'all': None}[archived]),
             "current_mode": service.mode}
+
+
+@router.post("/polygon/quotes")
+async def polygon_quote(body: PolygonQuoteRequest, request: Request):
+    buyer = _require_csrf(request)
+    _polygon_limit(buyer, "quote")
+    try:
+        return await _service().create_polygon_quote(buyer, body.product_id, body.product_version, body.terms_version)
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=_public_error(exc))
+
+
+@router.post("/polygon/quotes/{quote_id}/confirm")
+async def polygon_confirm(quote_id: str, body: PolygonConfirmRequest, request: Request):
+    buyer = _require_csrf(request)
+    try:
+        order = _service().confirm_polygon_quote(buyer, quote_id, body.accepted, body.terms_version)
+        return {"order": order}
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=_public_error(exc))
+
+
+@router.get("/polygon/orders/{order_id}")
+async def polygon_order_details(order_id: str, request: Request):
+    buyer = _session_user(request)
+    try:
+        return _service().polygon_order(order_id, buyer)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=_public_error(exc, "not_found"))
+
+
+@router.get("/polygon/orders/{order_id}/qr")
+async def polygon_order_qr(order_id: str, request: Request):
+    buyer = _session_user(request)
+    data = _service().polygon_order(order_id, buyer)
+    import io
+    import qrcode
+    output = io.BytesIO()
+    qrcode.make(data["address"]).save(output, format="PNG")
+    return Response(output.getvalue(), media_type="image/png")
+
+
+@router.post("/polygon/orders/{order_id}/transaction")
+async def polygon_transaction(order_id: str, body: PolygonTransactionRequest, request: Request):
+    buyer = _require_csrf(request)
+    _polygon_limit(buyer, "tx")
+    service = _service()
+    order = service.get_order(order_id, buyer)
+    if order["provider"] != "polygon" or order["mode"] != service.mode:
+        raise HTTPException(status_code=409, detail="order_mode_mismatch")
+    try:
+        return service.submit_polygon_transaction(order_id, buyer, body.tx_hash.lower())
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=_public_error(exc))
 
 
 @router.get("/orders/{order_id}")
@@ -520,6 +623,27 @@ async def admin_products(request: Request):
 async def admin_payment_channels(request: Request):
     _require_admin(request)
     return _service().get_channels()
+
+
+@router.get('/admin/polygon')
+async def admin_polygon(request: Request):
+    _require_admin(request)
+    return _service().polygon_info()
+
+
+@router.post('/admin/polygon')
+async def admin_save_polygon(body: PolygonSettingsRequest, request: Request):
+    actor = _require_owner(request)
+    if body.accepted is not True:
+        raise HTTPException(status_code=400, detail='invalid_channel_request')
+    service = _service()
+    if service.mode != body.mode:
+        raise HTTPException(status_code=409, detail='channel_mode_mismatch')
+    try:
+        return await service.save_polygon(actor, body.version, body.enabled)
+    except Exception as exc:
+        _log_provider_error("polygon_config", exc)
+        raise HTTPException(status_code=409, detail=_public_error(exc))
 
 
 @router.post('/admin/channels')

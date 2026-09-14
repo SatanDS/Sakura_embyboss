@@ -56,6 +56,19 @@ class PaymentSettingsTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 PaymentSettings.from_config(self.config(test_buyer_ids=[])).validate()
 
+    def test_polygon_common_settings_do_not_depend_on_stripe_credentials(self):
+        with self.env(TGBOT_STRIPE_SECRET_KEY="", TGBOT_STRIPE_WEBHOOK_SECRET="",
+                      TGBOT_POLYGON_RPC_URL="https://rpc.example.test", TGBOT_BINANCE_API_KEY="read-only",
+                      TGBOT_BINANCE_API_SECRET="fixture"):
+            settings = PaymentSettings.from_config(self.config(live_mode=True,
+                polygon_receive_address="0x" + "12" * 20, binance_network="POL"))
+            settings.validate_common()
+            self.assertEqual(settings.polygon_receive_address, "0x" + "12" * 20)
+            self.assertEqual(settings.binance_network, "POL")
+            self.assertEqual(settings.binance_api_key, "read-only")
+            with self.assertRaises(ValueError):
+                settings.validate_stripe()
+
     def test_setup_command_unpadded_key_preserves_cipher_key(self):
         raw = bytes(range(224, 256))
         padded = base64.urlsafe_b64encode(raw).decode("ascii")

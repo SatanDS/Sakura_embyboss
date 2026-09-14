@@ -20,6 +20,11 @@ class PaymentSettings:
     seat_limit: int = 0
     terms_version: str = '2026-09-09-v1'
     test_buyer_ids: tuple = ()
+    polygon_receive_address: str = ''
+    polygon_rpc_url: str = ''
+    binance_api_key: str = ''
+    binance_api_secret: str = ''
+    binance_network: str = 'POL'
 
     @classmethod
     def from_config(cls, config):
@@ -38,6 +43,11 @@ class PaymentSettings:
             seat_limit=int(getattr(section, 'seat_limit', 0) or 0),
             terms_version=str(getattr(section, 'terms_version', '2026-09-09-v1')),
             test_buyer_ids=tuple(int(value) for value in (getattr(section, 'test_buyer_ids', None) or ())),
+            polygon_receive_address=str(getattr(section, 'polygon_receive_address', '') or ''),
+            polygon_rpc_url=os.getenv('TGBOT_POLYGON_RPC_URL', ''),
+            binance_api_key=os.getenv('TGBOT_BINANCE_API_KEY', ''),
+            binance_api_secret=os.getenv('TGBOT_BINANCE_API_SECRET', ''),
+            binance_network=str(getattr(section, 'binance_network', 'POL') or 'POL'),
         )
 
     def encryption_key_bytes(self):
@@ -52,16 +62,22 @@ class PaymentSettings:
             raise ValueError('Payment encryption key must be a base64 encoded 32-byte key')
         return key
 
-    def validate(self):
+    def validate_common(self):
         parsed = urlsplit(self.public_url)
         local = parsed.hostname in ('127.0.0.1', 'localhost', '::1')
         if not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path not in ('', '/'):
             raise ValueError('Payment public_url must be a root HTTPS origin')
         if parsed.scheme != 'https' and not (not self.cookie_secure and local and parsed.scheme == 'http' and not self.live_mode):
             raise ValueError('Payment public_url must use HTTPS')
-        expected = 'sk_live_' if self.live_mode else 'sk_test_'
-        if not self.stripe_secret_key.startswith(expected) or not self.stripe_webhook_secret.startswith('whsec_'):
-            raise ValueError('Stripe credentials are missing or do not match payment mode')
         if self.enabled and not self.live_mode and not self.test_buyer_ids:
             raise ValueError('Test payment mode requires an explicit test_buyer_ids allowlist')
         self.encryption_key_bytes()
+
+    def validate_stripe(self):
+        expected = 'sk_live_' if self.live_mode else 'sk_test_'
+        if not self.stripe_secret_key.startswith(expected) or not self.stripe_webhook_secret.startswith('whsec_'):
+            raise ValueError('Stripe credentials are missing or do not match payment mode')
+
+    def validate(self):
+        self.validate_common()
+        self.validate_stripe()

@@ -11,9 +11,22 @@
   let channelRequestId = null;
   let channelSaving = false;
   let channelLoading = false;
+  let polygonSettings = null;
   const state = { user: null, products: [], orders: [], terms: null, kind: "register", selected: null, editing: null, review: null, code: null, poll: null, orderPoll: null, orderPollStarted: 0, refreshing: false, checkoutInFlight: false };
   const labels = { pending: "待支付", paid: "已支付", expired: "已过期", issued: "已发码", claimed: "兑换处理中", redeemed: "已兑换", held: "暂停使用", review: "待核查", fulfilled: "已发码", failed: "待处理" };
   const errors = {
+    polygon_sales_disabled: "Polygon 收款暂未开放。", polygon_live_only: "Polygon 收款仅在正式环境开放。",
+    polygon_quote_expired: "报价已过期，请重新选择套餐。", polygon_quote_limit: "生成报价过于频繁，请稍后再试。",
+    polygon_pending_other_payment: "这个套餐已有待付款订单，请先在我的订单中查看，避免重复付款。",
+    polygon_rpc_unconfigured: "Polygon 服务尚未配置，请联系服主。", polygon_rpc_unavailable: "链上查询暂不可用，请稍后再试。",
+    polygon_rpc_stale: "链上数据更新延迟，请稍后再试。", polygon_wrong_network: "收款节点的网络配置不符，请联系服主。",
+    polygon_finality_unavailable: "暂时无法确认链上最终状态，请稍后再试。", polygon_address_changed: "收款地址已调整，请重新获取报价。",
+    binance_readonly_unconfigured: "收款平台查询尚未配置，请联系服主。", binance_query_failed: "收款平台查询暂不可用，请稍后再试。",
+    binance_address_mismatch: "收款地址与币安账户不一致，请联系服主核对。",
+    polygon_amount_slots_full: "该价格的订单编号已用完，请联系服主调整套餐。",
+    polygon_transfer_mismatch: "未找到与本单金额、地址相符的 USDT 转账。",
+    polygon_pending_confirmation: "转账仍在等待链上确认。", polygon_transaction_failed: "该链上交易未成功。",
+    polygon_transfer_used: "该转账已被其他订单使用。", polygon_invalid_transaction: "请填写完整的链上交易哈希。",
     unauthorized: "请先通过 Telegram 登录。", login_required: "请先通过 Telegram 登录。",
     forbidden: "当前账号没有此操作权限。", csrf_failed: "页面已失效，请刷新后重试。",
     sales_disabled: "套餐销售暂未开放，已有订单仍可查询。", payments_disabled: "套餐销售暂未开放，已有订单仍可查询。",
@@ -45,6 +58,8 @@
     channel_mode_mismatch: "支付环境已改变，请重新加载后核对。",
   };
   const money = (fen) => new Intl.NumberFormat("zh-CN", { style: "currency", currency: "CNY" }).format(Number(fen || 0) / 100);
+  const usdt = (units) => (Number(units || 0) / 1000000).toFixed(6) + " USDT";
+  const orderMoney = (order) => order.currency === "usdt" ? usdt(order.amount_usdt_units) : money(order.amount_fen);
   const date = (value) => {
     if (!value) return "-";
     const input = typeof value === "string" && !/(Z|[+-]\d{2}:\d{2})$/.test(value) ? `${value}Z` : value;
@@ -143,33 +158,58 @@
     text($("shop-maintenance-notice"), "支付维护中，当前暂停新订单。请关闭此页面，恢复开放后再进行购买，可以联系服主手动发码。");
     show($("shop-maintenance-notice"), !state.salesEnabled);
     state.channels = result.payment_channels || null;
+    state.polygon = result.polygon || {};
+    const polygonOpen = state.polygon.enabled && state.polygon.configured && state.polygon.mode === "live";
+    $("purchase-currency").querySelector('[value="usdt"]').hidden = !polygonOpen;
+    if (!state.currency) state.currency = polygonOpen && !Object.values(state.channels || {}).some(Boolean) ? "usdt" : "cny";
+    if (!polygonOpen && state.currency === "usdt") state.currency = "cny";
+    $("purchase-currency").value = state.currency;
     const names = Object.keys(channelLabels).filter(key => state.channels?.[key]).map(key => channelLabels[key]);
-    text($("payment-methods-footer"), names.length ? names.join(" / ") + " · 由 Stripe 处理付款" : "由 Stripe 处理付款");
+    text($("payment-methods-footer"), state.currency === "usdt" ? "USDT · Polygon PoS · 到账发码" : names.length ? names.join(" / ") + " · 由 Stripe 处理付款" : "由 Stripe 处理付款");
     text($("terms-text"), result.terms?.text || "购买须知暂不可用，请稍后再试。");
     show($("shop-view")); renderProducts();
   }
   function renderProducts() {
     const tier = $("tier-filter").value;
-    const products = state.products.filter((item) => item.active !== false && item.kind === state.kind && (tier === "all" || item.tier === tier));
+    const products = state.products.filter((item) => item.active !== false && item.kind === state.kind && (tier === "all" || item.tier === tier)
+      && (state.currency !== "usdt" || Number(item.usdt_price_units) > 0));
     text($("product-section-title"), state.kind === "register" ? "注册套餐" : "续期套餐");
     $("products").replaceChildren(); show($("products-empty"), products.length === 0);
     products.forEach((product) => {
       const card = $("product-template").content.firstElementChild.cloneNode(true); card.dataset.tier = product.tier;
+      card.dataset.currency = state.currency;
       text(card.querySelector(".product-title"), productTitle(product)); text(card.querySelector(".product-kind"), product.kind === "register" ? "新账号 · 注册码" : "已有账号 · 续期码");
       const tierBadge = card.querySelector(".product-tier"); text(tierBadge, product.tier === "vip" ? "白名单" : "普通"); tierBadge.classList.add(product.tier === "vip" ? "vip" : "normal");
-      text(card.querySelector(".price strong"), money(product.price_fen)); text(card.querySelector(".product-months"), product.months);
+      text(card.querySelector(".price strong"), state.currency === "usdt" ? usdt(product.usdt_price_units) : money(product.price_fen)); text(card.querySelector(".product-months"), product.months);
       text(card.querySelector(".product-access"), product.tier === "vip" ? "包含白名单线路权益" : "普通线路权益");
       text(card.querySelector(".product-period"), product.kind === "register" ? "注册成功后开始计时" : "按顺序追加套餐周期");
-      const buy = card.querySelector(".product-buy"); buy.disabled = !state.salesEnabled || !state.terms?.version || Number(product.price_fen) <= 0 || (state.channels && !Object.values(state.channels).some(Boolean));
+      const unavailable = state.currency === "usdt" ? !state.polygon?.enabled || Number(product.usdt_price_units) <= 0
+        : Number(product.price_fen) <= 0 || (state.channels && !Object.values(state.channels).some(Boolean));
+      const buy = card.querySelector(".product-buy"); buy.disabled = !state.salesEnabled || !state.terms?.version || unavailable;
       buy.addEventListener("click", () => selectProduct(product)); $("products").append(card);
     }); iconRefresh();
   }
-  function selectProduct(product) {
+  async function selectProduct(product) {
     if (!state.user) { startLogin(); return; }
-    state.selected = product; $("accept-terms").checked = false; $("pay-button").disabled = true; show($("checkout-error"), false);
+    state.selected = product; state.quote = null; state.checkoutCurrency = state.currency;
+    $("checkout-dialog").dataset.currency = state.currency;
+    $("accept-terms").checked = false; $("pay-button").disabled = true; show($("checkout-error"), false);
+    $("accept-terms").disabled = state.currency === "usdt";
+    text($("pay-button-label"), state.currency === "usdt" ? "正在生成精确报价…" : "前往付款");
     text($("checkout-product"), productTitle(product)); text($("checkout-price"), money(product.price_fen));
     text($("checkout-description"), `${product.kind === "register" ? "注册码" : "续期码"} · ${product.tier === "vip" ? "白名单" : "普通"} · ${product.months} 个月 · 1 份`);
     text($("checkout-terms"), state.terms.text); $("checkout-dialog").showModal();
+    if (state.currency === "usdt") {
+      text($("checkout-price"), usdt(product.usdt_price_units));
+      try {
+        const quote = await api("/polygon/quotes", { method: "POST", body: JSON.stringify({ product_id: product.id, product_version: product.version, terms_version: state.terms.version }) });
+        if (state.selected !== product || !$("checkout-dialog").open) return;
+        state.quote = quote; text($("checkout-price"), quote.amount + " USDT");
+        text($("checkout-product"), productTitle(quote.product));
+        text($("checkout-description"), `${quote.product.months} 个月 · Polygon PoS · 基价 ${quote.base_amount} + 订单尾数 ${quote.tail_amount} USDT。请按最终精确金额转账，手续费另付。`);
+        $("accept-terms").disabled = false; text($("pay-button-label"), "确认金额并查看收款地址");
+      } catch (error) { displayError("checkout-error", error); text($("pay-button-label"), "暂时无法生成报价"); }
+    }
   }
   function primeCheckoutWindow(checkoutWindow) {
     if (!checkoutWindow) return;
@@ -183,6 +223,15 @@
   }
   async function checkout() {
     if (!$("accept-terms").checked || !state.selected || !state.terms || state.checkoutInFlight) return;
+    if (state.checkoutCurrency === "usdt") {
+      if (!state.quote) return;
+      state.checkoutInFlight = true; $("pay-button").disabled = true;
+      try {
+        const result = await api(`/polygon/quotes/${encodeURIComponent(state.quote.id)}/confirm`, { method: "POST", body: JSON.stringify({ accepted: true, terms_version: state.terms.version }) });
+        window.location.assign("/payments/shop/orders/" + encodeURIComponent(result.order.id));
+      } catch (error) { displayError("checkout-error", error); state.checkoutInFlight = false; $("pay-button").disabled = false; }
+      return;
+    }
     state.checkoutInFlight = true;
     const button = $("pay-button"); button.disabled = true; text($("pay-button-label"), "正在创建支付…"); show($("checkout-error"), false);
     let checkoutWindow = null;
@@ -234,7 +283,7 @@
       identity.append(node("span", `${order.mode === "test" ? "测试" : "正式"}${order.archived_at ? " · 已归档" : ""}`, "order-mode"));
       row.append(identity);
       if (admin) row.append(node("td", productTitle(product) || "会员套餐"));
-      row.append(node("td", money(order.amount_fen)));
+      row.append(node("td", orderMoney(order)));
       const payment = node("td"); payment.append(statusBadge(order.review_required ? "review" : order.payment_state)); row.append(payment);
       if (!admin) { const fulfillment = node("td"); fulfillment.append(statusBadge(order.fulfillment_state, order.fulfillment_state === "issued" ? "已发码" : "待发码")); row.append(fulfillment); }
       row.append(node("td", date(order.created_at))); const action = node("td");
@@ -251,7 +300,9 @@
     if (!admin) text($("orders-count"), `共 ${orders.length} 笔订单`);
     else {
       text($("metric-orders"), orders.length);
-      text($("metric-paid"), money(orders.filter(order => order.mode === "live" && order.payment_state === "paid").reduce((sum, order) => sum + Number(order.amount_fen), 0)));
+      const paid = orders.filter(order => order.mode === "live" && order.payment_state === "paid");
+      const cryptoTotal = paid.filter(order => order.currency === "usdt").reduce((sum, order) => sum + Number(order.amount_usdt_units), 0);
+      text($("metric-paid"), money(paid.filter(order => order.currency !== "usdt").reduce((sum, order) => sum + Number(order.amount_fen), 0)) + (cryptoTotal ? " / " + usdt(cryptoTotal) : ""));
       text($("metric-review"), orders.filter(order => order.review_required).length);
       updateArchiveSelection();
     }
@@ -310,7 +361,7 @@
   async function loadOrder() {
     if (!requireLogin()) return;
     const order = await api(`/orders/${encodeURIComponent(document.body.dataset.orderId)}`); const product = productOf(order);
-    state.order = order; text($("detail-title"), productTitle(product) || "会员套餐"); text($("detail-id"), order.id); text($("detail-amount"), money(order.amount_fen));
+    state.order = order; text($("detail-title"), productTitle(product) || "会员套餐"); text($("detail-id"), order.id); text($("detail-amount"), orderMoney(order));
     const badge = statusBadge(order.review_required ? "review" : order.payment_state); badge.id = "detail-status"; $("detail-status").replaceWith(badge);
     const facts = [["套餐用途", product.kind === "register" ? "注册新账号" : "续期已有账号"], ["线路等级", product.tier === "vip" ? "白名单" : "普通"], ["套餐时长", `${product.months} 个月`], ["创建时间", date(order.created_at)], ["发码状态", order.fulfillment_state === "issued" ? "已发码" : "待发码"], ["兑换状态", order.code_state ? label(order.code_state) : "尚未发码"]];
     if (order.redeemed_at) facts.push(["兑换时间", date(order.redeemed_at)]);
@@ -337,6 +388,7 @@
       text($("payment-waiting-text"), "请不要重复付款。页面会自动更新，完成后可在此查看兑换码。");
       scheduleOrderPoll();
     } else stopOrderPoll();
+    if (order.provider === "polygon") await loadPolygonPayment(order);
     show($("order-view")); iconRefresh();
   }
   function stopOrderPoll() {
@@ -361,6 +413,60 @@
     $("reveal-code").disabled = true;
     try { const result = await api(`/orders/${encodeURIComponent(document.body.dataset.orderId)}/code`); if (!result.code) throw new Error("兑换码正在发放，请稍后刷新。"); state.code = result.code; text($("code-value"), result.code); $("copy-code").disabled = false; }
     catch (error) { toast(errorMessage(error)); } finally { $("reveal-code").disabled = false; }
+  }
+  async function loadPolygonPayment(order) {
+    const data = await api(`/polygon/orders/${encodeURIComponent(order.id)}`);
+    state.polygonOrder = data;
+    text($("payment-methods-footer"), "USDT · Polygon PoS · 到账核验");
+    show($("continue-payment"), false); show($("polygon-payment"));
+    const pending = order.payment_state === "pending";
+    const expiry = new Date(/(Z|[+-]\d{2}:\d{2})$/.test(data.expires_at) ? data.expires_at : data.expires_at + "Z");
+    const needsTransfer = pending && data.state === "awaiting_transfer" && expiry > new Date();
+    show($("polygon-transfer-instructions"), needsTransfer);
+    text($("polygon-amount"), data.amount); text($("polygon-address"), data.address);
+    text($("polygon-expiry"), date(data.expires_at));
+    $("polygon-qr").src = `/payments/polygon/orders/${encodeURIComponent(order.id)}/qr`;
+    const message = data.state === "credited" ? "充值已入账，兑换码将在确认后发放。"
+      : data.state === "awaiting_binance" ? "已检测到链上转账，正在等待收款平台确认入账。请勿再次转账。"
+      : needsTransfer ? "请按本单精确金额转账，到账后页面会自动更新。"
+      : "订单已过期。已经转账请提交交易哈希或联系服主核查，请勿重复付款。";
+    text($("polygon-payment-status"), message);
+    if (data.check_error) text($("polygon-check-result"), errors[data.check_error] || "该转账暂未核验通过，请联系服主核查。");
+    else if (data.state !== "awaiting_transfer") text($("polygon-check-result"), "");
+    if (pending) text($("payment-waiting-text"), message);
+    show($("polygon-transaction-form"), order.payment_state !== "paid");
+  }
+  async function submitPolygonTransaction(event) {
+    event.preventDefault();
+    if (!state.order || !event.currentTarget.reportValidity()) return;
+    const button = event.currentTarget.querySelector('button[type="submit"]'); button.disabled = true;
+    try {
+      await api(`/polygon/orders/${encodeURIComponent(state.order.id)}/transaction`, { method: "POST", body: JSON.stringify({ tx_hash: $("polygon-tx-hash").value.trim() }) });
+      text($("polygon-check-result"), "已提交核验，系统将检查转账与入账记录。请稍后刷新订单。");
+    } catch (error) { text($("polygon-check-result"), errorMessage(error)); }
+    finally { button.disabled = false; }
+  }
+  async function loadPolygonSettings() {
+    try {
+      polygonSettings = await api("/admin/polygon");
+      $("polygon-enabled").checked = polygonSettings.enabled;
+      $("polygon-enabled").disabled = state.user?.role !== "owner";
+      $("polygon-settings-accepted").checked = false;
+      text($("polygon-mode"), polygonSettings.mode === "live" ? "正式环境" : "测试环境");
+      text($("polygon-config-summary"), polygonSettings.configured ? "收款地址：" + polygonSettings.address : "请先配置 Polygon 收款地址、RPC 和币安只读 API，再开放销售。");
+      show($("polygon-owner-actions"), state.user?.role === "owner"); show($("polygon-settings-form"));
+    } catch (error) { text($("polygon-config-summary"), errorMessage(error)); }
+  }
+  async function savePolygonSettings(event) {
+    event.preventDefault();
+    if (!polygonSettings || state.user?.role !== "owner" || !event.currentTarget.reportValidity()) return;
+    const button = $("polygon-save"); button.disabled = true;
+    try {
+      polygonSettings = await api("/admin/polygon", { method: "POST", body: JSON.stringify({ mode: polygonSettings.mode, version: polygonSettings.version, enabled: $("polygon-enabled").checked, accepted: true }) });
+      text($("polygon-config-result"), polygonSettings.enabled ? "Polygon 收款已开放。" : "Polygon 新购买已关闭，已有转账继续核验。");
+      $("polygon-settings-accepted").checked = false;
+    } catch (error) { text($("polygon-config-result"), errorMessage(error)); }
+    finally { button.disabled = false; }
   }
   async function loadAdmin() {
     if (!requireLogin()) return;
@@ -389,6 +495,7 @@
   async function loadChannels() {
     if (channelLoading || channelSaving) return;
     channelLoading = true; updateChannelControls();
+    await loadPolygonSettings();
     show($("channel-loading")); show($("channel-error"), false); show($("channel-success"), false);
     try {
       const result = await api("/admin/channels");
@@ -422,7 +529,7 @@
   function renderAdminProducts() {
     $("admin-products-body").replaceChildren();
     for (const product of state.products) {
-      const row = node("tr"); row.append(node("td", productTitle(product)), node("td", `${product.kind === "register" ? "注册" : "续期"} / ${product.tier === "vip" ? "白名单" : "普通"}`), node("td", `${product.months} 个月`), node("td", money(product.price_fen)), node("td", product.sales_limit ?? "不限"));
+      const row = node("tr"); row.append(node("td", productTitle(product)), node("td", `${product.kind === "register" ? "注册" : "续期"} / ${product.tier === "vip" ? "白名单" : "普通"}`), node("td", `${product.months} 个月`), node("td", money(product.price_fen) + (product.usdt_price_units ? " / " + usdt(product.usdt_price_units) : "")), node("td", product.sales_limit ?? "不限"));
       const active = node("td"); active.append(node("span", product.active ? "已上架" : "草稿 / 已下架", `badge ${product.active ? "success" : ""}`)); row.append(active);
       const actions = node("td"); if (state.user.role === "owner") actions.append(actionButton("pencil", "编辑套餐", () => editProduct(product))); row.append(actions); $("admin-products-body").append(row);
     }
@@ -434,6 +541,7 @@
     for (const field of ["title", "kind", "tier", "months"]) if (product?.[field] !== undefined) form.elements[field].value = product[field];
     if (product) form.elements.title.value = productTitle(product);
     form.elements.price.value = product ? (product.price_fen / 100).toFixed(2) : ""; form.elements.sales_limit.value = product?.sales_limit ?? ""; form.elements.active.checked = product?.active || false;
+    form.elements.price_usdt.value = product ? (Number(product.usdt_price_units || 0) / 1000000).toFixed(2) : "0.00";
     $("product-dialog").showModal();
   }
   async function saveProduct(event) {
@@ -442,6 +550,7 @@
     try {
       const fields = form.elements; const data = { title: fields.title.value.trim(), kind: fields.kind.value, tier: fields.tier.value, months: Number(fields.months.value), price_fen: Math.round(Number(fields.price.value) * 100), sales_limit: fields.sales_limit.value ? Number(fields.sales_limit.value) : null, active: fields.active.checked };
       if (state.editing) Object.assign(data, { id: state.editing.id, version: state.editing.version });
+      data.usdt_price_units = Math.round(Number(fields.price_usdt.value || 0) * 100) * 10000;
       await api("/admin/products", { method: "POST", body: JSON.stringify(data) }); $("product-dialog").close(); await loadAdmin(); toast("套餐已保存");
     } catch (error) { displayError("product-error", error); } finally { button.disabled = false; }
   }
@@ -470,6 +579,16 @@
   $("pay-button").addEventListener("click", checkout);
   document.querySelectorAll("[data-kind]").forEach((button) => button.addEventListener("click", () => { state.kind = button.dataset.kind; document.querySelectorAll("[data-kind]").forEach((tab) => tab.setAttribute("aria-selected", String(tab === button))); renderProducts(); }));
   $("tier-filter")?.addEventListener("change", renderProducts);
+  $("purchase-currency")?.addEventListener("change", () => { state.currency = $("purchase-currency").value; renderProducts();
+    text($("payment-methods-footer"), state.currency === "usdt" ? "USDT · Polygon PoS · 到账发码" : "由 Stripe 处理付款"); });
+  $("polygon-transaction-form")?.addEventListener("submit", submitPolygonTransaction);
+  $("polygon-settings-form")?.addEventListener("submit", savePolygonSettings);
+  $("polygon-enabled")?.addEventListener("change", () => { $("polygon-settings-accepted").checked = false; });
+  for (const kind of ["amount", "address"]) $("copy-polygon-" + kind)?.addEventListener("click", async () => {
+    if (!state.polygonOrder) return;
+    try { await navigator.clipboard.writeText(state.polygonOrder[kind]); toast(kind === "amount" ? "精确金额已复制" : "收款地址已复制"); }
+    catch (_) { toast("复制失败，请手动选择并复制。"); }
+  });
   for (const id of ["order-search", "order-filter", "admin-order-search", "admin-order-filter"]) $(id)?.addEventListener(id.endsWith("search") ? "input" : "change", () => { selectedOrders.clear(); renderOrders(page === "admin"); });
   for (const id of ["admin-order-mode", "admin-order-archive", "buyer-order-mode", "buyer-order-archive"]) $(id)?.addEventListener("change", async () => {
     show($("page-error"), false);

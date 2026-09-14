@@ -21,7 +21,7 @@
       <a href="/payments/my-orders" {% if page in ['orders', 'order'] %}aria-current="page"{% endif %}><i data-lucide="receipt-text"></i><span>我的订单</span></a>
       <a id="admin-nav" href="/payments/admin" hidden {% if page == 'admin' %}aria-current="page"{% endif %}><i data-lucide="sliders-horizontal"></i><span>销售管理</span></a>
     </nav>
-    <div class="sidebar-foot"><i data-lucide="shield-check"></i><span>Stripe 安全支付</span></div>
+    <div class="sidebar-foot"><i data-lucide="shield-check"></i><span>安全支付 · 到账发码</span></div>
   </aside>
   <div class="workspace">
     <header class="topbar">
@@ -41,7 +41,7 @@
       <section id="shop-view" hidden aria-label="套餐商品">
         <div class="section-toolbar">
           <div class="segments" role="tablist" aria-label="套餐用途"><button type="button" role="tab" aria-selected="true" data-kind="register">注册新账号</button><button type="button" role="tab" aria-selected="false" data-kind="renew">续期已有账号</button></div>
-          <span class="subtle">人民币 CNY · 单次付款</span>
+          <label class="select-wrap">付款方式<select id="purchase-currency"><option value="cny">人民币（Stripe）</option><option value="usdt" hidden>USDT（Polygon PoS）</option></select></label>
         </div>
         <div class="tier-row"><h2 id="product-section-title">注册套餐</h2><div class="select-wrap"><label for="tier-filter">线路等级</label><select id="tier-filter"><option value="all">全部等级</option><option value="normal">普通</option><option value="vip">白名单</option></select></div></div>
         <div id="shop-maintenance-notice" class="notice warning" role="status" hidden>支付维护中，当前暂停新订单。请关闭此页面，恢复开放后再进行购买，可以联系服主手动发码。</div>
@@ -69,6 +69,19 @@
         </div>
         <section id="code-section" class="code-section" hidden><h2>兑换码</h2><div class="code-bar"><output id="code-value" class="mono">•••• •••• •••• ••••</output><button id="reveal-code" class="icon-button" type="button" title="显示兑换码" aria-label="显示兑换码"><i data-lucide="eye"></i></button><button id="copy-code" class="icon-button" disabled type="button" title="复制兑换码" aria-label="复制兑换码"><i data-lucide="copy"></i></button></div><p class="subtle">请妥善保管。兑换码可转赠，兑换后无法再次使用。</p></section>
         <a id="continue-payment" class="button primary" hidden target="_blank" rel="noopener noreferrer">继续付款<i data-lucide="arrow-up-right"></i></a>
+        <section id="polygon-payment" hidden class="polygon-payment" aria-label="USDT 链上付款">
+          <h2>USDT · Polygon PoS</h2>
+          <p id="polygon-payment-status" role="status"></p>
+          <div id="polygon-transfer-instructions">
+            <p>本单需到账 <strong id="polygon-amount" class="mono"></strong> USDT <button id="copy-polygon-amount" class="button small" type="button">复制金额</button></p>
+            <p class="subtle">包含用于匹配订单的金额尾数。请完整保留小数，手续费另付；只转 USDT，请勿转 POL 或使用其他网络。</p>
+            <img id="polygon-qr" width="200" height="200" alt="Polygon USDT 收款地址二维码">
+            <p class="mono polygon-address" id="polygon-address"></p><button id="copy-polygon-address" type="button" class="button">复制收款地址</button>
+            <p class="subtle">请在 <span id="polygon-expiry"></span> 前完成转账。系统核验链上确认和收款平台入账后自动发码。</p>
+          </div>
+          <form id="polygon-transaction-form"><label class="form-field">已转账但状态未更新？提交链上交易哈希<input id="polygon-tx-hash" required pattern="0x[0-9a-fA-F]{64}" placeholder="0x…" maxlength="66" autocomplete="off"></label><button type="submit" class="button">核验转账</button></form>
+          <p id="polygon-check-result" class="subtle" role="status"></p>
+        </section>
       </section>
       {% elif page == 'admin' %}
       <section id="admin-view" hidden aria-label="销售管理">
@@ -82,6 +95,13 @@
         </section>
         <section id="admin-products-panel" hidden><div class="section-toolbar"><h2>套餐目录</h2><button id="new-product" class="button primary" type="button" hidden><i data-lucide="plus"></i>新增套餐</button></div><div class="table-scroll"><table><thead><tr><th>套餐</th><th>用途 / 等级</th><th>时长</th><th>价格</th><th>销售上限</th><th>状态</th><th><span class="sr-only">操作</span></th></tr></thead><tbody id="admin-products-body"></tbody></table></div><p id="admin-products-empty" class="empty-state" hidden>暂无套餐</p></section>
         <section id="admin-channels-panel" hidden aria-label="支付渠道设置">
+          <section class="polygon-channel-settings"><div class="section-toolbar"><h2>USDT（Polygon PoS）</h2><span id="polygon-mode" class="badge"></span></div>
+            <p id="polygon-config-summary" class="subtle">正在加载</p>
+            <form id="polygon-settings-form" hidden><label class="checkbox-row"><input id="polygon-enabled" type="checkbox"><span>开放 Polygon USDT 收款</span></label>
+              <p class="subtle">固定 USDT 基价加小于 0.01 USDT 的订单尾数；币安确认充值入账后发码。关闭只暂停新购买，已有转账继续核验。</p>
+              <div id="polygon-owner-actions" hidden><label class="checkbox-row"><input id="polygon-settings-accepted" type="checkbox" required><span>我已核对当前环境和收款地址，确认保存。</span></label><button id="polygon-save" type="submit" class="button primary">保存 Polygon 开关</button></div>
+            </form><p id="polygon-config-result" class="subtle" role="status"></p>
+          </section>
           <div class="section-toolbar"><h2>支付渠道</h2><span id="channel-mode" class="badge"></span></div>
           <div id="channel-loading" class="subtle" role="status">正在加载</div>
           <form id="channel-form" class="channel-settings" hidden>
@@ -101,11 +121,11 @@
       </section>
       {% endif %}
     </main>
-    <footer><span>© {{ brand_name }}</span><span id="payment-methods-footer">由 Stripe 处理付款</span></footer>
+    <footer><span>© {{ brand_name }}</span><span id="payment-methods-footer">支付结果以实际到账为准</span></footer>
   </div>
   <dialog id="login-dialog" aria-labelledby="login-title"><div class="dialog-heading"><h2 id="login-title">登录会员中心</h2><button class="icon-button" data-close type="button" title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></div><div class="login-mark"><i data-lucide="send"></i></div><p id="login-status" class="text-center" role="status">正在创建登录请求</p><div id="login-code-wrap" class="login-code" hidden><span class="subtle">确认码</span><strong id="login-code" class="mono"></strong></div><a id="telegram-link" class="button primary full-width" target="_blank" rel="noopener noreferrer" hidden>前往 Telegram 确认<i data-lucide="arrow-up-right"></i></a><button id="retry-login" type="button" class="button full-width" hidden>重新登录</button></dialog>
   <dialog id="checkout-dialog" aria-labelledby="checkout-title"><div class="dialog-heading"><h2 id="checkout-title">确认购买</h2><button class="icon-button" data-close type="button" title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></div><div class="checkout-summary"><div><h3 id="checkout-product"></h3><p id="checkout-description" class="subtle"></p></div><strong id="checkout-price"></strong></div><p id="checkout-terms" class="legal-copy"></p><label class="checkbox-row"><input id="accept-terms" type="checkbox"><span>我已阅读并同意购买须知，确认所选套餐及不退款规则。</span></label><p id="checkout-error" class="notice danger" hidden role="alert"></p><button id="pay-button" type="button" class="button primary full-width" disabled><span id="pay-button-label">前往付款</span><i data-lucide="arrow-up-right"></i></button></dialog>
-  <dialog id="product-dialog" aria-labelledby="product-dialog-title"><form id="product-form"><div class="dialog-heading"><h2 id="product-dialog-title">编辑套餐</h2><button class="icon-button" data-close type="button" title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></div><label class="form-field">套餐名称<input name="title" required maxlength="120"></label><div class="form-grid"><label class="form-field">用途<select name="kind"><option value="register">注册新账号</option><option value="renew">续期已有账号</option></select></label><label class="form-field">等级<select name="tier"><option value="normal">普通</option><option value="vip">白名单</option></select></label><label class="form-field">时长<select name="months"><option value="1">1 个月</option><option value="3">3 个月</option><option value="6">6 个月</option><option value="12">12 个月</option></select></label><label class="form-field">价格（人民币元）<input name="price" type="number" min="0" max="999999.99" step="0.01" required></label></div><label class="form-field">销售上限<input name="sales_limit" type="number" min="1" step="1" placeholder="不限"></label><label class="checkbox-row"><input name="active" type="checkbox"><span>上架销售</span></label><label class="checkbox-row"><input id="confirm-product-change" type="checkbox" required><span>我已确认价格与上架状态。</span></label><p id="product-error" class="notice danger" hidden role="alert"></p><button type="submit" class="button primary full-width"><i data-lucide="save"></i>保存套餐</button></form></dialog>
+  <dialog id="product-dialog" aria-labelledby="product-dialog-title"><form id="product-form"><div class="dialog-heading"><h2 id="product-dialog-title">编辑套餐</h2><button class="icon-button" data-close type="button" title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></div><label class="form-field">套餐名称<input name="title" required maxlength="120"></label><div class="form-grid"><label class="form-field">用途<select name="kind"><option value="register">注册新账号</option><option value="renew">续期已有账号</option></select></label><label class="form-field">等级<select name="tier"><option value="normal">普通</option><option value="vip">白名单</option></select></label><label class="form-field">时长<select name="months"><option value="1">1 个月</option><option value="3">3 个月</option><option value="6">6 个月</option><option value="12">12 个月</option></select></label><label class="form-field">价格（人民币元）<input name="price" type="number" min="0" max="999999.99" step="0.01" required></label></div><label class="form-field">销售上限<input name="sales_limit" type="number" min="1" step="1" placeholder="不限"></label><label class="form-field">固定 USDT 基价（0 表示不以 USDT 销售）<input name="price_usdt" type="number" min="0" max="999999.99" step="0.01" required></label><label class="checkbox-row"><input name="active" type="checkbox"><span>上架销售</span></label><label class="checkbox-row"><input id="confirm-product-change" type="checkbox" required><span>我已确认价格与上架状态。</span></label><p id="product-error" class="notice danger" hidden role="alert"></p><button type="submit" class="button primary full-width"><i data-lucide="save"></i>保存套餐</button></form></dialog>
   <dialog id="review-dialog" aria-labelledby="review-title"><form id="review-form"><div class="dialog-heading"><h2 id="review-title">记录核查结论</h2><button class="icon-button" data-close type="button" title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></div><p id="review-order-id" class="mono subtle"></p><label class="form-field">处理结论<textarea name="note" required minlength="3" maxlength="1000" rows="5"></textarea></label><p id="review-error" class="notice danger" hidden role="alert"></p><button type="submit" class="button primary full-width"><i data-lucide="check"></i>确认记录</button></form></dialog>
   <dialog id="archive-dialog" aria-labelledby="archive-title"><form id="archive-form"><div class="dialog-heading"><h2 id="archive-title">归档订单</h2><button class="icon-button" data-close type="button" title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></div><p id="archive-summary"></p><ul id="archive-order-list" class="archive-order-list mono"></ul><p class="subtle">归档仅整理列表，可随时恢复。订单、原码和已兑换权益保留；未完成付款和补单仍可能继续。</p><label class="checkbox-row"><input id="archive-accepted" type="checkbox" required><span>我已核对所选订单，确认本次操作。</span></label><p id="archive-error" class="notice danger" hidden role="alert"></p><button id="archive-submit" type="submit" class="button primary full-width"><i data-lucide="archive"></i><span id="archive-submit-label">确认归档</span></button></form></dialog>
   <div id="toast" class="toast" role="status" hidden></div>

@@ -3,7 +3,7 @@
 from datetime import datetime
 from uuid import uuid4
 
-from sqlalchemy import BigInteger, Boolean, Column, DateTime, Integer, JSON, String, Text
+from sqlalchemy import BigInteger, Boolean, Column, DateTime, Integer, JSON, String, Text, UniqueConstraint
 
 from bot.sql_helper import Base
 
@@ -20,6 +20,7 @@ class Product(Base):
     tier = Column(String(16), nullable=False)
     months = Column(Integer, nullable=False)
     price_fen = Column(Integer, nullable=False, default=0)
+    usdt_price_units = Column(BigInteger, nullable=False, default=0, server_default="0")
     version = Column(Integer, nullable=False, default=1)
     active = Column(Boolean, nullable=False, default=False)
     sales_limit = Column(Integer, nullable=True)
@@ -35,7 +36,9 @@ class Order(Base):
     product_snapshot = Column(JSON, nullable=False)
     payment_channels_snapshot = Column(JSON, nullable=True)
     amount_fen = Column(Integer, nullable=False)
-    currency = Column(String(3), nullable=False, default="cny")
+    currency = Column(String(8), nullable=False, default="cny")
+    provider = Column(String(16), nullable=False, default="stripe", server_default="stripe")
+    amount_usdt_units = Column(BigInteger, nullable=True)
     mode = Column(String(8), nullable=False, default="live", server_default="live")
     terms_version = Column(String(64), nullable=False)
     terms_hash = Column(String(64), nullable=False)
@@ -124,6 +127,50 @@ class PaymentChannelConfig(Base):
     version = Column(Integer, nullable=False, default=1)
     channels = Column(JSON, nullable=False)
     stripe_configuration_id = Column(String(255), nullable=True)
+
+
+class PolygonSalesConfig(Base):
+    __tablename__ = "payment_polygon_config"
+    id = Column(Integer, primary_key=True, autoincrement=False)
+    enabled = Column(Boolean, nullable=False, default=False)
+    version = Column(Integer, nullable=False, default=1)
+
+
+class PolygonQuote(Base):
+    __tablename__ = "payment_polygon_quotes"
+    __table_args__ = (UniqueConstraint("address", "amount_units", name="uq_polygon_quote_amount"),)
+    id = Column(String(32), primary_key=True)
+    buyer_tg = Column(BigInteger, nullable=False, index=True)
+    product_id = Column(String(32), nullable=False)
+    product_snapshot = Column(JSON, nullable=False)
+    terms_version = Column(String(64), nullable=False)
+    address = Column(String(42), nullable=False)
+    network = Column(String(16), nullable=False)
+    amount_units = Column(BigInteger, nullable=False)
+    start_block = Column(BigInteger, nullable=False)
+    created_at = Column(DateTime, nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    confirmed_at = Column(DateTime, nullable=True)
+
+
+class PolygonCursor(Base):
+    __tablename__ = "payment_polygon_cursors"
+    address = Column(String(42), primary_key=True)
+    block_number = Column(BigInteger, nullable=False)
+    revision = Column(Integer, nullable=False, default=0, server_default="0")
+
+
+class PolygonReceipt(Base):
+    __tablename__ = "payment_polygon_receipts"
+    __table_args__ = (UniqueConstraint("tx_hash", "log_index", name="uq_polygon_transfer"),)
+    order_id = Column(String(32), primary_key=True)
+    tx_hash = Column(String(66), nullable=False)
+    log_index = Column(Integer, nullable=False)
+    block_number = Column(BigInteger, nullable=False)
+    amount_units = Column(BigInteger, nullable=False)
+    deposit_id = Column(String(128), nullable=True, unique=True)
+    received_at = Column(DateTime, nullable=False)
+    credited_at = Column(DateTime, nullable=True)
 
 
 class RegistrationReservation(Base):

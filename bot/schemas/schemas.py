@@ -159,6 +159,8 @@ class Payments(BaseModel):
     # Test-mode checkout is deny-by-default. Only these Telegram IDs may use
     # Stripe sandbox money against the configured database.
     test_buyer_ids: List[int] = Field(default_factory=list)
+    polygon_receive_address: str = ""
+    binance_network: str = "POL"
 class RedEnvelope(BaseModel):
     status: bool = True  # 是否开启红包
     allow_private: bool = True # 是否允许专属红包

@@ -13,6 +13,9 @@ from .channels import ChannelError, LEGACY_CHANNELS, normalize_channels
 from .models import (Audit, Code, Event, Order, PaymentCapacity, PaymentChannelConfig,
                      Product, RegistrationReservation, Task, new_id)
 from .entitlements import append_months, ensure_legacy_period, start_success, sync_projection, EntitlementError
+from .polygon_payments import PolygonPayments, MIN_USDT_UNITS, MAX_USDT_UNITS
+from .polygon_chain import PolygonError
+from .binance_deposits import DepositError
 
 
 TERMS_VERSION = "2026-09-09-v1"
@@ -68,7 +71,7 @@ def _capacity_lock(session):
 
 
 def actual_account_count(session):
-    inspector = inspect(session.get_bind())
+    inspector = inspect(session.connection())
     tables = [name for name in ("emby", "emby2") if inspector.has_table(name)]
     if not tables:
         return 0
@@ -140,12 +143,24 @@ def seed_products(session):
             session.add(PaymentChannelConfig(mode=mode, version=1, channels=dict(LEGACY_CHANNELS)))
 
 
-class PaymentService:
-    def __init__(self, session_factory, settings, gateway, notification_handler=None):
+class PaymentService(PolygonPayments):
+    def __init__(self, session_factory, settings, gateway=None, notification_handler=None):
         self.session_factory = session_factory
         self.settings = settings
-        self.gateway = gateway
+        self._gateway = gateway
         self.notification_handler = notification_handler
+
+    @property
+    def gateway(self):
+        if self._gateway is None:
+            from .stripe_gateway import StripeGateway
+            self.settings.validate_stripe()
+            self._gateway = StripeGateway(self.settings)
+        return self._gateway
+
+    @gateway.setter
+    def gateway(self, value):
+        self._gateway = value
 
     @property
     def terms_version(self):
@@ -178,14 +193,14 @@ class PaymentService:
     @staticmethod
     def _product(product):
         return {key: getattr(product, key) for key in (
-            "id", "title", "kind", "tier", "months", "price_fen", "version", "active", "sales_limit",
+            "id", "title", "kind", "tier", "months", "price_fen", "usdt_price_units", "version", "active", "sales_limit",
         )}
 
     @staticmethod
     def _order(order):
         result = {key: getattr(order, key) for key in (
             "id", "buyer_tg", "product_id", "product_snapshot", "amount_fen", "currency", "terms_version",
-            "mode", "archived_at", "payment_channels_snapshot",
+            "mode", "archived_at", "payment_channels_snapshot", "provider", "amount_usdt_units",
             "accepted_at", "payment_state", "fulfillment_state", "checkout_url", "expires_at", "created_at",
             "stripe_session_id", "stripe_payment_intent_id", "refunded", "dispute_status", "review_required",
         )}
@@ -300,14 +315,19 @@ class PaymentService:
         if not title or len(title) > 120 or type(price) is not int or not 0 <= price <= 99999999:
             raise PaymentError("invalid_product", "套餐名称或价格无效")
         active = data.get("active", False)
-        if type(active) is not bool or (active and price <= 0):
-            raise PaymentError("invalid_product", "上架套餐必须设置有效价格")
+        if type(active) is not bool:
+            raise PaymentError("invalid_product")
         if sales_limit is not None and (type(sales_limit) is not int or sales_limit < 1):
             raise PaymentError("invalid_product", "销售上限必须为正整数")
         with self.session_factory.begin() as session:
             product = session.query(Product).filter_by(id=data.get("id")).with_for_update().first() if data.get("id") else None
             if data.get("id") and product is None:
                 raise PaymentError("not_found")
+            usdt_price = data.get("usdt_price_units", product.usdt_price_units if product else 0)
+            if (type(usdt_price) is not int or usdt_price < 0 or usdt_price > MAX_USDT_UNITS
+                    or usdt_price % 10000 or (0 < usdt_price < MIN_USDT_UNITS)
+                    or (active and price <= 0 and usdt_price <= 0)):
+                raise PaymentError("invalid_product", "请设置有效人民币或 USDT 价格")
             if product is None:
                 product = Product(id=new_id(), version=1)
                 session.add(product)
@@ -315,11 +335,11 @@ class PaymentService:
                 if type(data.get("version")) is not int or data["version"] != product.version:
                     raise PaymentError("product_changed", "套餐已被修改，请刷新后重试")
                 product.version += 1
-            for key, value in dict(title=title, kind=kind, tier=tier, months=months, price_fen=price,
+            for key, value in dict(title=title, kind=kind, tier=tier, months=months, price_fen=price, usdt_price_units=usdt_price,
                                    active=active, sales_limit=sales_limit, updated_at=utcnow()).items():
                 setattr(product, key, value)
             session.add(Audit(actor_tg=actor_tg, action="product_saved", target_id=product.id,
-                              details={"version": product.version, "price_fen": price, "active": active}))
+                              details={"version": product.version, "price_fen": price, "usdt_price_units": usdt_price, "active": active}))
             session.flush()
             return self._product(product)
 
@@ -348,6 +368,8 @@ class PaymentService:
                                                     payment_state="pending", mode=self.mode).filter(
                 Order.expires_at > now).order_by(Order.created_at.desc()).with_for_update().all()
             for previous in pending:
+                if previous.provider != "stripe":
+                    raise PaymentError("polygon_pending_other_payment")
                 if previous.product_snapshot["version"] == product.version and previous.terms_version == terms_version:
                     return self._order(previous)
             sold = session.query(func.count()).select_from(Order).filter(
@@ -433,7 +455,7 @@ class PaymentService:
         order = self.get_order(order_id)
         if order["mode"] != self.mode:
             raise PaymentError("order_mode_mismatch", "订单不属于当前支付环境")
-        if order["stripe_session_id"] or order["payment_state"] != "pending":
+        if order["provider"] != "stripe" or order["stripe_session_id"] or order["payment_state"] != "pending":
             return
         if order["checkout_recovery_required"]:
             return
@@ -628,6 +650,8 @@ class PaymentService:
         return {"ok": True}
 
     def _validate_session(self, order, response):
+        if order.provider != "stripe":
+            raise PaymentError("stripe_order_mismatch")
         if order.mode != self.mode:
             raise PaymentError("order_mode_mismatch", "订单不属于当前支付环境")
         intent = response.get("payment_intent")
@@ -699,6 +723,10 @@ class PaymentService:
         order = self.get_order(order_id)
         if order["mode"] != self.mode:
             raise PaymentError("order_mode_mismatch", "订单不属于当前支付环境")
+        if order["provider"] == "polygon":
+            if session_hint:
+                raise PaymentError("stripe_order_mismatch")
+            return await self.reconcile_polygon_order(order_id)
         session_id = order["stripe_session_id"] or session_hint
         if not session_id:
             await self._create_checkout(order_id)
@@ -763,6 +791,12 @@ class PaymentService:
                 raise PaymentError("order_mode_mismatch", "订单不属于当前支付环境")
             if order.payment_state != "paid":
                 raise PaymentError("payment_unconfirmed")
+            if order.provider == "polygon":
+                from .models import PolygonReceipt
+                receipt = session.get(PolygonReceipt, order_id)
+                if not receipt or not receipt.credited_at or (order.product_snapshot["kind"] == "register"
+                        and not order.seat_reserved and order.fulfillment_state != "issued"):
+                    raise PaymentError("payment_unconfirmed")
             code = session.query(Code).filter_by(order_id=order_id).first()
             if not code:
                 _, digest, ciphertext = self.cipher.issue(order_id, prefix="DuSheng-Pay_")
@@ -833,6 +867,7 @@ class PaymentService:
                 break
             task_id, token, task_type, payload, attempts = claimed
             error = None
+            terminal = False
             try:
                 if task_type == "create_checkout":
                     await self._create_checkout(payload["order_id"])
@@ -842,6 +877,8 @@ class PaymentService:
                     await self._process_event(payload["event_id"])
                 elif task_type == "reconcile_order":
                     await self.reconcile_order(payload["order_id"])
+                elif task_type == "polygon_transaction":
+                    await self.check_polygon_transaction(payload["order_id"], payload["tx_hash"])
                 elif task_type == "fulfill_order":
                     self.fulfill_order(payload["order_id"])
                 elif task_type in {"notify_code", "notify_review"}:
@@ -851,7 +888,7 @@ class PaymentService:
                 else:
                     raise PaymentError("unknown_task_type")
             except Exception as exc:
-                error = exc.code if isinstance(exc, PaymentError) else type(exc).__name__
+                error = exc.code if isinstance(exc, (PaymentError, PolygonError, DepositError)) else type(exc).__name__
                 from bot import LOGGER
                 from .diagnostics import log_payment_error
                 # Periodic reconciliation recreates ordinary tasks after a
@@ -865,15 +902,23 @@ class PaymentService:
                 if stale_mode_task:
                     if task_type != "recover_checkout":
                         error = None
+                elif task_type == "polygon_transaction" and error in {
+                        "polygon_transfer_mismatch", "polygon_transaction_failed", "polygon_transfer_used",
+                        "polygon_invalid_transaction", "order_mode_mismatch"}:
+                    terminal = True
+                elif task_type == "polygon_transaction" and attempts >= 20 and error == "polygon_pending_confirmation":
+                    # Invalid or never-broadcast hashes must not retry forever.
+                    # Address scanning still discovers any later real payment.
+                    terminal = True
                 else:
                     log_payment_error(LOGGER, "task_" + task_type, exc)
             with self.session_factory.begin() as session:
                 task = session.query(Task).filter_by(id=task_id, lease_token=token).with_for_update().first()
                 if task:
-                    task.state = "pending" if error else "done"
+                    task.state = "failed" if terminal else "pending" if error else "done"
                     task.last_error = error
                     task.lease_token, task.lease_until = None, None
-                    if error:
+                    if error and not terminal:
                         delay = 300 if error == "order_mode_mismatch" else min(3600, 2 ** min(attempts, 11))
                         task.next_run = utcnow() + timedelta(seconds=delay)
             processed += 1

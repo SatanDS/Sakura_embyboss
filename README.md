@@ -939,7 +939,7 @@ docker exec embyboss python3 -c 'import sqlite3;d=sqlite3.connect("file:/emby-au
 
 Stripe 设置入口为 [正式付款方式](https://dashboard.stripe.com/settings/payment_methods) 和 [测试付款方式](https://dashboard.stripe.com/test/settings/payment_methods)。也可从 Dashboard 的「设置 → 支付 → 付款方式」进入；先选对商户账户及正式/测试环境。
 
-支持银行卡、Apple Pay、Google Pay、支付宝和微信支付。所有者可在「销售管理 → 支付渠道」决定开放哪些方式，详见 17.14；只开放当前商户已获批、且支持 CNY Checkout 的渠道。支付宝或微信尚未获批时可以关闭它们，使用已获批的银行卡和钱包。测试环境能用，不代表正式环境获批；开启开关也不能绕过 Stripe 的商户、币种、地区或设备限制。
+Stripe 支持银行卡、Apple Pay、Google Pay、支付宝和微信支付。所有者可在「销售管理 → 支付渠道」决定开放哪些方式，详见 17.14；只开放当前商户已获批、且支持 CNY Checkout 的渠道。支付宝或微信尚未获批时可以关闭它们，使用已获批的银行卡和钱包。测试环境能用，不代表正式环境获批；开启开关也不能绕过 Stripe 的商户、币种、地区或设备限制。另可独立启用 Polygon PoS USDT 收款，部署和币安入账核验详见 17.15。
 
 本项目使用 Stripe 托管 Checkout，CNY 单次付款，每单一份商品、一张码，不自动续费。没有个人收款码回调或人工确认收款功能，用户截图、点击「已付款」和成功页都不能代替服务端到账验证。Telegram 内数字服务遵循 Stars 规则，本节部署的是独立网站。
 
@@ -1351,6 +1351,8 @@ docker compose logs --since=10m --tail=300 embyboss 2>&1 | grep -F 'payment_fail
 
 关闭银行卡时会同时关闭两个钱包，服务端也会校验此依赖。全部渠道关闭会暂停新下单，但已创建的付款链接仍可能到账，Webhook、对账、发码和通知继续运行。`payments.enabled: false` 同样会阻止新下单，即使存在已启用渠道。
 
+上述开关管理 Stripe；新增的 Polygon 开关独立保存，关闭全部 Stripe 方式后仍可单独接受 USDT。全局 `payments.enabled: false` 同时停止两种方式的新订单，后台处理继续运行。
+
 渠道保存在 MySQL，测试和正式环境各一份，重启不丢失。首次升级为兼容旧部署保留「支付宝、微信开启；银行卡、两个钱包关闭」的默认值，**升级不会自动开放新渠道**。支付宝/微信未获批的商户应先保持停售，再由所有者关闭未获批渠道并保存正式设置。
 
 每次渠道变更会发布独立的 Stripe 付款方式配置，并核对返回的环境、可用性及实际开关；不修改商户默认配置或既有订单使用的配置。银行卡和钱包通过该配置传入托管 Checkout，钱包不作为 `payment_method_types` 值。Link 和未选择的渠道保持关闭。发布失败或并发保存冲突时保留原设置，按页面反馈处理；网络超时后可直接重试保存。
@@ -1360,3 +1362,56 @@ docker compose logs --since=10m --tail=300 embyboss 2>&1 | grep -F 'payment_fail
 升级按 17.2 备份数据库并构建，再按 17.5 重建 Bot。启动自动执行 `20260912_08`，新增 `payment_channel_configs` 和订单 `payment_channels_snapshot` 字段；历史订单保留空快照以维持原 Checkout 重试参数。数据库和兑换码密钥必须保留，不需要修改 Caddy 或重启 Emby。
 
 验收需要覆盖：非所有者不能保存、关闭渠道不出现在新收银台、全部关闭不能下新单、旧单仍能到账发码、重复回调和补发仍返回原码。银行卡验证正常付款及所需的 3D Secure 流程；钱包分别在兼容设备上验证实际出现、付款、回调及发码。离线模拟和数据库测试不代表商户钱包真实可用，正式宣传前仍需完成每个开放渠道的小额真实付款。参考 [Stripe 付款方式配置](https://docs.stripe.com/payments/payment-method-configurations) 和 [钱包测试要求](https://docs.stripe.com/testing/wallets)。
+
+### 17.15 Polygon PoS USDT 收款与币安入账核验
+
+适用于币安交易所的 **USDT → Polygon PoS** 充值地址。支持顾客从钱包或交易所通过 Polygon 链上转账；不支持 UID／Pay ID 内转，也不使用钱包私钥、助记词、交易或提现 API。Stripe 继续独立运行，旧订单仍由原渠道处理。Polygon 仅支持正式主网，升级默认关闭，不会因迁移自动开始收款。
+
+链 ID 固定为 `137`，代币合约固定为 `0xc2132d05d31c914a87c6611c10748aeb04b58e8f`，精度 6 位。Polygon 生态中的此合约可能显示 USDT／USDT0，程序校验完整合约而非币名。POL 是手续费代币，不能用 POL 代替 USDT 付款。合约参考 [USDT0 官方部署表](https://docs.usdt0.to/technical-documentation/deployments)，链确认使用 [Polygon finalized 区块](https://docs.polygon.technology/pos/concepts/finality)。
+
+**先备份再升级。** 按 17.2 备份 MySQL、`.env`、配置与镜像，拉取代码、构建并重建 Bot。新增 `20260914_09` 迁移仅扩展商品 USDT 价格、订单来源以及报价、链上凭证、扫描游标表。旧订单默认来源为 Stripe，历史人民币金额和快照不变。保留 `TGBOT_PAYMENT_CODE_KEY`，不要恢复旧库覆盖付款数据或回退数据库。
+
+在 `/opt/Tgbot/.env` 配置：
+
+~~~dotenv
+TGBOT_POLYGON_RPC_URL=https://你的支持Polygon主网finalized查询的RPC地址
+TGBOT_BINANCE_API_KEY=币安读取充值记录的APIKey
+TGBOT_BINANCE_API_SECRET=对应的HMACSecret
+~~~
+
+使用本人收款账户的币安 API，允许读取充值记录并限制到业务服务器出口 IP，不开启交易、提现权限。程序仅调用 `GET /sapi/v1/capital/deposit/address` 和 `GET /sapi/v1/capital/deposit/hisrec`，不会操作币安资金。RPC URL 可能包含访问密钥，也作为敏感配置保管。API 秘钥只能填入服务器文件，不粘贴到聊天、网页或 Git。
+
+在现有 `config.json` 的 `payments` 中设置下列字段，保持其余配置及 Stripe 凭据：
+
+~~~json
+"enabled": false,
+"live_mode": true,
+"polygon_receive_address": "从币安复制的完整0x充值地址",
+"binance_network": "POL"
+~~~
+
+`binance_network` 是币安 API 的 Polygon 网络标识，默认 `POL`；如果你的币安账户接口仍使用 `MATIC`，可填写 `MATIC`。程序只接受这两个标识，并且启用时、生成报价时会查询本人币安账户的该网络充值地址，与配置核对。单看地址相同不能证明转对了网络，链上核验仍固定 Polygon 主网。
+
+如果 API 暂时无法读取充值地址、充值记录、账户受限或网络暂停入账，先保持关闭，不以“链上成功”替代币安入账。旧地址仍有未完成订单时，保留对应账户的读取凭据，不能直接换成另一个币安账户。用户提供的截图中最低充值量为大于 0.02 USDT，本实现基价下限取 0.03 USDT；实际开放前还要核对币安当前最低充值量和网络状态。
+
+修改上述配置后运行 `docker compose config --quiet`，再执行 `docker compose up -d --no-deps --no-build --force-recreate embyboss`。只有环境/配置变化时不必再次构建；首次代码升级必须先构建。独立校验公共配置可按 17.3 的脚本把 `settings.validate()` 换成 `settings.validate_common()`；`validate()` 仍包含 Stripe 密钥检查。
+
+所有者登录销售后台后：
+
+1. 在「套餐管理」填写固定 USDT 基价，单位是 USDT，支持两位小数；`0` 表示该套餐不以 USDT 销售。人民币价格独立保存，无汇率换算。若只售 USDT，可将人民币价置 0。
+2. 在「支付渠道」的 Polygon 区域核对收款地址，勾选开启并确认保存。保存会验证 Polygon 主网、最终确认查询以及币安充值地址。普通管理员只读。
+3. 在 Stripe 区域关闭暂不使用的方式。原 Stripe 密钥和回调保留，以处理在途与历史订单。
+4. 确认商品价格后，把 `payments.enabled` 改为 `true` 并重建 Bot。回到购买页选择「USDT（Polygon PoS）」；所有 Stripe 方式关闭且 Polygon 开启时默认选 USDT。
+5. 先使用一张专用测试商品进行真实小额付款，核对链上记录、币安入账、订单和唯一兑换码，再扩大开放范围。自动化测试使用模拟充值，不代表你的币安 API 或账户已验收。
+
+**报价与发码规则：** 每单在固定基价上增加 `0.000001`～`0.009999` USDT 的随机尾数，例如 `2.000000 + 0.001234 = 2.001234 USDT`。付款确认页明确显示基价、尾数和最终精确金额；未勾选须知不能创建正式订单或显示地址。报价 30 分钟有效，用户需按精确金额到账，发送方手续费另付。二维码只编码收款地址，顾客仍需自行核对 Polygon 网络、USDT 和精确金额。
+
+同地址的同一精确金额永久不再分配，包括已过期或未确认的报价，防止旧转账被认领到新订单。每个两位小数基价可分配 9999 种尾数，多个套餐共用相同基价会共用这组额度；用尽时明确拒绝新报价，由所有者调整基价或收款地址，不能删除报价表重新使用。报价有每用户频率限制，同一用户同套餐的未完成订单优先复用，不能通过切换 Stripe/Polygon 创建同时有效的重复付款入口。
+
+系统只认可链 ID、真实代币合约、收款地址、金额和交易成功状态均一致，且所在区块已经最终确认的 `Transfer` 事件；再检查币安的网络、币种、收款地址、交易哈希、金额及充值成功状态。内部划转、待入账、被锁定或需要补 Travel Rule 资料的记录不发码。同一链上事件与币安充值记录均有唯一约束，多次回调式查询、重启或并发核验仍只发原来的一张码。
+
+后台每轮扫描采用持久化游标，RPC 出错时不跳过区块；确认新订单时回查其报价起始区间。用户可以在订单页提交交易哈希辅助核验，哈希不会被视作付款凭证本身，也不能用其他订单的转账领取码。错误哈希会显示核验失败，不无限重试；后续真实付款仍可由地址扫描发现。
+
+订单过期后，只有扫描已追上最终确认链且未发现匹配转账时才释放预留席位。迟到的匹配转账仍会被核验，币安尚未入账时保持待确认；到账后正常发码。迟到注册款若已无席位，记录已付款并通知所有者核查，不能丢弃款项或超售。少付、多付、错链、同单多次转账或长期未入账需人工核查，不自动扣除他人权益，不通过改付款状态强行发码。
+
+关闭全局销售或 Polygon 开关，只暂停新购买；扫描、旧订单查单、发码及通知重试继续。人民币与 USDT 在订单和后台统计中分别展示，不把 USDT 金额算入人民币销售额。核验日志仅输出固定错误码，不包含完整 RPC 密钥、币安签名或 API Secret。
