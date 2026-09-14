@@ -57,6 +57,7 @@ class PaymentUITests(unittest.TestCase):
         self.assertIn('id="shop-maintenance-notice"', self.template)
         self.assertIn('result.sales_enabled !== false', self.javascript)
         self.assertIn('当前暂停新订单', self.javascript)
+        self.assertIn('可以联系服主手动发码', self.javascript)
 
 
 if __name__ == "__main__":

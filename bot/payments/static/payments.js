@@ -140,7 +140,7 @@
   async function loadShop() {
     const result = await api("/products"); state.products = result.products || []; state.terms = result.terms;
     state.salesEnabled = result.sales_enabled !== false;
-    text($("shop-maintenance-notice"), "支付维护中，当前暂停新订单。请关闭此页面，恢复开放后再进行购买。");
+    text($("shop-maintenance-notice"), "支付维护中，当前暂停新订单。请关闭此页面，恢复开放后再进行购买，可以联系服主手动发码。");
     show($("shop-maintenance-notice"), !state.salesEnabled);
     state.channels = result.payment_channels || null;
     const names = Object.keys(channelLabels).filter(key => state.channels?.[key]).map(key => channelLabels[key]);
