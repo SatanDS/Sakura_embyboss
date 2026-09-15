@@ -51,9 +51,15 @@ class Transfer:
     sender: str
     recipient: str
     amount_units: int
+    memo: str = ""
+    binance_tx_hashes: tuple = ()
 
 
 class PolygonGateway:
+    chain_id = CHAIN_ID
+    token_contract = USDT_CONTRACT
+    decimals = USDT_DECIMALS
+
     def __init__(self, rpc_url):
         if not isinstance(rpc_url, str) or any(c.isspace() for c in rpc_url):
             raise PolygonError("polygon_rpc_unconfigured")
@@ -88,7 +94,7 @@ class PolygonGateway:
 
     async def finalized_block(self):
         chain = await self._rpc("eth_chainId", [])
-        if quantity(chain) != CHAIN_ID:
+        if quantity(chain) != self.chain_id:
             raise PolygonError("polygon_wrong_network")
         block = await self._rpc("eth_getBlockByNumber", ["finalized", False])
         if not isinstance(block, dict):
@@ -124,7 +130,7 @@ class PolygonGateway:
         for log in logs:
             if not isinstance(log, dict):
                 raise PolygonError("polygon_invalid_response")
-            if str(log.get("address", "")).lower() != USDT_CONTRACT:
+            if str(log.get("address", "")).lower() != self.token_contract:
                 continue
             topics = log.get("topics")
             if not isinstance(topics, list) or not topics or str(topics[0]).lower() != TRANSFER_TOPIC:
@@ -144,6 +150,11 @@ class PolygonGateway:
                 raise PolygonError("polygon_invalid_response")
             seen.add(index)
             units = int(log["data"], 16)
+            divisor = 10 ** (self.decimals - 6)
+            # Quotes use six decimal places. Never round an underpayment up.
+            if units % divisor:
+                continue
+            units //= divisor
             if units:
                 result.append(Transfer(tx_hash, index, number, block_hash, timestamp,
                                        "0x" + topics[1][-40:].lower(), recipient, units))
@@ -155,7 +166,7 @@ class PolygonGateway:
         if (type(from_block) is not int or type(to_block) is not int or from_block < 0
                 or to_block < from_block or to_block - from_block >= 500):
             raise PolygonError("polygon_invalid_block_range")
-        rows = await self._rpc("eth_getLogs", [{"address": USDT_CONTRACT, "fromBlock": hex(from_block),
+        rows = await self._rpc("eth_getLogs", [{"address": self.token_contract, "fromBlock": hex(from_block),
             "toBlock": hex(to_block), "topics": [TRANSFER_TOPIC, None, "0x" + recipient[2:].rjust(64, "0")]}])
         if not isinstance(rows, list) or len(rows) > 4096:
             raise PolygonError("polygon_invalid_response")

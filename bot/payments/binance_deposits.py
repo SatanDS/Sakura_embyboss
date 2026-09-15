@@ -32,11 +32,26 @@ class BinanceDeposits:
     BASE_URL = "https://api.binance.com"
     ALLOWED_PATHS = frozenset({"/sapi/v1/capital/deposit/address", "/sapi/v1/capital/deposit/hisrec"})
 
-    def __init__(self, api_key, api_secret, network="POL"):
+    def __init__(self, api_key, api_secret, network="POL", memo=""):
         if (not isinstance(api_key, str) or not api_key or not isinstance(api_secret, str) or not api_secret
-                or network not in {"POL", "MATIC"}):
+                or network not in {"POL", "MATIC", "BSC", "TON"}
+                or not isinstance(memo, str) or len(memo) > 128):
             raise DepositError("binance_readonly_unconfigured")
         self._api_key, self._api_secret, self.network = api_key, api_secret, network
+        self.memo = memo
+
+    def normalize_address(self, value):
+        if self.network == "TON":
+            from .ton_chain import address as ton_address
+            return ton_address(value)
+        return address(value)
+
+    def normalize_hash(self, value):
+        if self.network == "TON":
+            from .ton_chain import transaction_hash
+        else:
+            from .polygon_chain import transaction_hash
+        return transaction_hash(value)
 
     async def _get(self, path, params):
         if path not in self.ALLOWED_PATHS:
@@ -60,10 +75,11 @@ class BinanceDeposits:
             raise DepositError("binance_query_failed") from None
 
     async def validate_address(self, expected):
-        expected = address(expected)
+        expected = self.normalize_address(expected)
         data = await self._get("/sapi/v1/capital/deposit/address", {"coin": "USDT", "network": self.network})
         try:
-            matched = isinstance(data, dict) and address(data.get("address")) == expected
+            matched = (isinstance(data, dict) and self.normalize_address(data.get("address")) == expected
+                       and (data.get("tag") or "") == self.memo)
         except PolygonError:
             matched = False
         if not matched:
@@ -75,8 +91,10 @@ class BinanceDeposits:
                 or end_ms - start_ms > 89 * 24 * 60 * 60 * 1000):
             raise DepositError("binance_invalid_window")
         # Do not confuse Binance-internal transfer records with on-chain credit.
-        params = {"coin": "USDT", "txId": transfer.tx_hash, "startTime": start_ms,
-                  "endTime": end_ms, "limit": 1000}
+        params = {"coin": "USDT", "startTime": start_ms, "endTime": end_ms, "limit": 1000}
+        if self.network != "TON":
+            params["txId"] = transfer.tx_hash
+        aliases = getattr(transfer, "binance_tx_hashes", ()) or (transfer.tx_hash,)
         candidate, seen = None, set()
         for page in range(10):
             data = await self._get("/sapi/v1/capital/deposit/hisrec", {**params, "offset": page * 1000})
@@ -85,9 +103,16 @@ class BinanceDeposits:
             for row in data:
                 if not isinstance(row, dict):
                     raise DepositError("binance_invalid_deposit")
-                if (row.get("coin") != "USDT" or row.get("network") != self.network
-                        or str(row.get("txId", "")).lower() != transfer.tx_hash
-                        or str(row.get("address", "")).lower() != transfer.recipient):
+                if row.get("coin") != "USDT" or row.get("network") != self.network:
+                    continue
+                try:
+                    matches = (self.normalize_hash(row.get("txId")) in aliases
+                        and self.normalize_address(row.get("address")) == transfer.recipient
+                        and (row.get("addressTag") or "") == self.memo
+                        and getattr(transfer, "memo", "") == self.memo)
+                except PolygonError:
+                    matches = False
+                if not matches:
                     continue
                 if type(row.get("transferType")) not in (int, str) or row["transferType"] not in (0, "0"):
                     continue
@@ -111,4 +136,26 @@ class BinanceDeposits:
                 candidate = deposit_id
             if len(data) < 1000:
                 return candidate
+        raise DepositError("binance_query_incomplete")
+
+    async def recent_deposits(self, start_ms, end_ms):
+        """Bounded discovery; the separate proof/credit path still verifies every match.
+
+        Re-read the full window on each pass, including expired orders. An offset
+        is never persisted across changing Binance results, so delayed deposits
+        and process interruption cannot leave a permanently skipped range.
+        """
+        if (type(start_ms) is not int or type(end_ms) is not int or start_ms < 0
+                or end_ms < start_ms or end_ms - start_ms > 89 * 86400000):
+            raise DepositError("binance_invalid_window")
+        result = []
+        for page in range(10):
+            rows = await self._get("/sapi/v1/capital/deposit/hisrec", {
+                "coin": "USDT", "startTime": start_ms, "endTime": end_ms,
+                "offset": page * 1000, "limit": 1000})
+            if not isinstance(rows, list) or len(rows) > 1000 or any(not isinstance(r, dict) for r in rows):
+                raise DepositError("binance_invalid_deposit")
+            result.extend(rows)
+            if len(rows) < 1000:
+                return result
         raise DepositError("binance_query_incomplete")

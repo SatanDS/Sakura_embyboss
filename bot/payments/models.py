@@ -173,6 +173,63 @@ class PolygonReceipt(Base):
     credited_at = Column(DateTime, nullable=True)
 
 
+def _network_models(prefix):
+    """Isolate new networks without rewriting existing Polygon payment evidence."""
+    config = type(prefix.title() + "SalesConfig", (Base,), {
+        "__tablename__": "payment_" + prefix + "_config",
+        "id": Column(Integer, primary_key=True, autoincrement=False),
+        "enabled": Column(Boolean, nullable=False, default=False),
+        "version": Column(Integer, nullable=False, default=1),
+    })
+    quote = type(prefix.title() + "Quote", (Base,), {
+        "__tablename__": "payment_" + prefix + "_quotes",
+        "__table_args__": (UniqueConstraint("address", "amount_units", name="uq_" + prefix + "_quote_amount"),),
+        "id": Column(String(32), primary_key=True),
+        "buyer_tg": Column(BigInteger, nullable=False, index=True),
+        "product_id": Column(String(32), nullable=False),
+        "product_snapshot": Column(JSON, nullable=False),
+        "terms_version": Column(String(64), nullable=False),
+        "address": Column(String(66), nullable=False),
+        "memo": Column(String(128), nullable=False, default=""),
+        "network": Column(String(16), nullable=False),
+        "amount_units": Column(BigInteger, nullable=False),
+        "start_block": Column(BigInteger, nullable=False),
+        "created_at": Column(DateTime, nullable=False),
+        "expires_at": Column(DateTime, nullable=False),
+        "confirmed_at": Column(DateTime, nullable=True),
+    })
+    cursor = type(prefix.title() + "Cursor", (Base,), {
+        "__tablename__": "payment_" + prefix + "_cursors",
+        "address": Column(String(66), primary_key=True),
+        "block_number": Column(BigInteger, nullable=False),
+        "revision": Column(Integer, nullable=False, default=0, server_default="0"),
+    })
+    receipt = type(prefix.title() + "Receipt", (Base,), {
+        "__tablename__": "payment_" + prefix + "_receipts",
+        "__table_args__": (UniqueConstraint("tx_hash", "log_index", name="uq_" + prefix + "_transfer"),),
+        "order_id": Column(String(32), primary_key=True),
+        "tx_hash": Column(String(66), nullable=False),
+        "log_index": Column(Integer, nullable=False),
+        "block_number": Column(BigInteger, nullable=False),
+        "amount_units": Column(BigInteger, nullable=False),
+        "deposit_id": Column(String(128), nullable=True, unique=True),
+        "received_at": Column(DateTime, nullable=False),
+        "credited_at": Column(DateTime, nullable=True),
+    })
+    return config, quote, cursor, receipt
+
+
+BscSalesConfig, BscQuote, BscCursor, BscReceipt = _network_models("bsc")
+TonSalesConfig, TonQuote, TonCursor, TonReceipt = _network_models("ton")
+
+
+class ChainDepositClaim(Base):
+    """One Binance deposit can only ever fulfill one order across all chains."""
+    __tablename__ = "payment_chain_deposit_claims"
+    deposit_id = Column(String(128), primary_key=True)
+    order_id = Column(String(32), nullable=False, unique=True)
+
+
 class RegistrationReservation(Base):
     __tablename__ = "payment_registration_reservations"
     key = Column(String(100), primary_key=True)

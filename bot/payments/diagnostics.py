@@ -12,6 +12,7 @@ _CHECKOUT_PARAM = re.compile(
 )
 _OPERATIONS = frozenset({
     "polygon_scan", "polygon_config", "task_polygon_transaction",
+    "bsc_scan", "bsc_config", "ton_scan", "ton_config",
     "request", "worker", "checkout", "webhook", "webhook_tasks",
     "task_create_checkout", "task_stripe_event", "task_reconcile_order",
     "task_fulfill_order", "task_notify_code", "task_notify_review",

@@ -12,13 +12,16 @@
   let channelSaving = false;
   let channelLoading = false;
   let polygonSettings = null;
+  let networkRequest = 0;
+  let quoteRequest = 0;
+  const chainLabels = { polygon: "Polygon PoS", bsc: "BNB Smart Chain (BEP20)", ton: "TON" };
   const state = { user: null, products: [], orders: [], terms: null, kind: "register", selected: null, editing: null, review: null, code: null, poll: null, orderPoll: null, orderPollStarted: 0, refreshing: false, checkoutInFlight: false };
   const labels = { pending: "待支付", paid: "已支付", expired: "已过期", issued: "已发码", claimed: "兑换处理中", redeemed: "已兑换", held: "暂停使用", review: "待核查", fulfilled: "已发码", failed: "待处理" };
   const errors = {
-    polygon_sales_disabled: "Polygon 收款暂未开放。", polygon_live_only: "Polygon 收款仅在正式环境开放。",
+    polygon_sales_disabled: "此网络的 USDT 收款暂未开放。", polygon_live_only: "USDT 收款仅在正式环境开放。",
     polygon_quote_expired: "报价已过期，请重新选择套餐。", polygon_quote_limit: "生成报价过于频繁，请稍后再试。",
     polygon_pending_other_payment: "这个套餐已有待付款订单，请先在我的订单中查看，避免重复付款。",
-    polygon_rpc_unconfigured: "Polygon 服务尚未配置，请联系服主。", polygon_rpc_unavailable: "链上查询暂不可用，请稍后再试。",
+    polygon_rpc_unconfigured: "此网络的收款服务尚未配置，请联系服主。", polygon_rpc_unavailable: "链上查询暂不可用，请稍后再试。",
     polygon_rpc_stale: "链上数据更新延迟，请稍后再试。", polygon_wrong_network: "收款节点的网络配置不符，请联系服主。",
     polygon_finality_unavailable: "暂时无法确认链上最终状态，请稍后再试。", polygon_address_changed: "收款地址已调整，请重新获取报价。",
     binance_readonly_unconfigured: "收款平台查询尚未配置，请联系服主。", binance_query_failed: "收款平台查询暂不可用，请稍后再试。",
@@ -159,13 +162,21 @@
     show($("shop-maintenance-notice"), !state.salesEnabled);
     state.channels = result.payment_channels || null;
     state.polygon = result.polygon || {};
-    const polygonOpen = state.polygon.enabled && state.polygon.configured && state.polygon.mode === "live";
+    state.networks = (result.usdt_networks || [{ ...state.polygon, chain: "polygon", label: chainLabels.polygon }])
+      .filter(item => Object.hasOwn(chainLabels, item.chain) && item.enabled && item.configured && item.mode === "live");
+    if (!state.networks.some(item => item.chain === state.chain)) state.chain = state.networks[0]?.chain;
+    $("purchase-network").replaceChildren(...state.networks.map(item => {
+      const option = node("option", chainLabels[item.chain]); option.value = item.chain; return option;
+    }));
+    $("purchase-network").value = state.chain || "";
+    const polygonOpen = state.networks.length > 0;
     $("purchase-currency").querySelector('[value="usdt"]').hidden = !polygonOpen;
     if (!state.currency) state.currency = polygonOpen && !Object.values(state.channels || {}).some(Boolean) ? "usdt" : "cny";
     if (!polygonOpen && state.currency === "usdt") state.currency = "cny";
     $("purchase-currency").value = state.currency;
+    show($("purchase-network-wrap"), state.currency === "usdt");
     const names = Object.keys(channelLabels).filter(key => state.channels?.[key]).map(key => channelLabels[key]);
-    text($("payment-methods-footer"), state.currency === "usdt" ? "USDT · Polygon PoS · 到账发码" : names.length ? names.join(" / ") + " · 由 Stripe 处理付款" : "由 Stripe 处理付款");
+    text($("payment-methods-footer"), state.currency === "usdt" ? `USDT · ${chainLabels[state.chain] || ""} · 到账发码` : names.length ? names.join(" / ") + " · 由 Stripe 处理付款" : "由 Stripe 处理付款");
     text($("terms-text"), result.terms?.text || "购买须知暂不可用，请稍后再试。");
     show($("shop-view")); renderProducts();
   }
@@ -183,13 +194,15 @@
       text(card.querySelector(".price strong"), state.currency === "usdt" ? usdt(product.usdt_price_units) : money(product.price_fen)); text(card.querySelector(".product-months"), product.months);
       text(card.querySelector(".product-access"), product.tier === "vip" ? "包含白名单线路权益" : "普通线路权益");
       text(card.querySelector(".product-period"), product.kind === "register" ? "注册成功后开始计时" : "按顺序追加套餐周期");
-      const unavailable = state.currency === "usdt" ? !state.polygon?.enabled || Number(product.usdt_price_units) <= 0
+      const unavailable = state.currency === "usdt" ? !state.networks?.some(item => item.chain === state.chain) || Number(product.usdt_price_units) <= 0
         : Number(product.price_fen) <= 0 || (state.channels && !Object.values(state.channels).some(Boolean));
       const buy = card.querySelector(".product-buy"); buy.disabled = !state.salesEnabled || !state.terms?.version || unavailable;
       buy.addEventListener("click", () => selectProduct(product)); $("products").append(card);
     }); iconRefresh();
   }
   async function selectProduct(product) {
+    const requestId = ++quoteRequest;
+    const chain = state.chain;
     if (!state.user) { startLogin(); return; }
     state.selected = product; state.quote = null; state.checkoutCurrency = state.currency;
     $("checkout-dialog").dataset.currency = state.currency;
@@ -202,13 +215,13 @@
     if (state.currency === "usdt") {
       text($("checkout-price"), usdt(product.usdt_price_units));
       try {
-        const quote = await api("/polygon/quotes", { method: "POST", body: JSON.stringify({ product_id: product.id, product_version: product.version, terms_version: state.terms.version }) });
-        if (state.selected !== product || !$("checkout-dialog").open) return;
+        const quote = await api(`/usdt/${chain}/quotes`, { method: "POST", body: JSON.stringify({ product_id: product.id, product_version: product.version, terms_version: state.terms.version }) });
+        if (requestId !== quoteRequest || state.selected !== product || !$("checkout-dialog").open) return;
         state.quote = quote; text($("checkout-price"), quote.amount + " USDT");
         text($("checkout-product"), productTitle(quote.product));
-        text($("checkout-description"), `${quote.product.months} 个月 · Polygon PoS · 基价 ${quote.base_amount} + 订单尾数 ${quote.tail_amount} USDT。请按最终精确金额转账，手续费另付。`);
+        text($("checkout-description"), `${quote.product.months} 个月 · ${chainLabels[quote.chain || "polygon"]} · 基价 ${quote.base_amount} + 订单尾数 ${quote.tail_amount} USDT。请按最终精确金额转账，手续费另付。`);
         $("accept-terms").disabled = false; text($("pay-button-label"), "确认金额并查看收款地址");
-      } catch (error) { displayError("checkout-error", error); text($("pay-button-label"), "暂时无法生成报价"); }
+      } catch (error) { if (requestId === quoteRequest) { displayError("checkout-error", error); text($("pay-button-label"), "暂时无法生成报价"); } }
     }
   }
   function primeCheckoutWindow(checkoutWindow) {
@@ -227,7 +240,7 @@
       if (!state.quote) return;
       state.checkoutInFlight = true; $("pay-button").disabled = true;
       try {
-        const result = await api(`/polygon/quotes/${encodeURIComponent(state.quote.id)}/confirm`, { method: "POST", body: JSON.stringify({ accepted: true, terms_version: state.terms.version }) });
+        const result = await api(`/usdt/${state.quote.chain || "polygon"}/quotes/${encodeURIComponent(state.quote.id)}/confirm`, { method: "POST", body: JSON.stringify({ accepted: true, terms_version: state.terms.version }) });
         window.location.assign("/payments/shop/orders/" + encodeURIComponent(result.order.id));
       } catch (error) { displayError("checkout-error", error); state.checkoutInFlight = false; $("pay-button").disabled = false; }
       return;
@@ -388,7 +401,7 @@
       text($("payment-waiting-text"), "请不要重复付款。页面会自动更新，完成后可在此查看兑换码。");
       scheduleOrderPoll();
     } else stopOrderPoll();
-    if (order.provider === "polygon") await loadPolygonPayment(order);
+    if (Object.hasOwn(chainLabels, order.provider)) await loadPolygonPayment(order);
     show($("order-view")); iconRefresh();
   }
   function stopOrderPoll() {
@@ -415,9 +428,13 @@
     catch (error) { toast(errorMessage(error)); } finally { $("reveal-code").disabled = false; }
   }
   async function loadPolygonPayment(order) {
-    const data = await api(`/polygon/orders/${encodeURIComponent(order.id)}`);
+    const data = await api(`/usdt/${order.provider}/orders/${encodeURIComponent(order.id)}`);
     state.polygonOrder = data;
-    text($("payment-methods-footer"), "USDT · Polygon PoS · 到账核验");
+    text($("payment-methods-footer"), `USDT · ${chainLabels[order.provider]} · 到账核验`);
+    text($("polygon-payment-title"), `USDT · ${chainLabels[order.provider]}`);
+    text($("polygon-memo"), data.memo || ""); show($("polygon-memo-wrap"), Boolean(data.memo));
+    $("polygon-tx-hash").pattern = order.provider === "ton" ? "([0-9a-fA-F]{64}|0x[0-9a-fA-F]{64}|[A-Za-z0-9_+\\x2F\\x2D]{43}=?)" : "0x[0-9a-fA-F]{64}";
+    $("polygon-tx-hash").placeholder = order.provider === "ton" ? "交易哈希（十六进制或 Base64）" : "0x…";
     show($("continue-payment"), false); show($("polygon-payment"));
     const pending = order.payment_state === "pending";
     const expiry = new Date(/(Z|[+-]\d{2}:\d{2})$/.test(data.expires_at) ? data.expires_at : data.expires_at + "Z");
@@ -425,7 +442,7 @@
     show($("polygon-transfer-instructions"), needsTransfer);
     text($("polygon-amount"), data.amount); text($("polygon-address"), data.address);
     text($("polygon-expiry"), date(data.expires_at));
-    $("polygon-qr").src = `/payments/polygon/orders/${encodeURIComponent(order.id)}/qr`;
+    $("polygon-qr").src = `/payments/usdt/${order.provider}/orders/${encodeURIComponent(order.id)}/qr`;
     const message = data.state === "credited" ? "充值已入账，兑换码将在确认后发放。"
       : data.state === "awaiting_binance" ? "已检测到链上转账，正在等待收款平台确认入账。请勿再次转账。"
       : needsTransfer ? "请按本单精确金额转账，到账后页面会自动更新。"
@@ -441,32 +458,40 @@
     if (!state.order || !event.currentTarget.reportValidity()) return;
     const button = event.currentTarget.querySelector('button[type="submit"]'); button.disabled = true;
     try {
-      await api(`/polygon/orders/${encodeURIComponent(state.order.id)}/transaction`, { method: "POST", body: JSON.stringify({ tx_hash: $("polygon-tx-hash").value.trim() }) });
+      await api(`/usdt/${state.order.provider}/orders/${encodeURIComponent(state.order.id)}/transaction`, { method: "POST", body: JSON.stringify({ tx_hash: $("polygon-tx-hash").value.trim() }) });
       text($("polygon-check-result"), "已提交核验，系统将检查转账与入账记录。请稍后刷新订单。");
     } catch (error) { text($("polygon-check-result"), errorMessage(error)); }
     finally { button.disabled = false; }
   }
   async function loadPolygonSettings() {
+    const requestId = ++networkRequest;
+    const chain = $("polygon-settings-network").value;
+    polygonSettings = null; $("polygon-save").disabled = true; show($("polygon-settings-form"), false);
+    text($("polygon-config-result"), ""); text($("polygon-config-summary"), "正在加载…");
     try {
-      polygonSettings = await api("/admin/polygon");
+      const result = await api(`/admin/usdt/${chain}`);
+      if (requestId !== networkRequest) return;
+      polygonSettings = result;
+      text($("polygon-enabled-label"), `开放 ${chainLabels[chain]} USDT 收款`);
       $("polygon-enabled").checked = polygonSettings.enabled;
       $("polygon-enabled").disabled = state.user?.role !== "owner";
       $("polygon-settings-accepted").checked = false;
       text($("polygon-mode"), polygonSettings.mode === "live" ? "正式环境" : "测试环境");
-      text($("polygon-config-summary"), polygonSettings.configured ? "收款地址：" + polygonSettings.address : "请先配置 Polygon 收款地址、RPC 和币安只读 API，再开放销售。");
+      text($("polygon-config-summary"), polygonSettings.configured ? "收款地址：" + polygonSettings.address + (polygonSettings.memo ? "；MEMO：" + polygonSettings.memo : "；无需 MEMO") : "请先配置此网络的充值地址、查询服务和币安只读 API，再开放销售。");
       show($("polygon-owner-actions"), state.user?.role === "owner"); show($("polygon-settings-form"));
-    } catch (error) { text($("polygon-config-summary"), errorMessage(error)); }
+    } catch (error) { if (requestId === networkRequest) text($("polygon-config-summary"), errorMessage(error)); }
+    finally { if (requestId === networkRequest) $("polygon-save").disabled = !polygonSettings || state.user?.role !== "owner"; }
   }
   async function savePolygonSettings(event) {
     event.preventDefault();
     if (!polygonSettings || state.user?.role !== "owner" || !event.currentTarget.reportValidity()) return;
-    const button = $("polygon-save"); button.disabled = true;
+    const button = $("polygon-save"); button.disabled = true; $("polygon-settings-network").disabled = true;
     try {
-      polygonSettings = await api("/admin/polygon", { method: "POST", body: JSON.stringify({ mode: polygonSettings.mode, version: polygonSettings.version, enabled: $("polygon-enabled").checked, accepted: true }) });
-      text($("polygon-config-result"), polygonSettings.enabled ? "Polygon 收款已开放。" : "Polygon 新购买已关闭，已有转账继续核验。");
+      polygonSettings = await api(`/admin/usdt/${polygonSettings.chain || "polygon"}`, { method: "POST", body: JSON.stringify({ mode: polygonSettings.mode, version: polygonSettings.version, enabled: $("polygon-enabled").checked, accepted: true }) });
+      text($("polygon-config-result"), polygonSettings.enabled ? `${chainLabels[polygonSettings.chain || "polygon"]} 渠道已开启；新下单还需销售总开关开启。` : "此网络的新购买已关闭，已有转账继续核验。");
       $("polygon-settings-accepted").checked = false;
     } catch (error) { text($("polygon-config-result"), errorMessage(error)); }
-    finally { button.disabled = false; }
+    finally { button.disabled = false; $("polygon-settings-network").disabled = false; }
   }
   async function loadAdmin() {
     if (!requireLogin()) return;
@@ -575,18 +600,21 @@
   $("logout-button").addEventListener("click", async () => { try { await api("/auth/logout", { method: "POST" }); window.location.assign("/payments/shop"); } catch (error) { toast(errorMessage(error)); } });
   document.querySelectorAll("[data-close]").forEach((button) => button.addEventListener("click", () => button.closest("dialog").close()));
   $("login-dialog").addEventListener("close", () => clearTimeout(state.poll));
+  $("checkout-dialog").addEventListener("close", () => { ++quoteRequest; state.quote = null; });
   $("accept-terms").addEventListener("change", () => { $("pay-button").disabled = !$("accept-terms").checked || !state.selected; });
   $("pay-button").addEventListener("click", checkout);
   document.querySelectorAll("[data-kind]").forEach((button) => button.addEventListener("click", () => { state.kind = button.dataset.kind; document.querySelectorAll("[data-kind]").forEach((tab) => tab.setAttribute("aria-selected", String(tab === button))); renderProducts(); }));
   $("tier-filter")?.addEventListener("change", renderProducts);
-  $("purchase-currency")?.addEventListener("change", () => { state.currency = $("purchase-currency").value; renderProducts();
-    text($("payment-methods-footer"), state.currency === "usdt" ? "USDT · Polygon PoS · 到账发码" : "由 Stripe 处理付款"); });
+  $("purchase-currency")?.addEventListener("change", () => { state.currency = $("purchase-currency").value; show($("purchase-network-wrap"), state.currency === "usdt"); renderProducts();
+    text($("payment-methods-footer"), state.currency === "usdt" ? `USDT · ${chainLabels[state.chain]} · 到账发码` : "由 Stripe 处理付款"); });
+  $("purchase-network")?.addEventListener("change", () => { state.chain = $("purchase-network").value; state.quote = null; renderProducts(); text($("payment-methods-footer"), `USDT · ${chainLabels[state.chain]} · 到账发码`); });
+  $("polygon-settings-network")?.addEventListener("change", loadPolygonSettings);
   $("polygon-transaction-form")?.addEventListener("submit", submitPolygonTransaction);
   $("polygon-settings-form")?.addEventListener("submit", savePolygonSettings);
   $("polygon-enabled")?.addEventListener("change", () => { $("polygon-settings-accepted").checked = false; });
-  for (const kind of ["amount", "address"]) $("copy-polygon-" + kind)?.addEventListener("click", async () => {
+  for (const kind of ["amount", "address", "memo"]) $("copy-polygon-" + kind)?.addEventListener("click", async () => {
     if (!state.polygonOrder) return;
-    try { await navigator.clipboard.writeText(state.polygonOrder[kind]); toast(kind === "amount" ? "精确金额已复制" : "收款地址已复制"); }
+    try { await navigator.clipboard.writeText(state.polygonOrder[kind]); toast(kind === "amount" ? "精确金额已复制" : kind === "memo" ? "MEMO 已复制" : "收款地址已复制"); }
     catch (_) { toast("复制失败，请手动选择并复制。"); }
   });
   for (const id of ["order-search", "order-filter", "admin-order-search", "admin-order-filter"]) $(id)?.addEventListener(id.endsWith("search") ? "input" : "change", () => { selectedOrders.clear(); renderOrders(page === "admin"); });

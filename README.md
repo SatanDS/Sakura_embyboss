@@ -1415,3 +1415,51 @@ TGBOT_BINANCE_API_SECRET=对应的HMACSecret
 订单过期后，只有扫描已追上最终确认链且未发现匹配转账时才释放预留席位。迟到的匹配转账仍会被核验，币安尚未入账时保持待确认；到账后正常发码。迟到注册款若已无席位，记录已付款并通知所有者核查，不能丢弃款项或超售。少付、多付、错链、同单多次转账或长期未入账需人工核查，不自动扣除他人权益，不通过改付款状态强行发码。
 
 关闭全局销售或 Polygon 开关，只暂停新购买；扫描、旧订单查单、发码及通知重试继续。人民币与 USDT 在订单和后台统计中分别展示，不把 USDT 金额算入人民币销售额。核验日志仅输出固定错误码，不包含完整 RPC 密钥、币安签名或 API Secret。
+
+### 17.16 USDT 多网络：Polygon、BSC 和 TON
+
+顾客选择「USDT」后，再选择已开放的转账网络。三个网络共用套餐的固定 USDT 基价，并在各自报价中添加六位精度的随机尾数。价格、网络、收款地址和 TON MEMO 在确认订单后固定；同一用户同一套餐存在有效待付款订单时，不允许换网络重复开单。
+
+| 网络 | 核验对象 | 查询服务 | 币安 API 网络值 |
+| --- | --- | --- | --- |
+| Polygon PoS | 链 ID 137，USDT／USDT0 合约见 17.15，精度 6 | 支持 `finalized` 的 Polygon RPC | 按账户查询结果填写 `MATIC` 或 `POL` |
+| BNB Smart Chain（BEP20） | 链 ID 56，Binance-Peg USDT `0x55d398326f99059ff775485246999027b3197955`，精度 18 | 支持 `finalized` 的 BSC RPC | `BSC` |
+| TON | 主网 `-239`，官方 USDT Jetton Master `EQCxE6mUtQJKFnGfaROTKOt1lZbDiiX1kCixRv7Nw2Id_sDs`，精度 6 | Toncenter v3 + API Key | `TON` |
+
+BSC 的链上整数会严格转换为六位 USDT 金额，多出的精度不会四舍五入成有效付款。TON 必须是正确 Jetton 合约的成功转账，动作状态为 `finalized` 且已进入主链确认范围；原生 TON 币不能用于付款。Toncenter 是受信任的链数据提供方，链上证明还必须与币安成功充值记录的网络、币种、地址、交易哈希、金额及 MEMO 一致才发码。[TON USDT 官方合约](https://tether.to/en/supported-protocols/)、[Toncenter v3](https://toncenter.com/api/v3/)。
+
+**升级不会自动开放 BSC 或 TON。** 按 17.2 备份数据库、配置和镜像后升级；启动迁移 `20260915_10` 新建两条链各自的报价、凭证、扫描和开关表，以及跨网络唯一的币安充值认领表。原 Polygon 和 Stripe 订单继续按原来的渠道处理，历史兑换码密钥必须保留。
+
+在 `.env` 增加以下配置，再重建 Bot 容器（只改配置无需重新 build）：
+
+```dotenv
+TGBOT_BSC_RPC_URL=https://bsc-dataseed.bnbchain.org
+TGBOT_TONCENTER_API_KEY=你的Toncenter主网API密钥
+```
+
+Toncenter Key 可从 [toncenter.com](https://toncenter.com/) 的 API Key 入口申请；仅用于读取链上数据，不是钱包私钥。TON 渠道需要该 Key，匿名接口容易限流。RPC 示例是公共服务，节点可用性和最终确认进度应以部署时的检查结果为准；不要以 `latest` 替代最终确认。
+
+在现有 `config.json` 的 `payments` 中增加：
+
+```json
+"bsc_receive_address": "从币安USDT充值页复制的BSC地址",
+"ton_receive_address": "从币安USDT充值页复制的TON地址",
+"ton_receive_memo": ""
+```
+
+地址应逐条从币安对应网络的充值页面复制。BSC 地址即使与 Polygon 相同，也必须分别核对。TON 地址区分大小写；如果币安显示 MEMO／Tag，原样填写到 `ton_receive_memo`，确实没有才留空。后台开启时会同时比对币安返回的地址与 Tag，缺失或填错不能开启。不要把 MEMO 当作可省略说明。订单页会显示并允许复制所需 MEMO；二维码只包含地址。
+
+容器重建完成后，在服务器执行只读检查（不打印密钥、签名 URL、地址或充值记录）：
+
+```bash
+cd /opt/Tgbot
+docker compose exec -T embyboss python3 -B scripts/check_usdt_networks.py bsc ton
+```
+
+每条链都应出现 `BINANCE_ADDRESS_MEMO_OK` 和 `CHECK_OK`。如只配置 BSC，先运行 `... check_usdt_networks.py bsc`；TON 保持关闭即可。检查不会修改商品、创建订单或发码。
+
+所有者进入「销售管理 → 支付渠道 → USDT 收款网络」，在「管理网络」中逐条选择 Polygon、BSC、TON，核对地址和 MEMO，勾选开放及确认后保存。普通管理员只可查看。每条链独立保存并立即生效；`payments.enabled` 仍是所有支付方式的销售总开关。关闭某条链仅禁止新单，不停止旧单核验与交付。
+
+先完成每条新链的小额真实验收，再扩大开放：核对当前币安最低充值量和发送平台最低提现量，以订单显示的含尾数金额**足额到账**，手续费另付，不使用币安 UID／Pay ID 内转。确认币安充值成功、订单已支付、只生成一张 `DuSheng-Pay_` 码；刷新、重复提交交易哈希、对账和补发应返回原码。顾客提交 TON 交易哈希可用十六进制或 Base64，系统按同一链上动作去重；不能用其他链或其他订单的转账领码。
+
+BSC 和 TON 自动发现使用最近最多 88 天的币安充值记录，完整分页后再分别核对 BSC 最终确认的合约日志或 TON 链上动作；不依赖 BSC 公共节点可能禁用的 `eth_getLogs` 扫描接口。每轮重读窗口，延迟入账、过期订单和进程中断不会因旧分页游标被跳过。超过查询窗口的历史转账需人工核查。分页不完整、接口限流或链上状态不确定时不发码，已有凭证和任务保留重试。真实 MySQL、用户币安账户和每条链的小额转账验收需要在部署环境执行，离线测试不能代替。

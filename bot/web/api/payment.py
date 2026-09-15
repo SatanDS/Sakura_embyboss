@@ -22,6 +22,7 @@ from bot import LOGGER
 owner = getattr(__import__('bot'), 'owner', 0)
 admins = getattr(__import__('bot'), 'admins', [])
 bot_name = getattr(__import__('bot'), 'bot_name', 'bot')
+from bot.payments.network_payments import CHAINS, network_service
 from bot.payments.pages import render_page
 from bot.payments.diagnostics import log_payment_error
 try:
@@ -83,10 +84,11 @@ async def payment_worker():
             # Payment is optional; a missing key or provider outage must not
             # terminate the Telegram worker.
             _log_provider_error("worker", exc)
-        try:
-            await _service().scan_polygon()
-        except Exception as exc:
-            _log_provider_error("polygon_scan", exc)
+        for chain in CHAINS:
+            try:
+                await network_service(_service(), chain).scan_polygon()
+            except Exception as exc:
+                _log_provider_error(chain + "_scan", exc)
         await asyncio.sleep(60)
 
 
@@ -255,6 +257,9 @@ class ChannelSettingsRequest(BaseModel):
     accepted: StrictBool
 
 
+UsdtChain = Literal["polygon", "bsc", "ton"]
+
+
 class PolygonQuoteRequest(BaseModel):
     model_config = {'extra': 'forbid'}
     product_id: str = Field(min_length=1, max_length=32)
@@ -274,6 +279,11 @@ class PolygonSettingsRequest(BaseModel):
     version: StrictInt = Field(ge=1)
     enabled: StrictBool
     accepted: StrictBool
+
+
+class NetworkTransactionRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+    tx_hash: str = Field(min_length=43, max_length=66)
 
 
 class PolygonTransactionRequest(BaseModel):
@@ -412,7 +422,9 @@ async def payment_products():
         return {"terms": {"version": settings.terms_version, "hash": _terms_hash(), "text": TERMS_TEXT},
                 "products": service.list_products(), "payment_channels": service.get_channels()["channels"],
                 "sales_enabled": bool(settings.enabled),
-                "polygon": {key: value for key, value in service.polygon_info().items() if key != "address"}}
+                "polygon": {key: value for key, value in service.polygon_info().items() if key not in {"address", "memo"}},
+                "usdt_networks": [{key: value for key, value in network_service(service, chain).polygon_info().items()
+                                   if key not in {"address", "memo"}} for chain in CHAINS]}
     except Exception as exc:
         raise HTTPException(status_code=503, detail=_public_error(exc))
 
@@ -472,6 +484,77 @@ async def payment_orders(request: Request, mode: Literal['current', 'live', 'tes
     return {"orders": service.list_orders(buyer, mode=selected_mode,
                                          archived={'active': False, 'archived': True, 'all': None}[archived]),
             "current_mode": service.mode}
+
+
+@router.post("/usdt/{chain}/quotes")
+async def network_quote(chain: UsdtChain, body: PolygonQuoteRequest, request: Request):
+    buyer = _require_csrf(request)
+    _polygon_limit(buyer, "quote")
+    try:
+        return await network_service(_service(), chain).create_polygon_quote(buyer, body.product_id, body.product_version, body.terms_version)
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=_public_error(exc))
+
+
+@router.post("/usdt/{chain}/quotes/{quote_id}/confirm")
+async def network_confirm(chain: UsdtChain, quote_id: str, body: PolygonConfirmRequest, request: Request):
+    buyer = _require_csrf(request)
+    try:
+        order = network_service(_service(), chain).confirm_polygon_quote(buyer, quote_id, body.accepted, body.terms_version)
+        return {"order": order}
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=_public_error(exc))
+
+
+@router.get("/usdt/{chain}/orders/{order_id}")
+async def network_order(chain: UsdtChain, order_id: str, request: Request):
+    buyer = _session_user(request)
+    try:
+        return network_service(_service(), chain).polygon_order(order_id, buyer)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=_public_error(exc, "not_found"))
+
+
+@router.get("/usdt/{chain}/orders/{order_id}/qr")
+async def network_qr(chain: UsdtChain, order_id: str, request: Request):
+    buyer = _session_user(request)
+    data = network_service(_service(), chain).polygon_order(order_id, buyer)
+    import io
+    import qrcode
+    output = io.BytesIO()
+    qrcode.make(data["address"]).save(output, format="PNG")
+    return Response(output.getvalue(), media_type="image/png")
+
+
+@router.post("/usdt/{chain}/orders/{order_id}/transaction")
+async def network_transaction(chain: UsdtChain, order_id: str, body: NetworkTransactionRequest, request: Request):
+    buyer = _require_csrf(request)
+    _polygon_limit(buyer, "tx")
+    try:
+        return network_service(_service(), chain).submit_polygon_transaction(order_id, buyer, body.tx_hash)
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=_public_error(exc))
+
+
+@router.get("/admin/usdt/{chain}")
+async def admin_network(chain: UsdtChain, request: Request):
+    _require_admin(request)
+    return network_service(_service(), chain).polygon_info()
+
+
+@router.post("/admin/usdt/{chain}")
+async def admin_save_network(chain: UsdtChain, body: PolygonSettingsRequest, request: Request):
+    actor = _require_owner(request)
+    if body.accepted is not True:
+        raise HTTPException(status_code=400, detail="invalid_channel_request")
+    service = _service()
+    if body.mode != service.mode:
+        raise HTTPException(status_code=409, detail="channel_mode_mismatch")
+    try:
+        return await network_service(service, chain).save_polygon(actor, body.version, body.enabled)
+    except Exception as exc:
+        _log_provider_error(chain + "_config", exc)
+        raise HTTPException(status_code=409, detail=_public_error(exc))
 
 
 @router.post("/polygon/quotes")

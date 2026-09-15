@@ -25,6 +25,12 @@ class PaymentSettings:
     binance_api_key: str = ''
     binance_api_secret: str = ''
     binance_network: str = 'POL'
+    bsc_receive_address: str = ''
+    bsc_rpc_url: str = ''
+    ton_receive_address: str = ''
+    ton_receive_memo: str = ''
+    ton_api_url: str = 'https://toncenter.com/api/v3'
+    ton_api_key: str = ''
 
     @classmethod
     def from_config(cls, config):
@@ -48,6 +54,12 @@ class PaymentSettings:
             binance_api_key=os.getenv('TGBOT_BINANCE_API_KEY', ''),
             binance_api_secret=os.getenv('TGBOT_BINANCE_API_SECRET', ''),
             binance_network=str(getattr(section, 'binance_network', 'POL') or 'POL'),
+            bsc_receive_address=str(getattr(section, 'bsc_receive_address', '') or ''),
+            bsc_rpc_url=os.getenv('TGBOT_BSC_RPC_URL', ''),
+            ton_receive_address=str(getattr(section, 'ton_receive_address', '') or ''),
+            ton_receive_memo=str(getattr(section, 'ton_receive_memo', '') or ''),
+            ton_api_url='https://toncenter.com/api/v3',
+            ton_api_key=os.getenv('TGBOT_TONCENTER_API_KEY', ''),
         )
 
     def encryption_key_bytes(self):

@@ -14,6 +14,7 @@ from .models import (Audit, Code, Event, Order, PaymentCapacity, PaymentChannelC
                      Product, RegistrationReservation, Task, new_id)
 from .entitlements import append_months, ensure_legacy_period, start_success, sync_projection, EntitlementError
 from .polygon_payments import PolygonPayments, MIN_USDT_UNITS, MAX_USDT_UNITS
+from .network_payments import CHAINS, network_service
 from .polygon_chain import PolygonError
 from .binance_deposits import DepositError
 
@@ -723,10 +724,10 @@ class PaymentService(PolygonPayments):
         order = self.get_order(order_id)
         if order["mode"] != self.mode:
             raise PaymentError("order_mode_mismatch", "订单不属于当前支付环境")
-        if order["provider"] == "polygon":
+        if order["provider"] in CHAINS:
             if session_hint:
                 raise PaymentError("stripe_order_mismatch")
-            return await self.reconcile_polygon_order(order_id)
+            return await network_service(self, order["provider"]).reconcile_polygon_order(order_id)
         session_id = order["stripe_session_id"] or session_hint
         if not session_id:
             await self._create_checkout(order_id)
@@ -791,9 +792,9 @@ class PaymentService(PolygonPayments):
                 raise PaymentError("order_mode_mismatch", "订单不属于当前支付环境")
             if order.payment_state != "paid":
                 raise PaymentError("payment_unconfirmed")
-            if order.provider == "polygon":
-                from .models import PolygonReceipt
-                receipt = session.get(PolygonReceipt, order_id)
+            if order.provider in CHAINS:
+                _, _, _, Receipt = network_service(self, order.provider)._chain_models()
+                receipt = session.get(Receipt, order_id)
                 if not receipt or not receipt.credited_at or (order.product_snapshot["kind"] == "register"
                         and not order.seat_reserved and order.fulfillment_state != "issued"):
                     raise PaymentError("payment_unconfirmed")
@@ -878,7 +879,8 @@ class PaymentService(PolygonPayments):
                 elif task_type == "reconcile_order":
                     await self.reconcile_order(payload["order_id"])
                 elif task_type == "polygon_transaction":
-                    await self.check_polygon_transaction(payload["order_id"], payload["tx_hash"])
+                    order = self.get_order(payload["order_id"])
+                    await network_service(self, order["provider"]).check_polygon_transaction(payload["order_id"], payload["tx_hash"])
                 elif task_type == "fulfill_order":
                     self.fulfill_order(payload["order_id"])
                 elif task_type in {"notify_code", "notify_review"}:

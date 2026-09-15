@@ -147,6 +147,8 @@ class PaymentHTTPTests(unittest.IsolatedAsyncioTestCase):
         self.service.confirm_polygon_quote = Mock(return_value={'id': 'q1', 'provider': 'polygon'})
         self.service.polygon_order = Mock(return_value={'address': '0x' + '12' * 20})
         self.service.save_polygon = AsyncMock(return_value={'enabled': True, 'version': 2})
+        self.service.session_factory = self.sessions
+        self.service.settings = self.settings
         self.api._service = lambda: self.service
         self.app = FastAPI()
         self.app.include_router(self.api.router)
@@ -437,6 +439,29 @@ class PaymentHTTPTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(data['sales_enabled'])
         self.assertNotIn('stripe_configuration_id', data)
         self.assertNotIn('address', data['polygon'])
+        self.assertEqual([item['chain'] for item in data['usdt_networks'][1:]], ['bsc', 'ton'])
+        for item in data['usdt_networks']:
+            self.assertNotIn('address', item)
+            self.assertNotIn('memo', item)
+
+    async def test_network_switches_require_owner_csrf_and_explicit_consent(self):
+        body = {'mode': 'live', 'version': 1, 'enabled': True, 'accepted': True}
+        for chain in ('bsc', 'ton'):
+            status, _, _ = await self.request('/payments/admin/usdt/' + chain, method='POST', body=body)
+            self.assertEqual(status, 403)
+        csrf = await self.login(user=1002)
+        status, _, _ = await self.request('/payments/admin/usdt/ton', method='POST', body=body,
+            headers={'origin': 'https://pay.test', 'X-CSRF-Token': csrf})
+        self.assertEqual(status, 403)
+        self.cookies.clear()
+        csrf = await self.login(user=1001)
+        headers = {'origin': 'https://pay.test', 'X-CSRF-Token': csrf}
+        for changes, expected in (({'accepted': False}, 400), ({'enabled': 'true'}, 422), ({'mode': 'test'}, 409)):
+            status, _, _ = await self.request('/payments/admin/usdt/bsc', method='POST', body={**body, **changes}, headers=headers)
+            self.assertEqual(status, expected)
+        status, _, _ = await self.request('/payments/usdt/ethereum/quotes', method='POST',
+            body={'product_id':'p1', 'product_version':1, 'terms_version':'v1'}, headers=headers)
+        self.assertEqual(status, 422)
 
     async def test_polygon_quote_requires_login_csrf_and_does_not_accept_client_price(self):
         body = {'product_id': 'p1', 'product_version': 1, 'terms_version': 'v1'}
