@@ -76,6 +76,17 @@ class NetworkProofTests(unittest.IsolatedAsyncioTestCase):
             gateway._get = AsyncMock(return_value={'actions':[{**action,'details':{**action['details'],**change}}]})
             self.assertEqual(await gateway.transfers(action['action_id'],action['details']['receiver']),[])
 
+    async def test_ton_optional_encrypted_or_long_comment_is_unreadable_metadata(self):
+        action = self.action()
+        gateway = ton.TonGateway('https://toncenter.com/api/v3')
+        gateway.finalized_block = AsyncMock(return_value={'number':101,'timestamp':1001,'hash':'0x'+'33'*32})
+        for change in ({'comment':'encrypted payload','is_encrypted_comment':True},
+                       {'comment':'x'*129,'is_encrypted_comment':False}):
+            gateway._get = AsyncMock(return_value={
+                'actions':[{**action,'details':{**action['details'],**change}}]})
+            transfer = (await gateway.transfers(action['action_id'],action['details']['receiver']))[0]
+            self.assertIsNone(transfer.memo)
+
     async def test_ton_binance_requires_matching_memo_and_transaction_alias(self):
         gateway = binance.BinanceDeposits('fixture','secret','TON','7788')
         recipient = '0:'+'22'*32
@@ -94,12 +105,13 @@ class NetworkProofTests(unittest.IsolatedAsyncioTestCase):
     async def test_ton_without_binance_memo_accepts_wallet_comment(self):
         gateway = binance.BinanceDeposits('fixture','secret','TON','')
         recipient = '0:'+'22'*32
-        transfer = SimpleNamespace(tx_hash='0x'+'aa'*32, binance_tx_hashes=('0x'+'bb'*32,),
-            recipient=recipient, amount_units=101234, memo='wallet generated comment')
-        gateway._get = AsyncMock(return_value=[dict(coin='USDT',network='TON',txId='bb'*32,
-            address=ton.friendly_address(recipient),addressTag='',amount='0.101234',id='credit1',
-            status=1,transferType=0)])
-        self.assertEqual(await gateway.credited_deposit(transfer,start_ms=0,end_ms=1000),'credit1')
+        for memo in ('wallet generated comment', None):
+            transfer = SimpleNamespace(tx_hash='0x'+'aa'*32, binance_tx_hashes=('0x'+'bb'*32,),
+                recipient=recipient, amount_units=101234, memo=memo)
+            gateway._get = AsyncMock(return_value=[dict(coin='USDT',network='TON',txId='bb'*32,
+                address=ton.friendly_address(recipient),addressTag='',amount='0.101234',id='credit1',
+                status=1,transferType=0)])
+            self.assertEqual(await gateway.credited_deposit(transfer,start_ms=0,end_ms=1000),'credit1')
 
 
 class NetworkLifecycleTests(unittest.IsolatedAsyncioTestCase):
@@ -193,7 +205,7 @@ class NetworkLifecycleTests(unittest.IsolatedAsyncioTestCase):
         quote,order=await service.create_polygon_quote(42,'p',1,self.settings.terms_version),None
         order=service.confirm_polygon_quote(42,quote['id'],True,self.settings.terms_version)
         transfer=self.transfer('ton',quote)
-        transfer=evm.Transfer(**{**transfer.__dict__,'memo':'wallet generated comment'})
+        transfer=evm.Transfer(**{**transfer.__dict__,'memo':None})
         service.polygon_gateway.transfers.return_value=[transfer]
         await service.check_polygon_transaction(order['id'],transfer.tx_hash)
         self.ps.fulfill_order(order['id'])

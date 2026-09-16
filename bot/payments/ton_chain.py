@@ -161,9 +161,17 @@ class TonGateway:
             if stamp > head["timestamp"] or event_id in seen:
                 raise PolygonError("polygon_invalid_response")
             seen.add(event_id)
-            memo = details.get("comment") or ""
-            if not isinstance(memo, str) or len(memo) > 128 or details.get("is_encrypted_comment") is not False:
-                raise PolygonError("polygon_transfer_mismatch")
+            memo = details.get("comment")
+            encrypted = details.get("is_encrypted_comment")
+            if memo is None:
+                memo = ""
+            if not isinstance(memo, str) or type(encrypted) is not bool:
+                raise PolygonError("polygon_invalid_response")
+            # An encrypted or unusually long comment cannot satisfy a required
+            # Binance MEMO. It remains valid optional metadata when no MEMO is
+            # configured, so carry an unreadable marker to the policy layer.
+            if encrypted or len(memo) > 128:
+                memo = None
             amount = number(details.get("amount"))
             if amount:
                 result.append(Transfer(event_id, 0, block, head["hash"], stamp,

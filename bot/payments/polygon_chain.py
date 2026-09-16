@@ -51,7 +51,7 @@ class Transfer:
     sender: str
     recipient: str
     amount_units: int
-    memo: str = ""
+    memo: str | None = ""
     binance_tx_hashes: tuple = ()
 
 
