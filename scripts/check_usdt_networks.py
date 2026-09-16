@@ -43,7 +43,12 @@ async def check(chains):
                 raise ValueError("stale chain data")
             print(chain.upper(), "FINALIZED_LAG_SECONDS=", lag, flush=True)
             if chain != "ton":
-                decimals = await gateway._rpc("eth_call", [{"to":gateway.token_contract,"data":"0x313ce567"},"finalized"])
+                # BSC public full nodes commonly prune state for the finalized
+                # block even while serving its header. Finality was verified
+                # above; this metadata probe only checks the known token.
+                state_tag = "latest" if chain == "bsc" else "finalized"
+                decimals = await gateway._rpc("eth_call", [
+                    {"to": gateway.token_contract, "data": "0x313ce567"}, state_tag])
                 if int(decimals, 16) != gateway.decimals:
                     raise ValueError("token decimals mismatch")
                 print(chain.upper(), "USDT_DECIMALS=", gateway.decimals, flush=True)
