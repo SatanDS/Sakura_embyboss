@@ -38,6 +38,9 @@ class PolygonPayments:
     def normalize_transaction(self, value):
         return transaction_hash(value)
 
+    def transfer_memo_matches(self, actual, expected):
+        return actual == expected
+
     def _quote_matches_destination(self, quote):
         return quote.address == self.receive_address and getattr(quote, "memo", "") == self.receive_memo
 
@@ -282,7 +285,8 @@ class PolygonPayments:
             recipient, units, start = quote.address, quote.amount_units, quote.start_block
             memo = getattr(quote, "memo", "")
         transfers = await self.polygon_gateway.transfers(self.normalize_transaction(tx_hash), recipient)
-        matches = [t for t in transfers if t.amount_units == units and t.block_number > start and getattr(t, "memo", "") == memo]
+        matches = [t for t in transfers if t.amount_units == units and t.block_number > start
+                   and self.transfer_memo_matches(getattr(t, "memo", ""), memo)]
         if len(matches) != 1:
             raise PolygonError("polygon_transfer_mismatch")
         await self._record_polygon_transfer(order_id, matches[0])
@@ -297,7 +301,8 @@ class PolygonPayments:
             quote = session.get(PolygonQuote, order_id)
             if (row.provider != self.crypto_provider or row.mode != "live" or self.mode != "live"
                     or transfer.recipient != quote.address or transfer.amount_units != quote.amount_units
-                    or getattr(transfer, "memo", "") != getattr(quote, "memo", "")
+                    or not self.transfer_memo_matches(
+                        getattr(transfer, "memo", ""), getattr(quote, "memo", ""))
                     or transfer.block_number <= quote.start_block or not quote.confirmed_at
                     or datetime.utcfromtimestamp(transfer.timestamp) < quote.created_at - timedelta(seconds=10)):
                 raise PolygonError("polygon_transfer_mismatch")
@@ -341,7 +346,7 @@ class PolygonPayments:
         # Reverify the receipt even for manually submitted transaction hashes.
         transfers = await self.polygon_gateway.transfers(tx_hash, recipient)
         match = [t for t in transfers if t.log_index == expected_index and t.amount_units == expected_units
-                 and getattr(t, "memo", "") == memo]
+                 and self.transfer_memo_matches(getattr(t, "memo", ""), memo)]
         if len(match) != 1:
             raise PolygonError("polygon_transfer_mismatch")
         binance = self.binance_gateway

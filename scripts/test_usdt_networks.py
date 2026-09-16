@@ -91,6 +91,16 @@ class NetworkProofTests(unittest.IsolatedAsyncioTestCase):
         gateway._get = AsyncMock(return_value={'address':ton.friendly_address(recipient),'tag':'different'})
         with self.assertRaises(ValueError): await gateway.validate_address(recipient)
 
+    async def test_ton_without_binance_memo_accepts_wallet_comment(self):
+        gateway = binance.BinanceDeposits('fixture','secret','TON','')
+        recipient = '0:'+'22'*32
+        transfer = SimpleNamespace(tx_hash='0x'+'aa'*32, binance_tx_hashes=('0x'+'bb'*32,),
+            recipient=recipient, amount_units=101234, memo='wallet generated comment')
+        gateway._get = AsyncMock(return_value=[dict(coin='USDT',network='TON',txId='bb'*32,
+            address=ton.friendly_address(recipient),addressTag='',amount='0.101234',id='credit1',
+            status=1,transferType=0)])
+        self.assertEqual(await gateway.credited_deposit(transfer,start_ms=0,end_ms=1000),'credit1')
+
 
 class NetworkLifecycleTests(unittest.IsolatedAsyncioTestCase):
     @classmethod
@@ -170,6 +180,24 @@ class NetworkLifecycleTests(unittest.IsolatedAsyncioTestCase):
         service.polygon_gateway.transfers.return_value=[evm.Transfer(**{**transfer.__dict__,'memo':''})]
         with self.assertRaises(ValueError):await service.check_polygon_transaction(q['id'],transfer.tx_hash)
         with self.assertRaises(ValueError):self.ps.fulfill_order(q['id'])
+
+    async def test_ton_wallet_comment_is_ignored_when_binance_requires_no_memo(self):
+        self.settings.ton_receive_memo=''
+        service=self.module.network_service(self.ps,'ton')
+        rpc = SimpleNamespace(finalized_block=AsyncMock(return_value={
+            'number':100,'timestamp':int(datetime.now(timezone.utc).timestamp())}),
+            transfers=AsyncMock(),transaction_ids=AsyncMock(return_value=[]))
+        deposits = SimpleNamespace(network='TON',memo='',normalize_address=ton.address,
+            validate_address=AsyncMock(return_value=True),credited_deposit=AsyncMock(return_value='credit-ton-comment'))
+        service._network_gateway,service._network_binance=rpc,deposits
+        quote,order=await service.create_polygon_quote(42,'p',1,self.settings.terms_version),None
+        order=service.confirm_polygon_quote(42,quote['id'],True,self.settings.terms_version)
+        transfer=self.transfer('ton',quote)
+        transfer=evm.Transfer(**{**transfer.__dict__,'memo':'wallet generated comment'})
+        service.polygon_gateway.transfers.return_value=[transfer]
+        await service.check_polygon_transaction(order['id'],transfer.tx_hash)
+        self.ps.fulfill_order(order['id'])
+        self.assertEqual(self.ps.get_order(order['id'])['fulfillment_state'],'issued')
 
     async def test_pausing_new_network_preserves_old_orders_and_other_networks(self):
         q,o=await self.order('bsc',42);service=self.networks['bsc']

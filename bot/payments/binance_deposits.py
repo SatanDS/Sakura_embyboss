@@ -106,10 +106,12 @@ class BinanceDeposits:
                 if row.get("coin") != "USDT" or row.get("network") != self.network:
                     continue
                 try:
+                    transfer_memo = getattr(transfer, "memo", "")
+                    memo_matches = transfer_memo == self.memo or (self.network == "TON" and not self.memo)
                     matches = (self.normalize_hash(row.get("txId")) in aliases
                         and self.normalize_address(row.get("address")) == transfer.recipient
                         and (row.get("addressTag") or "") == self.memo
-                        and getattr(transfer, "memo", "") == self.memo)
+                        and memo_matches)
                 except PolygonError:
                     matches = False
                 if not matches:

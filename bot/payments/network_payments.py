@@ -57,6 +57,13 @@ class NetworkPayments(PolygonPayments):
     def normalize_transaction(self, value):
         return ton_hash(value) if self.crypto_provider == "ton" else super().normalize_transaction(value)
 
+    def transfer_memo_matches(self, actual, expected):
+        # A TON comment is optional transaction metadata. Only treat it as a
+        # routing tag when Binance explicitly requires a deposit MEMO/Tag.
+        if self.crypto_provider == "ton" and not expected:
+            return True
+        return super().transfer_memo_matches(actual, expected)
+
     def _quote_data(self, quote, *, show_address=False):
         data = super()._quote_data(quote, show_address=show_address)
         if show_address and self.crypto_provider == "ton":
