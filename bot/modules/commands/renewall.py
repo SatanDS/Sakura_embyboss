@@ -25,7 +25,7 @@ async def renew_all(_, msg):
                                  "🔔 **使用格式：**/renewall [+/-天数]\n\n  给所有未封禁emby [+/-天数]", timer=60)
 
     send = await bot.send_photo(msg.chat.id, photo=bot_photo, caption="⚡【派送任务】\n  **正在开启派送中...请稍后**")
-    rst = get_all_emby(Emby.lv == 'b')
+    rst = get_all_emby(Emby.lv.in_(('a', 'b')))
     if rst is None:
         LOGGER.info(
             f"【派送任务】 -{msg.from_user.first_name}({msg.from_user.id}) 没有检测到任何emby账户，结束")

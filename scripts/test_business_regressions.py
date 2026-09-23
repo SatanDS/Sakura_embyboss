@@ -197,6 +197,60 @@ class RenewalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.updates[0]["expired"], 1)
 
 
+class RenewalAllTests(unittest.IsolatedAsyncioTestCase):
+    async def test_renews_whitelist_and_normal_users_only(self):
+        now = datetime(2026, 9, 23, 12, 0, 0)
+        users = [
+            SimpleNamespace(tg=1, lv="a", ex=now),
+            SimpleNamespace(tg=2, lv="b", ex=now),
+            SimpleNamespace(tg=3, lv="b", ex=None),
+            SimpleNamespace(tg=4, lv="c", ex=now),
+            SimpleNamespace(tg=5, lv="d", ex=now),
+        ]
+        selected_levels = []
+        updates = []
+
+        class LevelColumn:
+            def in_(self, levels):
+                selected_levels.extend(levels)
+                return tuple(levels)
+
+        def get_all_emby(levels):
+            return [user for user in users if user.lv in levels]
+
+        def update_embys(*, some_list, method):
+            updates.extend(some_list)
+            self.assertEqual(method, "ex")
+            return True
+
+        progress = SimpleNamespace(edit=AsyncMock())
+        bot = SimpleNamespace(
+            send_photo=AsyncMock(return_value=progress),
+            send_message=AsyncMock(),
+        )
+        env = dict(
+            time=__import__("time"), timedelta=timedelta,
+            deleteMessage=AsyncMock(), sendMessage=AsyncMock(), bot=bot,
+            bot_photo="photo", get_all_emby=get_all_emby,
+            Emby=SimpleNamespace(lv=LevelColumn()), sql_update_embys=update_embys,
+            LOGGER=logging.getLogger("business-test"),
+        )
+        load_definitions("bot/modules/commands/renewall.py", {"renew_all"}, env)
+        msg = SimpleNamespace(
+            command=["renewall", "30"], chat=SimpleNamespace(id=99),
+            from_user=SimpleNamespace(id=10, first_name="admin"), reply=AsyncMock(),
+        )
+
+        await env["renew_all"](None, msg)
+
+        self.assertEqual(selected_levels, ["a", "b"])
+        self.assertEqual(updates, [
+            [1, now + timedelta(days=30)],
+            [2, now + timedelta(days=30)],
+        ])
+        self.assertEqual([call.args[0] for call in bot.send_message.await_args_list], [1, 2])
+
+
 class RedEnvelopeTests(unittest.IsolatedAsyncioTestCase):
     async def test_equal_envelopes_conserve_full_amount(self):
         for money, count in [(5, 2), (10, 3), (100, 7), (10, 5), (5, 1)]:
