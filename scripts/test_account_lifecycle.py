@@ -160,12 +160,14 @@ class AccountLifecycleTests(unittest.IsolatedAsyncioTestCase):
                          FloodWait=type('FloodWait', (Exception,), {}), sleep=asyncio.sleep,
                          get_all_emby2=lambda condition: [], sql_update_emby2=Mock(),
                          _managed_or_none=lambda tg: None,
+                         cleanup_expired_douban_binding=AsyncMock(return_value=True),
                          Emby2=self.emby_model)
         # The final non-Telegram query uses expired; its empty result is stubbed.
         self.emby_model.expired = 0
         check = load_function('bot/scheduler/check_ex.py', 'check_expired', namespace)
         await check()
         self.assertEqual(self.get().disabled_at, FrozenDateTime.now())
+        namespace['cleanup_expired_douban_binding'].assert_awaited_once_with(1)
         self.emby.emby_del.assert_not_awaited()
         self.update(disabled_at=None)
         await check()

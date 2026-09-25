@@ -94,7 +94,10 @@ async def douban_watch_bind(_, call):
         # Do not remove an id that is still bound to another Telegram user.
         previous_for_api = None
         if previous_id and previous_id != douban_id:
-            if sql_count_moviepilot_douban(previous_id) <= 1:
+            previous_count = sql_count_moviepilot_douban(previous_id)
+            if previous_count is None:
+                return await editMessage(call, "❌ 无法确认旧豆瓣 ID 的绑定数量，请稍后重试。", buttons=back_members_ikb)
+            if previous_count <= 1:
                 previous_for_api = previous_id
 
         ok, result = await update_douban_sync_users(douban_id, previous_for_api)
@@ -130,11 +133,14 @@ async def douban_watch_remove(_, call):
 
     # If another TG account uses the same id, keep it in the global plugin
     # list; otherwise remove this account's old id from DoubanSync as well.
-    if sql_count_moviepilot_douban(binding.douban_id) <= 1:
+    binding_count = sql_count_moviepilot_douban(binding.douban_id)
+    if binding_count is None:
+        return await callAnswer(call, "无法确认豆瓣 ID 的其他绑定，请稍后重试", True)
+    if binding_count <= 1:
         ok, result = await remove_douban_sync_user(binding.douban_id)
         if not ok:
             return await editMessage(call, f"❌ 从 MoviePilot 移除失败：{result}", buttons=back_members_ikb)
 
-    if not sql_delete_moviepilot_douban(call.from_user.id):
+    if not sql_delete_moviepilot_douban(call.from_user.id, binding.douban_id):
         return await editMessage(call, "⚠️ MoviePilot 已更新，但本地解绑记录失败，请联系管理员。", buttons=back_members_ikb)
     return await editMessage(call, "✅ 已解绑豆瓣 ID。", buttons=back_members_ikb)

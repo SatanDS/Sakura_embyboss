@@ -12,6 +12,7 @@ from bot.func_helper.emby import emby
 from bot.func_helper.utils import tem_deluser
 from bot.sql_helper.sql_emby import Emby, get_all_emby, sql_update_emby, sql_managed_entitlement
 from bot.sql_helper.sql_emby2 import get_all_emby2, Emby2, sql_update_emby2
+from bot.func_helper.moviepilot import cleanup_expired_douban_binding
 
 
 def _managed_or_none(tg):
@@ -33,6 +34,7 @@ async def reconcile_managed_accounts():
     with Session() as session:
         accounts = session.query(AccountEntitlement.tg).all()
     for (tg,) in accounts:
+        cleanup_douban = False
         async with get_user_lock(tg):
             try:
                 with Session.begin() as session:
@@ -60,6 +62,9 @@ async def reconcile_managed_accounts():
                             append_days(session, row, 30, source, now)
                             setattr(row, field, getattr(row, field) - cost)
                             result = resolve_entitlement(session, row, now)
+                    cleanup_douban = (
+                        not result.allowed and result.blocked_reason == "expiry"
+                    )
                     if result.allowed:
                         # A previous failed remote enable remains retryable.
                         if not await emby.emby_change_policy(emby_id=row.embyid, disable=False):
@@ -71,6 +76,9 @@ async def reconcile_managed_accounts():
                         mark_block(session, row, "expiry", now)
             except Exception as exc:
                 LOGGER.error(f"Managed account reconciliation failed for {tg}: {type(exc).__name__}")
+                cleanup_douban = False
+        if cleanup_douban:
+            await cleanup_expired_douban_binding(tg)
 
 
 async def check_expired():
@@ -146,11 +154,13 @@ async def check_expired():
                 LOGGER.error(e)
 
         else:
+            disabled_success = False
             if await emby.emby_change_policy(emby_id=r.embyid, disable=True):
                 disabled_at = datetime.now()
                 dead_day = disabled_at + timedelta(days=config.freeze_days)
                 if sql_update_emby(Emby.tg == r.tg, lv='c', disabled_at=disabled_at,
                                    entitlement_block_reason='expiry'):
+                    disabled_success = True
                     text = f'【到期检测】\n#id{r.tg} 到期禁用 [{r.name}](tg://user?id={r.tg})\n将为您封存至 {dead_day.strftime("%Y-%m-%d")}，请及时续期'
                     LOGGER.info(text)
                 else:
@@ -159,6 +169,8 @@ async def check_expired():
             else:
                 text = f'【到期检测】\n#id{r.tg} 到期禁用 [{r.name}](tg://user?id={r.tg}) embyapi操作失败'
                 LOGGER.error(text)
+            if disabled_success and 'cleanup_expired_douban_binding' in globals():
+                await cleanup_expired_douban_binding(r.tg)
             try:
                 send = await bot.send_message(r.tg, text)
                 await send.forward(group[0])
@@ -230,6 +242,8 @@ async def check_expired():
                 if sql_update_emby(Emby.embyid == c.embyid, embyid=None, name=None, pwd=None, pwd2=None, lv='d', cr=None,
                                    ex=None):
                     tem_deluser()
+                    if 'cleanup_expired_douban_binding' in globals():
+                        await cleanup_expired_douban_binding(c.tg)
                 text = f'【到期检测】\n#id{c.tg} 删除账户 [{c.name}](tg://user?id={c.tg})\n已冻结 {config.freeze_days} 天，执行清除任务。期待下次与你相遇'
                 LOGGER.info(text)
             else:

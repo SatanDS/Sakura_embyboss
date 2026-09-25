@@ -5,7 +5,7 @@ import types
 import unittest
 import requests
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -89,6 +89,7 @@ class MoviePilotLoginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mp_module.mp.access_token, "old")
         bot_stub.save_config.assert_not_called()
 
+
     async def test_malformed_login_response_is_rejected(self):
         for payload in ([], {}, {"access_token": "new"}, {"access_token": "", "token_type": "bearer"}):
             with self.subTest(payload=payload):
@@ -100,6 +101,53 @@ class MoviePilotLoginTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await self.run_login(asyncio.TimeoutError()))
         self.assertEqual(mp_module.mp.access_token, "old")
         bot_stub.save_config.assert_not_called()
+
+
+class DoubanExpiryCleanupTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.binding = types.SimpleNamespace(tg=42, douban_id="294556764")
+        self.deleted = []
+        self.sql_module = types.ModuleType("bot.sql_helper.sql_douban")
+        self.sql_module.sql_get_moviepilot_douban = lambda tg: self.binding if tg == 42 else None
+        self.sql_module.sql_count_moviepilot_douban = lambda douban_id: self.count
+        self.sql_module.sql_delete_moviepilot_douban = lambda tg, douban_id=None: self.deleted.append((tg, douban_id)) or True
+        self.parent_module = types.ModuleType("bot.sql_helper")
+        self.parent_module.__path__ = []
+        self.count = 1
+        self.remove = AsyncMock(return_value=(True, "294556764"))
+        self.get_patch = patch.object(mp_module, "_remove_douban_sync_user_locked", self.remove)
+        self.get_patch.start()
+        self.modules_patch = patch.dict(sys.modules, {
+            "bot.sql_helper": self.parent_module,
+            "bot.sql_helper.sql_douban": self.sql_module,
+        })
+        self.modules_patch.start()
+
+    async def asyncTearDown(self):
+        self.modules_patch.stop()
+        self.get_patch.stop()
+
+    async def test_shared_id_only_removes_local_binding(self):
+        self.count = 2
+        self.assertTrue(await mp_module.cleanup_expired_douban_binding(42))
+        self.remove.assert_not_called()
+        self.assertEqual(self.deleted, [(42, "294556764")])
+
+    async def test_last_id_removes_moviepilot_then_local_binding(self):
+        self.assertTrue(await mp_module.cleanup_expired_douban_binding(42))
+        self.remove.assert_called_once_with("294556764")
+        self.assertEqual(self.deleted, [(42, "294556764")])
+
+    async def test_moviepilot_failure_keeps_local_binding(self):
+        self.remove.return_value = (False, "暂时不可用")
+        self.assertFalse(await mp_module.cleanup_expired_douban_binding(42))
+        self.assertEqual(self.deleted, [])
+
+    async def test_count_failure_fails_closed(self):
+        self.count = None
+        self.assertFalse(await mp_module.cleanup_expired_douban_binding(42))
+        self.remove.assert_not_called()
+        self.assertEqual(self.deleted, [])
 
 
 if __name__ == "__main__":

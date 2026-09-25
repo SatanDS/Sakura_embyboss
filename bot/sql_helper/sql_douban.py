@@ -38,7 +38,7 @@ def sql_count_moviepilot_douban(douban_id):
             ).scalar() or 0
         except Exception as exc:
             LOGGER.error(f"统计豆瓣绑定失败: {exc}")
-            return 0
+            return None
 
 
 def sql_upsert_moviepilot_douban(tg, douban_id):
@@ -61,12 +61,15 @@ def sql_upsert_moviepilot_douban(tg, douban_id):
             return False
 
 
-def sql_delete_moviepilot_douban(tg):
+def sql_delete_moviepilot_douban(tg, douban_id=None):
     with Session() as session:
         try:
-            row = session.query(MoviePilotDoubanUser).filter(
+            query = session.query(MoviePilotDoubanUser).filter(
                 MoviePilotDoubanUser.tg == tg
-            ).first()
+            )
+            if douban_id is not None:
+                query = query.filter(MoviePilotDoubanUser.douban_id == str(douban_id))
+            row = query.first()
             if row is None:
                 return True
             session.delete(row)

@@ -232,6 +232,37 @@ async def update_douban_sync_users(douban_user_id, previous_user_id=None):
         return True, normalized
 
 
+async def _remove_douban_sync_user_locked(normalized):
+    """Remove one normalized ID while the MoviePilot lock is held."""
+    ok, plugin_config, error = await get_douban_sync_config()
+    if not ok:
+        return False, error
+    configured_users = _normalise_douban_users(plugin_config.get("users"))
+    users = [item for item in configured_users if item != normalized]
+    if len(users) == len(configured_users):
+        return True, normalized
+    plugin_config["users"] = _format_douban_users(users)
+    url = f"{mp.url.rstrip('/')}/api/v1/plugin/{quote(DOUBAN_SYNC_PLUGIN_ID, safe='')}"
+    request = {
+        'method': 'PUT',
+        'url': url,
+        'headers': {
+            'Authorization': mp.access_token,
+            'Content-Type': 'application/json',
+        },
+        'data': json.dumps(plugin_config, ensure_ascii=False),
+    }
+    try:
+        result = await _do_request(request)
+    except Exception as exc:
+        LOGGER.error(f"移除 MoviePilot 豆瓣想看用户失败: {exc}")
+        return False, "更新 MoviePilot 插件失败"
+    if not isinstance(result, dict) or result.get("success") is False:
+        message = result.get("message") if isinstance(result, dict) else None
+        return False, message or "MoviePilot 拒绝更新插件配置"
+    return True, normalized
+
+
 async def remove_douban_sync_user(douban_user_id):
     """Remove one id from DoubanSync while preserving every other setting."""
     normalized = normalize_douban_user_id(douban_user_id)
@@ -239,33 +270,43 @@ async def remove_douban_sync_user(douban_user_id):
         return False, "豆瓣 ID 格式无效"
 
     async with _douban_sync_lock:
-        ok, plugin_config, error = await get_douban_sync_config()
-        if not ok:
-            return False, error
-        configured_users = _normalise_douban_users(plugin_config.get("users"))
-        users = [item for item in configured_users if item != normalized]
-        if len(users) == len(configured_users):
-            return True, normalized
-        plugin_config["users"] = _format_douban_users(users)
-        url = f"{mp.url.rstrip('/')}/api/v1/plugin/{quote(DOUBAN_SYNC_PLUGIN_ID, safe='')}"
-        request = {
-            'method': 'PUT',
-            'url': url,
-            'headers': {
-                'Authorization': mp.access_token,
-                'Content-Type': 'application/json',
-            },
-            'data': json.dumps(plugin_config, ensure_ascii=False),
-        }
-        try:
-            result = await _do_request(request)
-        except Exception as exc:
-            LOGGER.error(f"移除 MoviePilot 豆瓣想看用户失败: {exc}")
-            return False, "更新 MoviePilot 插件失败"
-        if not isinstance(result, dict) or result.get("success") is False:
-            message = result.get("message") if isinstance(result, dict) else None
-            return False, message or "MoviePilot 拒绝更新插件配置"
-        return True, normalized
+        return await _remove_douban_sync_user_locked(normalized)
+
+
+async def cleanup_expired_douban_binding(tg):
+    """Remove an expired Telegram user's Douban binding from MoviePilot.
+
+    A Douban ID may be shared by several Telegram users.  The local binding
+    is always removed for the expired account, while the global MoviePilot
+    entry is removed only when this was its last binding.  A failed MoviePilot
+    update keeps the local row so the scheduled expiry check can retry it.
+    """
+    from bot.sql_helper.sql_douban import (
+        sql_count_moviepilot_douban,
+        sql_delete_moviepilot_douban,
+        sql_get_moviepilot_douban,
+    )
+
+    async with _douban_sync_lock:
+        binding = sql_get_moviepilot_douban(tg)
+        if binding is None:
+            return True
+
+        binding_count = sql_count_moviepilot_douban(binding.douban_id)
+        if binding_count is None:
+            LOGGER.error("无法确认豆瓣 ID 绑定数量，保留到期绑定 tg=%s", tg)
+            return False
+        if binding_count <= 1:
+            ok, result = await _remove_douban_sync_user_locked(binding.douban_id)
+            if not ok:
+                LOGGER.warning("到期清理豆瓣 ID 失败 tg=%s: %s", tg, result)
+                return False
+
+        if not sql_delete_moviepilot_douban(tg, binding.douban_id):
+            LOGGER.error("MoviePilot 豆瓣 ID 已更新，但到期清理本地绑定失败 tg=%s", tg)
+            return False
+        LOGGER.info("到期已清理豆瓣绑定 tg=%s douban_id=%s", tg, binding.douban_id)
+        return True
 
 async def search(title):
     """
