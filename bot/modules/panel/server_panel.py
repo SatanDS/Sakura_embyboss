@@ -4,7 +4,7 @@
 """
 from datetime import datetime, timezone, timedelta
 from pyrogram import filters
-from bot import bot, emby_line, emby_whitelist_line
+from bot import bot, config
 from bot.func_helper.emby import emby
 from bot.func_helper.filters import user_in_group_on_filter
 from bot.func_helper.utils import is_subscription_active
@@ -41,11 +41,11 @@ async def server(_, call):
     pwd = '空' if not data.pwd else data.pwd
     line = ''
     if data.lv == 'b':
-        line = f'无优化线路: {emby_line}'
+        line = f'无优化线路: {config.emby_line}'
     elif data.lv == 'a':
-        line = f'无优化线路: {emby_line}'
-        if emby_whitelist_line and is_subscription_active(data.ex):
-            line += f'\n白名单线路: {emby_whitelist_line}'
+        line = f'无优化线路: {config.emby_line}'
+        if config.emby_whitelist_line and is_subscription_active(data.ex):
+            line += f'\n白名单线路: {config.emby_whitelist_line}'
     else:
         line = ' - **无权查看**'
     try:

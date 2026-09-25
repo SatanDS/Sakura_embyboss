@@ -4,7 +4,7 @@ from datetime import datetime
 from pyrogram import filters
 from pyrogram.types import CallbackQuery
 
-from bot import bot, prefixes, LOGGER, emby_line, owner, bot_photo, schedall, config
+from bot import bot, prefixes, LOGGER, owner, bot_photo, schedall, config
 from bot.func_helper.emby import emby
 from bot.func_helper.filters import admins_on_filter
 from bot.func_helper.fix_bottons import uinfo_ikb, uinfo_delete_confirm_ikb, close_it_ikb
@@ -43,7 +43,7 @@ async def login_account(_, msg):
                 f'**🎉 成功创建有效期{days}天 #{name}\n\n'
                 f'• 用户名称 | `{name}`\n'
                 f'• 用户密码 | `{pwd}`\n'
-                f'• 当前线路 | \n{emby_line}\n\n'
+                f'• 当前线路 | \n{config.emby_line}\n\n'
                 f'• 到期时间 | {ex}**')
 
             if msg.from_user.id != owner:

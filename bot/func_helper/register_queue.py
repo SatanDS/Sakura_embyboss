@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
-from bot import LOGGER, _open, emby_line, config, schedall
+from bot import LOGGER, _open, config, schedall
 from bot.func_helper.concurrency import get_user_lock
 from bot.func_helper.emby import emby
 from bot.func_helper.fix_bottons import re_create_ikb, registration_notice_ikb
@@ -211,7 +211,7 @@ class RegisterQueueManager:
                 f'· 安全密码 | `{job.pwd2}`（仅发送一次）\n'
                 f'· 到期时间 | `{ex_text}`\n'
                 f'· 当前线路：\n'
-                f'{emby_line}\n\n'
+                f'{config.emby_line}\n\n'
                 f'**·【服务器】 - 查看线路和密码**',
             )
 

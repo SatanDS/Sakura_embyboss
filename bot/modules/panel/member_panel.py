@@ -11,7 +11,7 @@ import math
 import random
 from datetime import timedelta, datetime
 from bot.schemas import Yulv
-from bot import bot, LOGGER, _open, emby_line, sakura_b, ranks, group, config, bot_name, schedall
+from bot import bot, LOGGER, _open, sakura_b, ranks, group, config, bot_name, schedall
 from pyrogram import filters
 from bot.func_helper.concurrency import get_user_lock
 from bot.func_helper.emby import emby
@@ -205,7 +205,7 @@ async def change_tg(_, call):
                    f'· 用户密码 | `{e.pwd}`\n' \
                    f'· 安全密码 | `{e.pwd2}`（仅发送一次）\n' \
                    f'· 到期时间 | `{e.ex}`\n\n' \
-                   f'· 当前线路：\n{emby_line}\n\n' \
+                   f'· 当前线路：\n{config.emby_line}\n\n' \
                    f'**·在【服务器】按钮 - 查看线路和密码**'
             await bot.send_message(current_id, text)
             LOGGER.info(
@@ -269,7 +269,7 @@ async def change_tg(_, call):
                        f'· 用户密码 | `{pwd[0]}`\n' \
                        f'· 安全密码 | `{e2.pwd2}`（仅发送一次）\n' \
                        f'· 到期时间 | `{e2.ex}`\n\n' \
-                       f'· 当前线路：\n{emby_line}\n\n' \
+                       f'· 当前线路：\n{config.emby_line}\n\n' \
                        f'**·在【服务器】按钮 - 查看线路和密码**'
                 await sendMessage(call,
                                   f'⭕#TG改绑 原emby账户 #{emby_name}\n\n'
@@ -284,7 +284,7 @@ async def change_tg(_, call):
                        f'· 用户密码 | `{e2.pwd}`\n' \
                        f'· 安全密码 | `{pwd[1]}`（仅发送一次）\n' \
                        f'· 到期时间 | `{e2.ex}`\n\n' \
-                       f'· 当前线路：\n{emby_line}\n\n' \
+                       f'· 当前线路：\n{config.emby_line}\n\n' \
                        f'**·在【服务器】按钮 - 查看线路和密码**'
                 sql_update_emby(Emby.tg == call.from_user.id, embyid=e2.embyid, name=e2.name, pwd=e2.pwd,
                                 pwd2=emby_pwd, lv=e2.lv, cr=e2.cr, ex=e2.ex)
@@ -367,7 +367,7 @@ async def bind_tg(_, call):
                            f'· 用户密码 | `{pwd[0]}`\n' \
                            f'· 安全密码 | `{pwd[1]}`（仅发送一次）\n' \
                            f'· 到期时间 | `{ex}`\n\n' \
-                           f'· 当前线路：\n{emby_line}\n\n' \
+                           f'· 当前线路：\n{config.emby_line}\n\n' \
                            f'· **在【服务器】按钮 - 查看线路和密码**'
                     sql_update_emby(Emby.tg == call.from_user.id, embyid=embyid, name=emby_name, pwd=pwd[0],
                                     pwd2=pwd[1], lv='b', cr=datetime.now(), ex=ex)
