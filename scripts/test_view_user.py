@@ -18,6 +18,21 @@ from bot.modules.commands import view_user
 
 
 class NormalUserListTests(unittest.IsolatedAsyncioTestCase):
+    async def test_empty_normal_user_list_is_renderable(self):
+        text = await view_user.create_normaluser_text([], page=1)
+
+        self.assertIn("暂无普通用户。", text)
+        self.assertIn("共 0 人", text)
+
+    async def test_database_failure_is_reported_without_editing_panel(self):
+        call = object()
+        with patch.object(view_user, "get_all_emby", return_value=None), \
+                patch.object(view_user, "callAnswer", new=AsyncMock()) as answer:
+            result = await view_user._load_users(call, object(), "普通用户列表")
+
+        self.assertIsNone(result)
+        answer.assert_awaited_once_with(call, "⚠️ 普通用户列表加载失败，请检查数据库连接", True)
+
     async def test_normal_users_include_expiry_like_whitelist_users(self):
         user = SimpleNamespace(
             tg=866296028,
