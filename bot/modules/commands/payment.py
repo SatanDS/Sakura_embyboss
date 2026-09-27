@@ -41,4 +41,4 @@ async def payment_shop_command(_, msg):
     payments = getattr(config, "payments", None)
     if not payments or not payments.enabled or not payments.public_url:
         return await sendMessage(msg, "❌ 当前未开放在线购买。", timer=60)
-    return await sendMessage(msg, f"🛒 套餐购买：{payments.public_url.rstrip('/')}/payments/shop", timer=120)
+    return await sendMessage(msg, "🛒 注册续期：https://t.me/wugandu", timer=120)
