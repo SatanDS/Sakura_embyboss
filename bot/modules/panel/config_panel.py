@@ -9,9 +9,9 @@ from datetime import datetime
 from bot import bot, prefixes, bot_photo, Now, LOGGER, config, save_config, _open, auto_update, moviepilot, sakura_b
 from pyrogram import filters
 
-from bot.func_helper.filters import admins_on_filter
+from bot.func_helper.filters import admins_on_filter, admins_filter
 from bot.func_helper.fix_bottons import config_preparation, close_it_ikb, back_config_p_ikb, back_set_ikb, mp_config_ikb, client_filter_panel
-from bot.func_helper.msg_utils import deleteMessage, editMessage, callAnswer, callListen, sendPhoto, sendFile
+from bot.func_helper.msg_utils import deleteMessage, editMessage, callAnswer, callListen, sendPhoto, sendMessage, sendFile
 from bot.func_helper.scheduler import scheduler
 from bot.scheduler.sync_mp_download import sync_download_tasks
 from bot.sql_helper.sql_partition import (
@@ -894,3 +894,91 @@ async def set_client_filter_mode(_, call):
     save_config()
     await set_client_filter_panel(_, call)
     LOGGER.info(log_message)
+
+# Device quota controls.  DeviceId is a client-generated logical identifier,
+# not a hardware fingerprint.  These settings are intentionally opt-in.
+def device_limit_panel_markup():
+    from pyromod.helpers import ikb
+    tracking = '✅' if getattr(config, 'device_tracking_enabled', True) else '❌'
+    enforcement = '✅' if getattr(config, 'device_limit_enabled', False) else '❌'
+    exempt = '✅' if getattr(config, 'device_limit_whitelist_exempt', True) else '❌'
+    return ikb([
+        [(f'{tracking} 记录设备', 'device_toggle_tracking'),
+         (f'{enforcement} 强制上限', 'device_toggle_enforcement')],
+        [(f'普通上限：{getattr(config, "device_limit_normal", getattr(config, "device_limit", 2))} 台', 'device_set_normal_limit'),
+         (f'VIP上限：{getattr(config, "device_limit_vip", getattr(config, "device_limit", 3))} 台', 'device_set_vip_limit')],
+        [(f'白名单豁免：{exempt}', 'device_toggle_exempt')],
+        [(f'每月解绑次数：{getattr(config, "device_unbind_limit_per_month", 1)}', 'device_set_unbind_limit')],
+        [('↩️ 返回配置', 'back_config')],
+    ])
+
+
+@bot.on_message(filters.command('deviceconfig', prefixes=prefixes) & admins_filter)
+async def device_config_command(_, msg):
+    await deleteMessage(msg)
+    text = (
+        '**设备登记/配额设置**\n\n'
+        f'记录设备：{getattr(config, "device_tracking_enabled", True)}\n'
+        f'强制上限：{getattr(config, "device_limit_enabled", False)}\n'
+        f'普通用户上限：{getattr(config, "device_limit_normal", getattr(config, "device_limit", 2))} 台\n'
+        f'VIP用户上限：{getattr(config, "device_limit_vip", getattr(config, "device_limit", 3))} 台\n'
+        f'白名单豁免：{getattr(config, "device_limit_whitelist_exempt", True)}\n'
+        f'每月解绑次数：{getattr(config, "device_unbind_limit_per_month", 1)}\n\n'
+        '这是客户端 DeviceId 限制，不是硬件指纹。'
+    )
+    await sendMessage(msg, text, buttons=device_limit_panel_markup())
+
+
+@bot.on_callback_query(filters.regex(r'^device_(toggle_tracking|toggle_enforcement|toggle_exempt)$') & admins_filter)
+async def device_toggle(_, call):
+    field = {
+        'device_toggle_tracking': 'device_tracking_enabled',
+        'device_toggle_enforcement': 'device_limit_enabled',
+        'device_toggle_exempt': 'device_limit_whitelist_exempt',
+    }[call.data]
+    setattr(config, field, not bool(getattr(config, field, False)))
+    save_config()
+    await callAnswer(call, '设备设置已更新', True)
+    await editMessage(call, '设备登记/配额设置', buttons=device_limit_panel_markup())
+
+
+async def _device_set_integer(call, field, title, minimum=0, maximum=100):
+    await callAnswer(call, title)
+    await editMessage(call, f'{title}\n请输入 {minimum}-{maximum} 的整数，或发送 /cancel。', buttons=back_set_ikb('deviceconfig'))
+    txt = await callListen(call, 120, back_config_p_ikb)
+    if not txt or getattr(txt, 'text', '').strip() == '/cancel':
+        return await editMessage(call, '已取消。', buttons=device_limit_panel_markup())
+    try:
+        value = int(txt.text.strip())
+        if not minimum <= value <= maximum:
+            raise ValueError
+    except (TypeError, ValueError):
+        return await editMessage(call, '输入无效，请重新打开 /deviceconfig。', buttons=device_limit_panel_markup())
+    setattr(config, field, value)
+    save_config()
+    await editMessage(call, f'{title} 已设置为 {value}', buttons=device_limit_panel_markup())
+
+
+@bot.on_callback_query(filters.regex(r'^device_set_limit$') & admins_filter)
+async def device_set_limit(_, call):
+    await _device_set_integer(call, 'device_limit', '默认设备上限', 1, 100)
+
+
+@bot.on_callback_query(filters.regex(r'^device_set_normal_limit$') & admins_filter)
+async def device_set_normal_limit(_, call):
+    await _device_set_integer(call, 'device_limit_normal', '普通用户设备上限', 1, 100)
+
+
+@bot.on_callback_query(filters.regex(r'^device_set_vip_limit$') & admins_filter)
+async def device_set_vip_limit(_, call):
+    await _device_set_integer(call, 'device_limit_vip', 'VIP用户设备上限', 1, 100)
+
+
+@bot.on_callback_query(filters.regex(r'^device_set_unbind_limit$') & admins_filter)
+async def device_set_unbind_limit(_, call):
+    await _device_set_integer(call, 'device_unbind_limit_per_month', '每月解绑次数', 0, 100)
+
+@bot.on_callback_query(filters.regex(r'^deviceconfig$') & admins_filter)
+async def device_config_callback(_, call):
+    await callAnswer(call, '设备登记/配额设置')
+    await editMessage(call, '设备登记/配额设置', buttons=device_limit_panel_markup())

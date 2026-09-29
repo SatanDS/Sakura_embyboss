@@ -6,7 +6,7 @@ from pyrogram.types import CallbackQuery
 
 from bot import bot, prefixes, LOGGER, owner, bot_photo, schedall, config
 from bot.func_helper.emby import emby
-from bot.func_helper.filters import admins_on_filter
+from bot.func_helper.filters import admins_on_filter, admins_filter
 from bot.func_helper.fix_bottons import uinfo_ikb, uinfo_delete_confirm_ikb, close_it_ikb
 from bot.func_helper.msg_utils import sendMessage, editMessage, sendPhoto, callAnswer
 from bot.sql_helper.sql_emby import sql_get_emby, sql_update_emby, Emby
@@ -332,3 +332,29 @@ async def get_user_by_deviceid(_, msg, deviceid = None):
                 await sendMessage(msg, text, buttons=close_it_ikb)
         else:
             await sendMessage(msg, "获取设备信息失败")
+
+@bot.on_message(filters.command('deviceuser', prefixes) & admins_filter)
+async def set_device_user_policy(_, msg):
+    """Owner/admin: /deviceuser <tg_id> <device_limit|default> [unbinds|default]."""
+    from bot.sql_helper.sql_devices import sql_set_device_policy
+    try:
+        args = msg.command[1:]
+        if len(args) < 2 or len(args) > 3:
+            raise ValueError
+        tg = int(args[0])
+        device_limit = None if args[1].casefold() in {'default', 'none', '-'} else int(args[1])
+        unbind_limit = None if len(args) == 2 or args[2].casefold() in {'default', 'none', '-'} else int(args[2])
+        if device_limit is not None and not 1 <= device_limit <= 100:
+            raise ValueError
+        if unbind_limit is not None and not 0 <= unbind_limit <= 100:
+            raise ValueError
+    except (AttributeError, IndexError, TypeError, ValueError):
+        return await sendMessage(msg, '用法：`/deviceuser TG_ID 设备上限|default 每月解绑次数|default`')
+    try:
+        ok = await asyncio.to_thread(sql_set_device_policy, tg,
+                                     device_limit=device_limit,
+                                     unbind_limit_per_month=unbind_limit)
+    except Exception as exc:
+        LOGGER.error('device policy update failed: %s', type(exc).__name__)
+        return await sendMessage(msg, '❌ 保存用户设备策略失败。')
+    await sendMessage(msg, '✅ 已保存该用户的设备上限和每月解绑次数。' if ok else '❌ 保存失败。')

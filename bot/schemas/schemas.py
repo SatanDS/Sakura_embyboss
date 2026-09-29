@@ -244,6 +244,16 @@ class Config(BaseModel):
     line_filter_terminate_session: bool = True
     # 是否在检测到线路权限违规时封禁用户
     line_filter_block_user: bool = False
+    # DeviceId is a client-generated logical identifier, not a hardware fingerprint.
+    # Keep collection enabled by default, while enforcement remains opt-in.
+    device_tracking_enabled: bool = True
+    device_limit_enabled: bool = False
+    device_limit: int = Field(default=2, ge=1, le=100)
+    device_limit_normal: int = Field(default=2, ge=1, le=100)
+    device_limit_vip: int = Field(default=3, ge=1, le=100)
+    device_limit_whitelist_exempt: bool = True
+    device_limit_terminate_session: bool = True
+    device_unbind_limit_per_month: int = Field(default=1, ge=0, le=100)
     # 分区名 -> 库名列表
     partition_libs: Dict[str, List[str]] = Field(default_factory=dict)
     moviepilot: MP = Field(default_factory=MP)

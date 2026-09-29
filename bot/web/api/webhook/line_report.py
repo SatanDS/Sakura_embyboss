@@ -368,6 +368,106 @@ def _bounded_identifier(value: Optional[str], limit: int = _MAX_IDENTIFIER_LENGT
     return normalized
 
 
+def _device_fields(
+    matched_session: Optional[Dict[str, Any]],
+    *,
+    device_id: str = "",
+    auth_header: str = "",
+    original_request_uri: str = "",
+) -> Dict[str, str]:
+    """Collect client-reported device metadata after token authentication."""
+    session = matched_session if isinstance(matched_session, dict) else {}
+    auth_info = parse_emby_authorization(auth_header)
+    original = parse_original_request_uri(original_request_uri)
+    return {
+        "device_id": _bounded_identifier(
+            session.get("DeviceId")
+            or device_id
+            or auth_info.get("DeviceId")
+            or original.get("X-Emby-Device-Id")
+            or original.get("DeviceId")
+        ),
+        "device_name": _bounded_identifier(
+            session.get("DeviceName") or auth_info.get("Device")
+        ),
+        "client_name": _bounded_identifier(
+            session.get("Client") or auth_info.get("Client")
+        ),
+        "client_version": _bounded_identifier(
+            session.get("ApplicationVersion") or auth_info.get("Version"), 128
+        ),
+        "session_id": _bounded_identifier(session.get("Id") or ""),
+    }
+
+
+async def _observe_authenticated_device(
+    *,
+    user_id: str,
+    user_details: Optional[Emby],
+    matched_session: Optional[Dict[str, Any]],
+    device_id: str,
+    auth_header: str,
+    original_request_uri: str,
+) -> Dict[str, Any]:
+    """Record a device and optionally enforce the configured account quota."""
+    if not getattr(config, "device_tracking_enabled", False):
+        return {"allowed": True, "recorded": False, "reason": "tracking_disabled"}
+
+    fields = _device_fields(
+        matched_session,
+        device_id=device_id,
+        auth_header=auth_header,
+        original_request_uri=original_request_uri,
+    )
+    enforce = bool(getattr(config, "device_limit_enabled", False))
+    exempt = bool(
+        getattr(config, "device_limit_whitelist_exempt", True)
+        and is_user_whitelisted(user_details)
+    )
+    try:
+        from bot.sql_helper.sql_devices import sql_observe_device, sql_get_device_policy
+
+        policy = await asyncio.to_thread(sql_get_device_policy, getattr(user_details, "tg", 0))
+        configured_limit = policy.get("device_limit")
+        if configured_limit is None:
+            configured_limit = int(
+                getattr(
+                    config,
+                    "device_limit_vip" if is_user_whitelisted(user_details) else "device_limit_normal",
+                    getattr(config, "device_limit", 2),
+                )
+                or getattr(config, "device_limit", 2)
+            )
+
+        result = await asyncio.to_thread(
+            sql_observe_device,
+            emby_user_id=user_id,
+            tg=getattr(user_details, "tg", None),
+            device_id=fields["device_id"],
+            device_name=fields["device_name"],
+            client_name=fields["client_name"],
+            client_version=fields["client_version"],
+            limit=int(configured_limit),
+            enforce=enforce and not exempt,
+            exempt=exempt,
+        )
+        result["device_limit"] = int(configured_limit)
+    except Exception as exc:
+        LOGGER.error("Device observation failed for %s: %s", user_id, type(exc).__name__)
+        # Observation must not take down ordinary playback.  Enforcement is
+        # fail-closed with a retryable response so a database outage cannot
+        # silently bypass an explicitly enabled quota.
+        return {
+            "allowed": not enforce or exempt,
+            "recorded": False,
+            "reason": "device_database_unavailable",
+            "error": type(exc).__name__,
+        }
+
+    result.setdefault("fields", fields)
+    return result
+
+
 async def fetch_active_sessions() -> List[Dict[str, Any]]:
     """获取当前活跃会话列表"""
     ok, sessions, _ = await _fetch_active_sessions_result()
@@ -1113,6 +1213,60 @@ async def line_report(
         )
 
     # 白名单用户可以用任何线路
+    device_result = await _observe_authenticated_device(
+        user_id=resolved_user_id,
+        user_details=user_details,
+        matched_session=matched_session,
+        device_id=deviceId,
+        auth_header=request_auth_header,
+        original_request_uri=x_original_uri or "",
+    )
+    if not device_result.get("allowed", True):
+        reason = device_result.get("reason", "device_limit")
+        if reason == "device_database_unavailable":
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "status": "unavailable",
+                    "message": "Unable to verify device quota",
+                },
+            )
+        session_for_limit = matched_session or {}
+        session_id_for_limit = _bounded_identifier(session_for_limit.get("Id"))
+        if (
+            getattr(config, "device_limit_terminate_session", True)
+            and session_id_for_limit
+        ):
+            try:
+                await emby.terminate_session(
+                    session_id_for_limit,
+                    reason="Device limit exceeded",
+                )
+            except Exception as exc:
+                LOGGER.warning(
+                    "Failed to terminate device-limit session %s: %s",
+                    session_id_for_limit,
+                    type(exc).__name__,
+                )
+        return JSONResponse(
+            status_code=403,
+            content={
+                "status": "blocked",
+                "message": "Device limit exceeded",
+                "deviceCount": device_result.get("device_count", 0),
+                "deviceLimit": device_result.get(
+                    "device_limit",
+                    int(getattr(config, "device_limit", 2) or 2),
+                ),
+            },
+        )
+    if device_result.get("over_limit"):
+        LOGGER.warning(
+            "Device quota exceeded in observation mode for user %s (count=%s)",
+            resolved_user_id,
+            device_result.get("device_count"),
+        )
+
     if is_user_whitelisted(user_details):
         if using_whitelist:
             if hls_binding:

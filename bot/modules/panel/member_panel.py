@@ -13,6 +13,7 @@ from datetime import timedelta, datetime
 from bot.schemas import Yulv
 from bot import bot, LOGGER, _open, sakura_b, ranks, group, config, bot_name, schedall
 from pyrogram import filters
+from pyromod.helpers import ikb
 from bot.func_helper.concurrency import get_user_lock
 from bot.func_helper.emby import emby
 from bot.func_helper.register_queue import get_register_queue_manager, RegisterJob
@@ -37,6 +38,7 @@ from bot.sql_helper.sql_code import (
 )
 from bot.sql_helper.sql_emby import sql_get_emby, sql_update_emby, Emby
 from bot.sql_helper.sql_emby2 import sql_get_emby2, sql_delete_emby2
+from bot.sql_helper.sql_devices import sql_list_devices, sql_unbind_device, sql_get_device_policy
 
 # 创号函数
 async def create_user(_, call, stats, payment_code=None):
@@ -848,16 +850,35 @@ async def my_devices(_, call):
         return await editMessage(call, '⚠️ 您还没有有效的 Emby 账户。', buttons=back_members_ikb)
 
     try:
+        registered = sql_list_devices(emby_user_id=get_emby.embyid)
+    except Exception as exc:
+        LOGGER.warning('读取已登记设备失败: %s', type(exc).__name__)
+        registered = []
+    registered_text = "**已绑定客户端设备（软设备标识）**\n"
+    registered_text += "设备 ID 由客户端生成，不是硬件指纹。\n"
+    device_buttons = []
+    for index, item in enumerate(registered, 1):
+        status = "已解绑" if item.get("revoked") else "已绑定"
+        label = item.get("device_name") or item.get("client_name") or "未知客户端"
+        fingerprint = str(item.get("device_key_hash") or "")[:12] or "未知"
+        registered_text += f"{index}. {label} | {item.get('client_name') or '未知客户端'} | 标识 {fingerprint} | {status}\n"
+        if not item.get("revoked") and item.get("id") is not None:
+            device_buttons.append([(f"解绑设备 {index}", f"unbind_device:{item['id']}")])
+
+    try:
         success, result = await emby.get_emby_userip(emby_id=get_emby.embyid)
     except Exception as exc:
         LOGGER.exception('查询用户设备信息异常: %s', exc)
-        return await editMessage(call, '❌ 查询设备信息失败，请稍后重试。', buttons=back_members_ikb)
+        success, result = False, []
 
-    if not success:
+    if not success and not registered:
         detail = str(result) if result else '暂无播放记录'
         return await editMessage(call, f'ℹ️ 暂无可用设备记录。\n`{detail[:300]}`', buttons=back_members_ikb)
     if not isinstance(result, (list, tuple)) or not result:
-        return await editMessage(call, 'ℹ️ 您还没有播放记录，暂无设备/IP 可显示。', buttons=back_members_ikb)
+        if registered:
+            result = []
+        else:
+            return await editMessage(call, 'ℹ️ 您还没有播放记录，暂无设备/IP 可显示。', buttons=back_members_ikb)
 
     device_count = 0
     ip_count = 0
@@ -881,10 +902,11 @@ async def my_devices(_, call):
             device_list.append(device_key)
             device_details += f'{device_count}: {device} | {client}  \n'
 
-    if device_count == 0 and ip_count == 0:
+    if device_count == 0 and ip_count == 0 and not registered:
         return await editMessage(call, 'ℹ️ 没有可显示的设备/IP 记录。', buttons=back_members_ikb)
 
     text = (
+        registered_text + "\n" +
         '**🌏 以下为您播放过的设备&IP（历史记录）**\n\n'
         f'设备数：{device_count}，IP 数：{ip_count}\n\n'
         '**设备：**\n' + device_details + '**IP：**\n' + ip_details
@@ -894,4 +916,30 @@ async def my_devices(_, call):
         chunk_text = '\n'.join(messages[i:i + 20])
         if chunk_text.strip():
             await sendMessage(call.message, chunk_text, buttons=close_it_ikb)
-    await editMessage(call, '✅ 设备/IP 历史记录已发送到下方消息。', buttons=back_members_ikb)
+    device_buttons.append([('↩️ 返回', 'back_members')])
+    await editMessage(call, '✅ 设备/IP 历史记录已发送到下方消息。', buttons=ikb(device_buttons) if device_buttons else back_members_ikb)
+
+@bot.on_callback_query(filters.regex(r'^unbind_device:\d+$'))
+async def unbind_my_device(_, call):
+    try:
+        raw_device_id = str(call.data or '').split(':', 1)[1]
+        if not raw_device_id.isdigit():
+            raise ValueError
+        device_id = int(raw_device_id)
+    except (TypeError, ValueError, IndexError):
+        return await callAnswer(call, '设备记录无效', True)
+    policy = await asyncio.to_thread(sql_get_device_policy, call.from_user.id) or {}
+    raw_limit = policy.get('unbind_limit_per_month')
+    if raw_limit is None:
+        raw_limit = getattr(config, 'device_unbind_limit_per_month', 1)
+    monthly_limit = int(raw_limit or 0)
+    result = await asyncio.to_thread(sql_unbind_device, device_row_id=device_id, tg=call.from_user.id, monthly_limit=monthly_limit)
+    if not result.get('ok'):
+        messages = {
+            'not_found': '未找到属于你的设备记录。',
+            'already_unbound': '该设备已经解绑。',
+            'monthly_limit': f"本月解绑次数已用完（{result.get('used', 0)}/{result.get('limit', monthly_limit)}）。",
+        }
+        return await callAnswer(call, messages.get(result.get('reason'), '解绑失败，请稍后重试。'), True)
+    await callAnswer(call, f"设备已解绑，本月已使用 {result.get('used')}/{result.get('limit')} 次。", True)
+    await my_devices(_, call)

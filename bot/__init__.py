@@ -134,7 +134,9 @@ owner_p = admin_p + [
     BotCommand("paolu", "跑路!!!删除所有用户 [owner]"),
     BotCommand('restore_from_db', '恢复Emby账户[owner]'),
     BotCommand("config", "开启bot高级控制面板 [owner]"),
+    BotCommand("deviceconfig", "设备登记/设备上限设置 [owner]"),
     BotCommand("embylibs_unblockall", "一键开启所有用户的媒体库 [owner]"),
+    BotCommand("deviceuser", "设置单个用户设备上限 [admin]"),
     BotCommand("embylibs_blockall", "一键关闭所有用户的媒体库 [owner]")
 ]
 if len(extra_emby_libs) > 0:

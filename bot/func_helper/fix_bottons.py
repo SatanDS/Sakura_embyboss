@@ -414,6 +414,7 @@ def config_preparation() -> InlineKeyboardMarkup:
          [('🎬 显/隐指定库', 'set_block'), (f'{fuxx_pt} 皮套人过滤功能', 'set_fuxx_pitao')],
          [('💠 普通用户线路', 'set_line'),('🌟 白名单线路', 'set_whitelist_line')],
          [('📡 客户端过滤', 'set_client_filter'), ('注册须知', 'registration_notice_panel')],
+         [('📱 设备登记/配额', 'deviceconfig')],
          [('CDN 真实 IP', 'cdn_ip_panel')],
          [(f'{leave_ban} 退群封禁', 'leave_ban'), (f'{uplays} 观影奖励结算', 'set_uplays')],
          [(f'{auto_up} 自动更新bot', 'set_update'), (f'{mp_set} 点播', 'set_mp')],
