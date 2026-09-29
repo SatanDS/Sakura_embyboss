@@ -3,6 +3,8 @@
 import ast
 import asyncio
 import logging
+import random
+import runpy
 import tempfile
 import threading
 import unittest
@@ -10,10 +12,17 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
-from sqlalchemy import BigInteger, Column, DateTime, Integer, String, create_engine
+from sqlalchemy import (
+    BigInteger, Column, DateTime, ForeignKey, Integer, String, Text, create_engine,
+    func, inspect,
+)
 from sqlalchemy.orm import declarative_base, sessionmaker
+from alembic.config import Config
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
+from alembic.script import ScriptDirectory
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -252,32 +261,195 @@ class RenewalAllTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RedEnvelopeTests(unittest.IsolatedAsyncioTestCase):
-    async def test_equal_envelopes_conserve_full_amount(self):
-        for money, count in [(5, 2), (10, 3), (100, 7), (10, 5), (5, 1)]:
-            with self.subTest(money=money, count=count):
-                balances = {uid: 0 for uid in range(count)}
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.engine = create_engine(
+            "sqlite:///" + str(Path(self.temp.name) / "red-envelope.db"),
+            connect_args={"timeout": 10},
+        )
+        self.sessions = sessionmaker(bind=self.engine, autoflush=False, expire_on_commit=False)
+        self.env = dict(
+            Base=declarative_base(), Column=Column, BigInteger=BigInteger,
+            DateTime=DateTime, Integer=Integer, String=String, Text=Text,
+            ForeignKey=ForeignKey, datetime=datetime, random=random, func=func,
+            LOGGER=logging.getLogger("red-envelope-test"), Session=self.sessions,
+        )
+        load_definitions("bot/sql_helper/sql_emby.py", {"Emby"}, self.env)
+        load_definitions(
+            "bot/sql_helper/sql_red_envelope.py",
+            {
+                "MAX_POINTS", "RedEnvelopeRecord", "RedEnvelopeClaim", "_snapshot",
+                "sql_create_red_envelope", "sql_activate_red_envelope",
+                "sql_get_red_envelope", "sql_claim_red_envelope",
+                "sql_refund_pending_red_envelope", "sql_recover_pending_red_envelopes",
+            },
+            self.env,
+        )
+        self.env["Base"].metadata.create_all(self.engine)
+        self.Emby = self.env["Emby"]
+        with self.sessions() as session:
+            session.add_all([self.Emby(tg=1, iv=100)] + [
+                self.Emby(tg=uid, iv=0) for uid in range(2, 12)
+            ])
+            session.commit()
 
-                class UserColumn:
-                    def __eq__(self, other):
-                        return other
+    def tearDown(self):
+        self.engine.dispose()
+        self.temp.cleanup()
 
-                def update(uid, **kwargs):
-                    balances[uid] = kwargs["iv"]
-                    return True
+    def balance(self, tg):
+        with self.sessions() as session:
+            return session.get(self.Emby, tg).iv
 
-                env = dict(sql_get_emby=lambda tg: SimpleNamespace(iv=balances[tg]), sql_update_emby=update,
-                           Emby=SimpleNamespace(tg=UserColumn()), callAnswer=AsyncMock(), editMessage=AsyncMock(),
-                           MAX_INT_VALUE=2**31 - 1, MIN_INT_VALUE=-(2**31), sakura_b="coins", red_envelopes={},
-                           generate_final_message=AsyncMock(return_value="done"))
-                load_definitions("bot/modules/extra/red_envelope.py", {"RedEnvelope", "grab_red_envelope"}, env)
-                envelope = env["RedEnvelope"](money, count, 99, "sender", "equal")
-                env["red_envelopes"]["test"] = envelope
-                for uid in balances:
-                    call = SimpleNamespace(data="red_envelope-test", from_user=SimpleNamespace(id=uid, first_name="test"))
-                    await env["grab_red_envelope"](None, call)
-                self.assertEqual(sum(balances.values()), money)
-                self.assertEqual(envelope.rest_money, 0)
-                self.assertNotIn("test", env["red_envelopes"])
+    def claims(self, envelope_id):
+        with self.sessions() as session:
+            return session.query(self.env["RedEnvelopeClaim"]).filter_by(
+                envelope_id=envelope_id
+            ).all()
+
+    def create(self, envelope_id, money=10, members=2, kind="equal", target=None):
+        return self.env["sql_create_red_envelope"](
+            envelope_id, 1, "sender", money, members, kind, target, "good luck"
+        )
+
+    def test_pending_escrow_is_refunded_once_during_startup_recovery(self):
+        self.assertEqual(self.create("pending"), "ok")
+        self.assertEqual(self.balance(1), 90)
+        self.assertEqual(self.env["sql_recover_pending_red_envelopes"](), (1, 0))
+        self.assertEqual(self.balance(1), 100)
+        self.assertEqual(self.env["sql_recover_pending_red_envelopes"](), (0, 0))
+        record = self.env["sql_get_red_envelope"]("pending")
+        self.assertEqual(record["state"], "refunded")
+        self.assertEqual(record["refunded_amount"], 10)
+
+    def test_claim_ledger_and_balances_survive_new_session_factory_and_retry(self):
+        self.assertEqual(self.create("persistent"), "ok")
+        self.assertTrue(self.env["sql_activate_red_envelope"]("persistent"))
+        self.env["Session"] = sessionmaker(
+            bind=self.engine, autoflush=False, expire_on_commit=False
+        )
+
+        first = self.env["sql_claim_red_envelope"]("persistent", 2, "first")
+        self.assertEqual((first["status"], first["amount"], first["completed"]), ("ok", 5, False))
+        self.env["Session"] = sessionmaker(
+            bind=self.engine, autoflush=False, expire_on_commit=False
+        )
+        last = self.env["sql_claim_red_envelope"]("persistent", 3, "last")
+        self.assertTrue(last["completed"])
+        self.assertEqual(self.balance(1), 90)
+        self.assertEqual(self.balance(2), 5)
+        self.assertEqual(self.balance(3), 5)
+        self.assertEqual(len(self.claims("persistent")), 2)
+
+        retry = self.env["sql_claim_red_envelope"]("persistent", 3, "last")
+        self.assertEqual((retry["status"], retry["amount"]), ("already_claimed", 5))
+        self.assertTrue(retry["completed"])
+        self.assertEqual(len(retry["claims"]), 2)
+        self.assertEqual(self.balance(3), 5)
+
+    def test_private_envelope_only_credits_target(self):
+        self.assertEqual(
+            self.create("private", money=5, members=1, kind="private", target=2), "ok"
+        )
+        self.env["sql_activate_red_envelope"]("private")
+        forbidden = self.env["sql_claim_red_envelope"]("private", 3, "other")
+        self.assertEqual(forbidden["status"], "forbidden")
+        self.assertEqual(self.balance(3), 0)
+        claimed = self.env["sql_claim_red_envelope"]("private", 2, "target")
+        self.assertEqual((claimed["status"], claimed["amount"]), ("ok", 5))
+
+    def test_invalid_private_shape_does_not_debit_sender(self):
+        self.assertEqual(
+            self.create("invalid", money=10, members=2, kind="private", target=2), "invalid"
+        )
+        self.assertEqual(self.balance(1), 100)
+
+    def test_concurrent_envelope_creation_cannot_spend_same_balance_twice(self):
+        barrier = threading.Barrier(2)
+
+        def create(index):
+            barrier.wait(timeout=5)
+            return self.create(f"concurrent-{index}", money=80, members=2)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(create, (1, 2)))
+
+        self.assertEqual(results.count("ok"), 1)
+        self.assertEqual(self.balance(1), 20)
+        with self.sessions() as session:
+            pending_count = session.query(self.env["RedEnvelopeRecord"]).filter_by(
+                state="pending"
+            ).count()
+        self.assertEqual(pending_count, 1)
+
+    def test_concurrent_claims_never_duplicate_credit_or_overclaim(self):
+        self.assertEqual(self.create("racing"), "ok")
+        self.env["sql_activate_red_envelope"]("racing")
+        barrier = threading.Barrier(5)
+
+        def claim(uid):
+            barrier.wait(timeout=5)
+            return self.env["sql_claim_red_envelope"]("racing", uid, f"u{uid}")
+
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            list(pool.map(claim, range(2, 7)))
+        state = self.env["sql_get_red_envelope"]("racing")
+        if state["state"] == "open":
+            for uid in range(2, 7):
+                self.env["sql_claim_red_envelope"]("racing", uid, f"u{uid}")
+        state = self.env["sql_get_red_envelope"]("racing")
+        claims = self.claims("racing")
+        self.assertEqual(state["state"], "completed")
+        self.assertEqual(state["remaining_amount"], 0)
+        self.assertEqual(state["remaining_members"], 0)
+        self.assertEqual(len(claims), 2)
+        self.assertEqual(sum(claim.amount for claim in claims), 10)
+        self.assertEqual(sum(self.balance(uid) for uid in range(2, 7)), 10)
+
+    async def test_publish_failure_refunds_pending_escrow(self):
+        reply = SimpleNamespace(edit=AsyncMock(), delete=AsyncMock())
+        env = dict(
+            create_reds=AsyncMock(return_value=("keyboard", "publish-failure", "ok")),
+            get_user_photo=AsyncMock(return_value=None),
+            RanksDraw=SimpleNamespace(hb_test_draw=AsyncMock(return_value="cover")),
+            sendPhoto=AsyncMock(return_value=False),
+            sql_activate_red_envelope=Mock(return_value=False),
+            sql_refund_pending_red_envelope=Mock(return_value=True),
+            sql_get_red_envelope=Mock(return_value=None),
+            LOGGER=logging.getLogger("red-envelope-publish-test"),
+        )
+        load_definitions("bot/modules/extra/red_envelope.py", {"_publish_red_envelope"}, env)
+        result = await env["_publish_red_envelope"](
+            SimpleNamespace(), reply, money=5, members=1, first_name="sender",
+            sender_id=1, envelope_type="equal", photo_user=SimpleNamespace(),
+            cover_name="sender",
+        )
+        self.assertFalse(result)
+        env["sql_refund_pending_red_envelope"].assert_called_once_with("publish-failure")
+        self.assertIn("积分已退回", reply.edit.await_args.args[0])
+
+
+class RedEnvelopeMigrationTests(unittest.TestCase):
+    def test_migration_is_repeatable_and_the_only_head(self):
+        script = ScriptDirectory.from_config(Config(str(ROOT / "alembic.ini")))
+        self.assertEqual(script.get_heads(), ["20260929_13"])
+
+        engine = create_engine("sqlite:///:memory:")
+        with engine.begin() as connection:
+            context = MigrationContext.configure(connection)
+            with Operations.context(context):
+                migration = runpy.run_path(
+                    str(ROOT / "bot/sql_helper/alembic/versions/20260929_13_add_red_envelope_ledger.py")
+                )
+                migration["upgrade"]()
+                migration["upgrade"]()
+
+        inspector = inspect(engine)
+        self.assertTrue(inspector.has_table("red_envelopes"))
+        self.assertTrue(inspector.has_table("red_envelope_claims"))
+        foreign_key = inspector.get_foreign_keys("red_envelope_claims")[0]
+        self.assertNotEqual(foreign_key["options"].get("ondelete"), "CASCADE")
+        engine.dispose()
 
 
 if __name__ == "__main__":

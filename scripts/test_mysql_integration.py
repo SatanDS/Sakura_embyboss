@@ -14,6 +14,7 @@ import logging
 import os
 from pathlib import Path
 import re
+import random
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -65,7 +66,9 @@ def load_sql_runtime(engine):
         Base=declarative_base(), Session=sessionmaker(bind=engine, autoflush=False, expire_on_commit=False),
         Column=sa.Column, BigInteger=sa.BigInteger, String=sa.String, DateTime=sa.DateTime,
         Integer=sa.Integer, datetime=datetime, timedelta=timedelta, and_=sa.and_, or_=sa.or_,
+        ForeignKey=sa.ForeignKey, Text=sa.Text, func=sa.func,
         Optional=Optional, List=List, Dict=Dict, Tuple=Tuple, LOGGER=LOGGER,
+        random=random,
     )
     load_source("bot/sql_helper/sql_emby.py", {"Emby", "sql_update_emby"}, namespace)
     load_source("bot/sql_helper/sql_emby2.py", {"Emby2", "sql_get_emby2", "sql_update_emby2", "get_all_emby2"}, namespace)
@@ -73,6 +76,16 @@ def load_sql_runtime(engine):
                 {"Code", "INVITE_DURATIONS", "MAX_INVITE_CODES", "sql_buy_invite_codes"}, namespace)
     load_source("bot/sql_helper/sql_partition.py",
                 {"PartitionCode", "PartitionGrant", "sql_get_expired_grants", "sql_mark_grants_expired"}, namespace)
+    load_source(
+        "bot/sql_helper/sql_red_envelope.py",
+        {
+            "MAX_POINTS", "RedEnvelopeRecord", "RedEnvelopeClaim", "_snapshot",
+            "sql_create_red_envelope", "sql_activate_red_envelope", "sql_get_red_envelope",
+            "sql_claim_red_envelope", "sql_refund_pending_red_envelope",
+            "sql_recover_pending_red_envelopes",
+        },
+        namespace,
+    )
     return namespace
 
 
@@ -84,7 +97,7 @@ def migration_imports(namespace):
     package = modules["bot.sql_helper"]
     package.__path__ = [str(ROOT / "bot/sql_helper")]
     package.Base, package.Session = namespace["Base"], namespace["Session"]
-    for name in ("sql_code", "sql_emby", "sql_emby2", "sql_favorites", "sql_partition", "sql_request_record", "sql_douban"):
+    for name in ("sql_code", "sql_emby", "sql_red_envelope", "sql_emby2", "sql_favorites", "sql_partition", "sql_request_record", "sql_douban"):
         module = ModuleType("bot.sql_helper." + name)
         modules[module.__name__] = module
         setattr(package, name, module)
@@ -164,7 +177,7 @@ class MySQLIntegrationTests(unittest.TestCase):
         cls.sql = load_sql_runtime(cls.engine)
         cls.fresh_sql = load_sql_runtime(cls.fresh_engine)
 
-        run_upgrade(cls.upgrade_url, cls.sql, "20260315_04")
+        run_upgrade(cls.upgrade_url, cls.sql, "20260315_03")
         cls.old_revision = revision_at(cls.engine)
         cls.old_columns = {column["name"] for column in sa.inspect(cls.engine).get_columns("emby")}
         with cls.engine.begin() as connection:
@@ -187,7 +200,7 @@ class MySQLIntegrationTests(unittest.TestCase):
     def test_upgrade_retains_old_rows_and_null_freeze_start(self):
         self.assertEqual(self.old_revision, "20260315_03")
         self.assertNotIn("disabled_at", self.old_columns)
-        self.assertEqual(self.first_revision, "20260909_05")
+        self.assertEqual(self.first_revision, "20260929_13")
         self.assertEqual(self.repeated_revision, self.first_revision)
         with self.sql["Session"]() as session:
             disabled = session.get(self.sql["Emby"], 11001)
@@ -200,7 +213,7 @@ class MySQLIntegrationTests(unittest.TestCase):
             self.assertIsNone(active.disabled_at)
 
     def test_fresh_startup_and_repeat_upgrade_are_usable(self):
-        self.assertEqual(self.first_fresh_revision, "20260909_05")
+        self.assertEqual(self.first_fresh_revision, "20260929_13")
         self.assertEqual(self.repeated_fresh_revision, self.first_fresh_revision)
         with self.fresh_sql["Session"]() as session:
             row = self.fresh_sql["Emby"](tg=12001, embyid="fresh-user", lv="c", disabled_at=datetime(2026, 9, 9))
@@ -225,6 +238,70 @@ class MySQLIntegrationTests(unittest.TestCase):
         with self.sql["Session"]() as session:
             self.assertEqual(session.get(self.sql["Emby"], 13001).iv, 40)
             self.assertEqual(session.query(self.sql["Code"]).filter(self.sql["Code"].tg == 13001).count(), 1)
+
+    def test_real_red_envelope_concurrent_creation_and_claims_are_atomic(self):
+        with self.sql["Session"]() as session:
+            session.add_all([
+                self.sql["Emby"](tg=13101, lv="b", iv=100),
+                self.sql["Emby"](tg=13102, lv="c", iv=0),
+                self.sql["Emby"](tg=13103, lv="c", iv=0),
+                self.sql["Emby"](tg=13104, lv="c", iv=0),
+            ])
+            session.commit()
+
+        barrier = threading.Barrier(2)
+
+        def create(index):
+            barrier.wait(timeout=10)
+            return self.sql["sql_create_red_envelope"](
+                f"mysql-race-{index}", 13101, "sender", 80, 2, "equal", None, "test"
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            created = list(pool.map(create, (1, 2)))
+        self.assertEqual(sorted(created), ["insufficient", "ok"])
+        with self.sql["Session"]() as session:
+            self.assertEqual(session.get(self.sql["Emby"], 13101).iv, 20)
+            envelope = session.query(self.sql["RedEnvelopeRecord"]).filter_by(
+                sender_id=13101, state="pending"
+            ).one()
+            envelope_id = envelope.id
+        self.assertTrue(self.sql["sql_activate_red_envelope"](envelope_id))
+
+        barrier = threading.Barrier(3)
+
+        def claim(tg):
+            barrier.wait(timeout=10)
+            return self.sql["sql_claim_red_envelope"](envelope_id, tg, f"u{tg}")
+
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            outcomes = list(pool.map(claim, (13102, 13103, 13104)))
+        self.assertEqual(sum(outcome["status"] == "ok" for outcome in outcomes), 2)
+        with self.sql["Session"]() as session:
+            envelope = session.get(self.sql["RedEnvelopeRecord"], envelope_id)
+            claims = session.query(self.sql["RedEnvelopeClaim"]).filter_by(
+                envelope_id=envelope_id
+            ).all()
+            self.assertEqual((envelope.state, envelope.remaining_amount, envelope.remaining_members),
+                             ("completed", 0, 0))
+            self.assertEqual(len(claims), 2)
+            self.assertEqual(sum(claim.amount for claim in claims), 10)
+            self.assertEqual(sum(session.get(self.sql["Emby"], tg).iv
+                                 for tg in (13102, 13103, 13104)), 10)
+
+    def test_real_pending_red_envelope_refund_is_durable_and_idempotent(self):
+        with self.sql["Session"]() as session:
+            session.add(self.sql["Emby"](tg=13111, lv="b", iv=20))
+            session.commit()
+        self.assertEqual(self.sql["sql_create_red_envelope"](
+            "mysql-refund", 13111, "sender", 10, 2, "equal", None, "test"
+        ), "ok")
+        self.assertEqual(self.sql["sql_recover_pending_red_envelopes"](), (1, 0))
+        self.assertEqual(self.sql["sql_recover_pending_red_envelopes"](), (0, 0))
+        with self.sql["Session"]() as session:
+            self.assertEqual(session.get(self.sql["Emby"], 13111).iv, 20)
+            row = session.get(self.sql["RedEnvelopeRecord"], "mysql-refund")
+            self.assertEqual((row.state, row.refunded_amount), ("refunded", 10))
 
     def test_real_code_insert_failure_rolls_back_charge(self):
         with self.sql["Session"]() as session:

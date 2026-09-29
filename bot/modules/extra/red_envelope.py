@@ -14,19 +14,32 @@ from pyrogram import filters
 from pyrogram.types import ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup
 from sqlalchemy import func
 
-from bot import bot, prefixes, sakura_b, bot_photo, red_envelope, _open
+from bot import bot, prefixes, sakura_b, bot_photo, red_envelope, _open, LOGGER
 from bot.func_helper.filters import user_in_group_on_filter
 from bot.func_helper.fix_bottons import users_iv_button
 from bot.func_helper.msg_utils import sendPhoto, sendMessage, callAnswer, editMessage
 from bot.func_helper.utils import pwd_create, judge_admins, get_users, cache
 from bot.sql_helper import Session
-from bot.sql_helper.sql_emby import Emby, sql_get_emby, sql_update_emby
+from bot.sql_helper.sql_emby import sql_get_emby, sql_spend_emby_iv
+from bot.sql_helper.sql_red_envelope import (
+    sql_activate_red_envelope,
+    sql_claim_red_envelope,
+    sql_create_red_envelope,
+    sql_get_red_envelope,
+    sql_recover_pending_red_envelopes,
+    sql_refund_pending_red_envelope,
+)
 from bot.ranks_helper.ranks_draw import RanksDraw
-from bot.schemas import Yulv, MAX_INT_VALUE, MIN_INT_VALUE
+from bot.schemas import Yulv
 
-# 小项目，说实话不想写数据库里面。放内存里了，从字典里面每次拿分
+# 红包余额和领取明细保存在数据库中，领取与积分入账在同一事务提交。
 
-red_envelopes = {}
+recovered_envelopes, failed_recoveries = sql_recover_pending_red_envelopes()
+if recovered_envelopes or failed_recoveries:
+    LOGGER.warning(
+        f"Red envelope startup recovery: refunded={recovered_envelopes}, "
+        f"pending={failed_recoveries}"
+    )
 
 
 class RedEnvelope:
@@ -42,6 +55,33 @@ class RedEnvelope:
         self.receivers = {}  # {user_id: {"amount": xx, "name": "xx"}}
         self.target_user = None  # 专享红包接收者ID
         self.message = None  # 红包消息（普通红包和专享红包共用）
+
+
+def _build_completed_red_envelope(stored, claims):
+    envelope = RedEnvelope(
+        stored["total_amount"], stored["total_members"],
+        stored["sender_id"], stored["sender_name"], stored["envelope_type"],
+    )
+    envelope.id = stored["id"]
+    envelope.rest_money = stored["remaining_amount"]
+    envelope.rest_members = stored["remaining_members"]
+    envelope.target_user = stored["target_user"]
+    envelope.message = stored["message"]
+    envelope.receivers = {
+        claim["tg"]: {"amount": claim["amount"], "name": claim["name"]}
+        for claim in claims
+    }
+    return envelope
+
+
+async def _show_completed_red_envelope(call, envelope):
+    text = await generate_final_message(envelope)
+    chunks = [text[i : i + 2048] for i in range(0, len(text), 2048)]
+    for index, chunk in enumerate(chunks):
+        if index == 0:
+            await editMessage(call, chunk)
+        else:
+            await call.message.reply(chunk)
 
 
 async def create_reds(
@@ -71,9 +111,7 @@ async def create_reds(
     else:
         envelope.message = private_text
     envelope.id = red_id
-    red_envelopes[red_id] = envelope
-
-    return InlineKeyboardMarkup(
+    keyboard = InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton(
@@ -82,6 +120,101 @@ async def create_reds(
             ]
         ]
     )
+    try:
+        status = sql_create_red_envelope(
+            envelope_id=red_id,
+            sender_id=sender_id,
+            sender_name=first_name,
+            money=money,
+            members=members,
+            envelope_type=envelope.type,
+            target_user=envelope.target_user,
+            message=envelope.message,
+        )
+    except Exception as exc:
+        LOGGER.error(f"Red envelope creation failed: {type(exc).__name__}")
+        status = "error"
+    if status != "ok":
+        return None, red_id, status
+    return keyboard, red_id, status
+
+
+async def _publish_red_envelope(
+    msg,
+    reply,
+    *,
+    money,
+    members,
+    first_name,
+    sender_id,
+    envelope_type,
+    photo_user,
+    cover_name,
+    private=None,
+    private_text=None,
+    success_text=None,
+):
+    try:
+        keyboard, red_id, status = await create_reds(
+            money=money,
+            members=members,
+            first_name=first_name,
+            sender_id=sender_id,
+            envelope_type=envelope_type,
+            private=private,
+            private_text=private_text,
+        )
+    except Exception as exc:
+        LOGGER.error(f"Red envelope creation failed: {type(exc).__name__}")
+        await reply.edit("红包创建失败；如果积分已扣除，请联系管理员核对并提供发送时间。")
+        return False
+
+    if status != "ok":
+        refunded = sql_refund_pending_red_envelope(red_id)
+        if status == "insufficient":
+            text = "积分余额已变化或不足，未创建红包。"
+        elif refunded:
+            text = f"红包创建未完成，积分已退回。红包编号：{red_id}"
+        else:
+            current = sql_get_red_envelope(red_id)
+            if current and current["state"] == "pending":
+                detail = "退款暂未完成，系统会在重启恢复时重试。"
+            elif current and current["state"] == "open":
+                detail = "红包可能已开放，请联系管理员核对。"
+            else:
+                detail = "请联系管理员核对积分和红包状态。"
+            text = f"红包记录创建未确认，{detail}红包编号：{red_id}"
+        await reply.edit(text)
+        return False
+
+    try:
+        user_pic = await get_user_photo(photo_user)
+        cover = await RanksDraw.hb_test_draw(money, members, user_pic, cover_name)
+        if await sendPhoto(msg, photo=cover, buttons=keyboard) is not True:
+            raise RuntimeError("Telegram did not confirm photo delivery")
+        if not sql_activate_red_envelope(red_id):
+            raise RuntimeError("red envelope activation failed")
+    except Exception as exc:
+        refunded = sql_refund_pending_red_envelope(red_id)
+        LOGGER.error(f"Red envelope publishing failed: {type(exc).__name__}")
+        if refunded:
+            result = "积分已退回。"
+        else:
+            current = sql_get_red_envelope(red_id)
+            if current and current["state"] == "pending":
+                result = "退款暂未完成，系统会在重启恢复时重试。"
+            elif current and current["state"] == "open":
+                result = "红包可能已开放，请联系管理员核对。"
+            else:
+                result = "请联系管理员核对积分和红包状态。"
+        await reply.edit(f"红包发送失败。{result}")
+        return False
+
+    if success_text:
+        await reply.edit(success_text)
+    else:
+        await reply.delete()
+    return True
 
 
 @bot.on_message(
@@ -99,12 +232,18 @@ async def send_red_envelope(_, msg):
         )
 
     # 处理专享红包
+    if msg.sender_chat:
+        return await asyncio.gather(
+            msg.delete(),
+            sendMessage(msg, "红包必须由个人账号发起，暂不支持以群组身份发送。", timer=60),
+        )
+
     if msg.reply_to_message and red_envelope.allow_private:
         target_from_user = msg.reply_to_message.from_user
         target_sender_chat = msg.reply_to_message.sender_chat
 
         # 不允许对机器人或频道发送专属红包
-        if (target_from_user and target_from_user.is_bot) or target_sender_chat:
+        if not target_from_user or target_from_user.is_bot or target_sender_chat:
             return await asyncio.gather(
                 msg.delete(),
                 sendMessage(msg, "🚫 专属红包不能发给机器人或频道!", timer=60),
@@ -157,28 +296,24 @@ async def send_red_envelope(_, msg):
             msg.reply("正在准备专享红包，稍等"), msg.delete()
         )
 
-        ikb = await create_reds(
+        await _publish_red_envelope(
+            msg,
+            reply,
             money=money,
             members=1,
             first_name=first_name,
-            sender_id=msg.from_user.id if not msg.sender_chat else msg.sender_chat.id,
+            sender_id=msg.from_user.id,
+            envelope_type="private",
+            photo_user=msg.reply_to_message.from_user,
+            cover_name=f"{msg.reply_to_message.from_user.first_name} 专享",
             private=msg.reply_to_message.from_user.id,
             private_text=private_text,
-        )
-
-        user_pic = await get_user_photo(msg.reply_to_message.from_user)
-        cover = await RanksDraw.hb_test_draw(
-            money, 1, user_pic, f"{msg.reply_to_message.from_user.first_name} 专享"
-        )
-
-        sign_name = f'{msg.sender_chat.title}' if msg.sender_chat else f'[{msg.from_user.first_name}](tg://user?id={msg.from_user.id})'
-        await asyncio.gather(
-            sendPhoto(msg, photo=cover, buttons=ikb),
-            reply.edit(
+            success_text=(
                 f"🔥 [{msg.reply_to_message.from_user.first_name}]"
                 f"(tg://user?id={msg.reply_to_message.from_user.id})\n"
-                f"您收到一个来自 {sign_name} 的专属红包"
-            )
+                f"您收到一个来自 [{msg.from_user.first_name}]"
+                f"(tg://user?id={msg.from_user.id}) 的专属红包"
+            ),
         )
         return
 
@@ -197,6 +332,12 @@ async def send_red_envelope(_, msg):
             ),
         )
 
+    if money < 5 or members < 1 or money < members:
+        return await asyncio.gather(
+            msg.delete(),
+            sendMessage(msg, "红包金额至少为 5，份数必须大于 0 且不能多于金额。", timer=60),
+        )
+
     # 验证发送者资格和红包参数
     verified, first_name, error = await verify_red_envelope_sender(msg, money)
     if not verified:
@@ -208,99 +349,69 @@ async def send_red_envelope(_, msg):
     private_text = msg.command[4] if len(msg.command) > 4 else None
     reply, _ = await asyncio.gather(msg.reply("正在准备红包，稍等"), msg.delete())
 
-    ikb = await create_reds(
+    await _publish_red_envelope(
+        msg,
+        reply,
         money=money,
         members=members,
         first_name=first_name,
-        sender_id=msg.from_user.id if not msg.sender_chat else msg.sender_chat.id,
+        sender_id=msg.from_user.id,
         envelope_type=envelope_type,
-        private_text=private_text
+        photo_user=msg.from_user,
+        cover_name=first_name,
+        private_text=private_text,
     )
-
-    user_pic = await get_user_photo(msg.from_user if not msg.sender_chat else msg.chat)
-    cover = await RanksDraw.hb_test_draw(money, members, user_pic, first_name)
-
-    await asyncio.gather(sendPhoto(msg, photo=cover, buttons=ikb), reply.delete())
 
 
 @bot.on_callback_query(filters.regex("red_envelope") & user_in_group_on_filter)
 async def grab_red_envelope(_, call):
-    red_id = call.data.split("-")[1]
-    try:
-        envelope = red_envelopes[red_id]
-    except (IndexError, KeyError):
+    parts = call.data.split("-", 1)
+    if len(parts) != 2 or not parts[1]:
         return await callAnswer(
             call, "/(ㄒoㄒ)/~~ \n\n来晚了，红包已经被抢光啦。", True
         )
+    red_id = parts[1]
+    envelope = sql_get_red_envelope(red_id)
+    if not envelope:
+        return await callAnswer(call, "红包记录暂时不可用，请稍后重试。", True)
 
-    # 验证用户资格
-    e = sql_get_emby(tg=call.from_user.id)
-    if not e:
-        return await callAnswer(call, "你还未私聊bot! 数据库没有你.", True)
-
-    # 检查是否已领取
-    if call.from_user.id in envelope.receivers:
-        return await callAnswer(call, "ʕ•̫͡•ʔ 你已经领取过红包了。不许贪吃", True)
-
-    # 检查红包是否已抢完
-    if envelope.rest_members <= 0:
-        return await callAnswer(
-            call, "/(ㄒoㄒ)/~~ \n\n来晚了，红包已经被抢光啦。", True
-        )
-
-    amount = 0
-    # 处理均分红包
-    if envelope.type == "equal":
-        amount = envelope.rest_money if envelope.rest_members == 1 else envelope.money // envelope.members
-
-    # 处理专享红包
-    elif envelope.type == "private":
-        if call.from_user.id != envelope.target_user:
-            return await callAnswer(call, "ʕ•̫͡•ʔ 这是你的专属红包吗？", True)
-        amount = envelope.rest_money
-        await callAnswer(
-            call,
-            f"🧧恭喜，你领取到了\n{envelope.sender_name} の {amount}{sakura_b}\n\n{envelope.message}",
-            True,
-        )
-
-    # 处理拼手气红包
-    else:
-        if envelope.rest_members > 1:
-            k = 2 * envelope.rest_money / envelope.rest_members
-            amount = int(random.uniform(1, k))
-        else:
-            amount = envelope.rest_money
-
-    # 更新用户余额
-    new_balance = e.iv + amount
-    if new_balance > MAX_INT_VALUE or new_balance < MIN_INT_VALUE:
-        return await callAnswer(call, f"账户余额超出安全范围（{MIN_INT_VALUE} 到 {MAX_INT_VALUE}）。", True)
-    sql_update_emby(Emby.tg == call.from_user.id, iv=new_balance)
-
-    # 更新红包信息
-    envelope.receivers[call.from_user.id] = {
-        "amount": amount,
-        "name": call.from_user.first_name or "Anonymous",
-    }
-    envelope.rest_money -= amount
-    envelope.rest_members -= 1
-
-    await callAnswer(
-        call, f"🧧恭喜，你领取到了\n{envelope.sender_name} の {amount}{sakura_b}", True
+    result = sql_claim_red_envelope(
+        red_id, call.from_user.id, call.from_user.first_name or "Anonymous"
     )
+    status = result["status"]
+    if status == "already_claimed":
+        await callAnswer(
+            call, f"你已经领取过这个红包，获得 {result['amount']}{sakura_b}。", True
+        )
+        if result.get("completed") and result.get("envelope") and result.get("claims"):
+            completed = _build_completed_red_envelope(
+                result["envelope"], result["claims"]
+            )
+            await _show_completed_red_envelope(call, completed)
+        return
+    status_text = {
+        "not_found": "红包不存在。",
+        "closed": "红包已经被抢完或已退回。",
+        "forbidden": "这是发给其他用户的专享红包。",
+        "not_registered": "你还未私聊 bot，无法领取红包。",
+        "balance_limit": "账户积分达到安全上限，暂时无法领取。",
+        "invalid_state": "红包状态异常，未发放积分，请联系管理员。",
+        "error": "领取暂时失败，积分未变动，请重试。",
+    }
+    if status != "ok":
+        return await callAnswer(call, status_text.get(status, "领取暂时失败，请重试。"), True)
 
-    # 处理红包抢完后的展示
-    if envelope.rest_members == 0:
-        red_envelopes.pop(red_id)
-        text = await generate_final_message(envelope)
-        n = 2048
-        chunks = [text[i : i + n] for i in range(0, len(text), n)]
-        for i, chunk in enumerate(chunks):
-            if i == 0:
-                await editMessage(call, chunk)
-            else:
-                await call.message.reply(chunk)
+    amount = result["amount"]
+    notice = f"🧧恭喜，你领取到了\n{envelope['sender_name']} の {amount}{sakura_b}"
+    if envelope["envelope_type"] == "private":
+        notice += f"\n\n{envelope['message']}"
+    await callAnswer(call, notice, True)
+
+    if result["completed"]:
+        completed = _build_completed_red_envelope(
+            result["envelope"], result["claims"]
+        )
+        await _show_completed_red_envelope(call, completed)
 
 
 async def verify_red_envelope_sender(msg, money, is_private=False):
@@ -351,8 +462,7 @@ async def verify_red_envelope_sender(msg, money, is_private=False):
             )
             return False, None, error_msg
 
-        # 验证通过,扣除余额
-        sql_update_emby(Emby.tg == msg.from_user.id, iv=e.iv - money)
+        # The sender balance is debited together with the durable pending record.
         return True, msg.from_user.first_name, None
 
     else:
@@ -360,7 +470,7 @@ async def verify_red_envelope_sender(msg, money, is_private=False):
         first_name = msg.chat.title if msg.sender_chat.id == msg.chat.id else None
         if not first_name:
             return False, None, "无法获取发送者名称"
-        return True, first_name, None
+        return False, None, "红包必须由个人账号发起。"
 
 
 async def get_user_photo(user):
@@ -407,10 +517,13 @@ async def generate_final_message(envelope):
 async def s_rank(_, msg):
     await msg.delete()
     sender = None
+    should_charge = False
     if not msg.sender_chat:
         e = sql_get_emby(tg=msg.from_user.id)
         if judge_admins(msg.from_user.id):
             sender = msg.from_user.id
+        elif _open.srank_cost < 0:
+            return await sendMessage(msg, "排行榜积分设置无效，未扣除积分。", timer=60)
         elif not e or e.iv < _open.srank_cost:
             await msg.delete()
             try:
@@ -429,14 +542,26 @@ async def s_rank(_, msg):
                 print(e)
             return
         else:
-            sql_update_emby(Emby.tg == msg.from_user.id, iv=e.iv - _open.srank_cost)
+            should_charge = _open.srank_cost > 0
             sender = msg.from_user.id
     elif msg.sender_chat.id == msg.chat.id:
         sender = msg.chat.id
-    reply = await msg.reply(f"已扣除手续{_open.srank_cost}{sakura_b}, 请稍等......加载中")
-    text, i = await users_iv_rank()
-    t = "❌ 数据库操作失败" if not text else text[0]
-    button = await users_iv_button(i, 1, sender or msg.chat.id)
+    reply = await msg.reply("正在读取排行榜，读取成功后再结算积分。")
+    try:
+        text, i = await users_iv_rank()
+        if not text:
+            await reply.delete()
+            return await sendMessage(msg, "暂时无法读取排行榜，未扣除积分，请稍后重试。", timer=60)
+        t = text[0]
+        button = await users_iv_button(i, 1, sender or msg.chat.id)
+    except Exception as exc:
+        LOGGER.warning(f"Point ranking generation failed: {type(exc).__name__}")
+        await reply.delete()
+        return await sendMessage(msg, "暂时无法生成排行榜，未扣除积分，请稍后重试。", timer=60)
+
+    if should_charge and not sql_spend_emby_iv(msg.from_user.id, _open.srank_cost):
+        await reply.delete()
+        return await sendMessage(msg, "积分余额已变化或扣款失败，未发送排行榜。", timer=60)
     await asyncio.gather(
         reply.delete(),
         sendPhoto(

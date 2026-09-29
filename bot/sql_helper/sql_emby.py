@@ -289,6 +289,28 @@ def sql_update_emby(condition, *, entitlement_block_reason=None, entitlement_unb
             return False
 
 
+def sql_spend_emby_iv(tg: int, amount: int) -> bool:
+    """Atomically deduct points only when the account still has enough."""
+    if type(amount) is not int or amount <= 0:
+        return False
+    with Session() as session:
+        try:
+            changed = (
+                session.query(Emby)
+                .filter(Emby.tg == tg, Emby.iv >= amount)
+                .update({Emby.iv: Emby.iv - amount}, synchronize_session=False)
+            )
+            if changed != 1:
+                session.rollback()
+                return False
+            session.commit()
+            return True
+        except Exception as exc:
+            LOGGER.error(f"Point deduction failed for uid={tg}: {type(exc).__name__}")
+            session.rollback()
+            return False
+
+
 #
 # def sql_change_emby(name, new_tg):
 #     with Session() as session:
