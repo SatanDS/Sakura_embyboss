@@ -24,7 +24,6 @@ DNS A / AAAA 记录指向 Bot 服务器 IP，DNS 不指定端口。公网使用 
   "http_host": "127.0.0.1",
   "http_port": 8840,
   "bot_username": "emby_dusheng_bot",
-  "max_devices": 3,
   "privacy_version": "2026-10-03",
   "server_urls": ["https://www.dusheng.xyz", "https://www.dusheng.lol"]
 }
@@ -33,6 +32,8 @@ DNS A / AAAA 记录指向 Bot 服务器 IP，DNS 不指定端口。公网使用 
 `server_urls` 是 TV 可连接的 Emby 地址白名单，未列入的地址会被拒绝。这里只列出当前 Bot 主 Emby 服务器的真实访问地址／线路别名。每个地址应能以用户 token 调用 `/Users/Me`，返回同一个绑定的 Emby 用户 ID。不会把 Emby 管理 API Key 发送给这些地址。不同服务器如果使用不同用户 ID，需要另建绑定后才能开放。地址包含子路径时，填写完整基址。
 
 升级代码不会覆盖现有 `config.json` 的白名单；已有部署需在 `dushengtv.server_urls` 中补上 `https://www.dusheng.lol` 并重启 Bot。
+
+设备数量默认不限，可省略 `max_devices`，也可以填 `0`。旧配置中的 `"max_devices": 3` 仍会限制为 3 台；先更新并重建 Bot，再删除该配置或改为 `0` 并重启。Bot 启动保存配置时可能会补回 `"max_devices": 0`，仍表示不限。设备登记、签名验证和撤销功能继续生效。正整数配置保留原有上限语义。
 
 `enabled` 默认关闭，独立于 `api.status` 和 `payments.enabled`。`http_port` 不可与 `api.http_port` 相同。`bot_username` 留空时，服务使用已启动 Bot 的官方用户名。
 
@@ -72,7 +73,7 @@ curl -o /dev/null -w '%{http_code}\n' https://tv-api.dusheng.lol/emby/line-repor
 2. 系统浏览器打开独立 TV 授权页，展示与客户端一致的六位确认码。
 3. 打开 `@emby_dusheng_bot`；`/start tvlogin_…` 只准备请求，用户核对确认码并点击「确认登录」后才批准。不会要求 Telegram 密码或短信验证码，也无需 BotFather 的网页 Login Widget 域名。
 4. 后端按 Telegram 官方 Bot 更新中的数字用户 ID 检查 Emby 绑定、有效权益及禁用状态。客户端以 state 和 PKCE 消费一次性请求。
-5. 客户端用本机 Ed25519 私钥签署 60 秒单次 nonce，登记设备后才能连接 Emby。未绑定、到期、超过设备上限均拒绝。
+5. 客户端用本机 Ed25519 私钥签署 60 秒单次 nonce，登记设备后才能连接 Emby。未绑定、到期均拒绝；仅在配置正整数设备上限时检查数量。
 6. 每次续期／心跳重新检查绑定及设备。访问令牌 15 分钟、会话最长 30 天，刷新令牌单次轮换，重放撤销该会话。
 
 Bot `/tvdevices` 可查看及撤销本人的 TV 设备，即使新电脑因设备数量上限无法登录，也能先在 Bot 释放名额。客户端设备管理也可撤销。撤销后旧会话失效；重新使用必须再次通过 Telegram 确认。

@@ -155,7 +155,8 @@ class DuShengTV(BaseModel):
     http_host: str = "127.0.0.1"
     http_port: int = Field(default=8840, ge=1024, le=65535)
     bot_username: str = "emby_dusheng_bot"
-    max_devices: int = Field(default=3, ge=1, le=100)
+    # Zero (or an omitted setting) means no device-count limit.
+    max_devices: int = Field(default=0, ge=0, le=100)
     privacy_version: str = "2026-10-03"
     # Explicit aliases of the primary Emby server; never arbitrary client URLs.
     server_urls: List[str] = Field(default_factory=lambda: ["https://www.dusheng.xyz", "https://www.dusheng.lol"])

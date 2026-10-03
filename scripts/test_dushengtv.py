@@ -235,6 +235,27 @@ class DesktopTests(unittest.TestCase):
         self.auth.register(second["accessToken"], self.registration(second["accessToken"], hardware))
         self.assertEqual(len(self.auth.devices(second["accessToken"])["devices"]), 1)
 
+    def test_omitted_or_zero_limit_allows_more_than_three_devices(self):
+        spec = importlib.util.spec_from_file_location("tv_settings_test", ROOT / "bot/schemas/schemas.py")
+        schemas = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(schemas)
+        for tg, settings in ((42, {}), (43, {"max_devices": 0})):
+            with self.subTest(settings=settings):
+                cfg = schemas.DuShengTV(**settings)
+                self.assertEqual(cfg.max_devices, 0)
+                self.auth = self.m.service.DesktopAuth(self.sessions, self.m.runtime.account_lookup,
+                                                       max_devices=cfg.max_devices, now=lambda: self.now)
+                for i in range(4):
+                    tokens = self.login(tg=tg, installation=f"unlimited-installation-{i}")
+                result = self.auth.devices(tokens["accessToken"])
+                self.assertEqual(result["maxDevices"], 0)
+                self.assertEqual(len(result["devices"]), 4)
+                self.assertEqual(self.auth.session(tokens["accessToken"])["maxDevices"], 0)
+                self.assertEqual(self.auth.bot_devices(tg)["maxDevices"], 0)
+        self.assertEqual(schemas.DuShengTV(max_devices=3).max_devices, 3)
+        with self.assertRaises(ValueError):
+            schemas.DuShengTV(max_devices=-1)
+
     def test_refresh_rotation_replay_revokes_family_and_checks_installation(self):
         first = self.login()
         request = {"refreshToken": first["refreshToken"], "installationId": self.installation}

@@ -54,7 +54,7 @@ def canonical_url(value, *, https_only=False):
 
 
 class DesktopAuth:
-    def __init__(self, sessions, account_lookup, *, max_devices=3, consent_version="2026-10-03", now=None):
+    def __init__(self, sessions, account_lookup, *, max_devices=0, consent_version="2026-10-03", now=None):
         self.sessions, self.account_lookup = sessions, account_lookup
         self.max_devices, self.consent_version = max_devices, consent_version
         self.now = now or datetime.utcnow
@@ -277,7 +277,8 @@ class DesktopAuth:
             device = db.query(Device).filter_by(tg=session.tg, installation_id=session.installation_id).with_for_update().one_or_none()
             pem = self._proof(session, data.get("proof"), fingerprint,
                               device.public_key if device and not device.revoked_at else None)
-            if (not device or device.revoked_at) and db.query(Device).filter_by(tg=session.tg, revoked_at=None).count() >= self.max_devices:
+            if (self.max_devices > 0 and (not device or device.revoked_at)
+                    and db.query(Device).filter_by(tg=session.tg, revoked_at=None).count() >= self.max_devices):
                 raise TVError("DEVICE_LIMIT", f"最多允许 {self.max_devices} 台设备，请先在 Bot 使用 /tvdevices 撤销旧设备")
             if device is None:
                 device = Device(id=uuid4().hex, tg=session.tg, installation_id=session.installation_id, created_at=self.now())

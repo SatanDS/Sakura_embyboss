@@ -155,7 +155,6 @@
     "http_host": "127.0.0.1",
     "http_port": 8840,
     "bot_username": "emby_dusheng_bot",
-    "max_devices": 3,
     "privacy_version": "2026-10-03",
     "server_urls": ["https://www.dusheng.xyz", "https://www.dusheng.lol"]
   }

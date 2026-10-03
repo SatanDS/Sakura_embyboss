@@ -50,7 +50,8 @@ async def desktop_devices(_, msg):
         return await sendMessage(msg, f"❌ {error.message}", timer=120)
     buttons = InlineKeyboardMarkup([[InlineKeyboardButton(f"撤销：{d['name'][:40]}", callback_data=f"tvrevoke:ask:{d['id']}")]
                                     for d in result["devices"]]) if result["devices"] else None
-    return await sendMessage(msg, f"🖥 DuShengTV 登录设备：{len(result['devices'])} / {result['maxDevices']}\n"
+    limit_label = result["maxDevices"] or "不限"
+    return await sendMessage(msg, f"🖥 DuShengTV 登录设备：{len(result['devices'])} / {limit_label}\n"
                              "撤销后对应设备将退出登录。重新使用需要再次在 Telegram 确认。",
                              buttons=buttons, timer=300)
 
