@@ -14,6 +14,7 @@ import unittest
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta
+from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
@@ -29,6 +30,31 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+class LoginPage(HTMLParser):
+    def __init__(self, text):
+        super().__init__()
+        self.links, self.scripts, self.command = [], [], ""
+        self.in_command = False
+        self.feed(text)
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "a":
+            self.links.append(attrs.get("href", ""))
+        elif tag == "script":
+            self.scripts.append(attrs)
+        elif tag == "textarea" and attrs.get("id") == "login-command":
+            self.in_command = True
+
+    def handle_endtag(self, tag):
+        if tag == "textarea":
+            self.in_command = False
+
+    def handle_data(self, data):
+        if self.in_command:
+            self.command += data
 
 
 def load_modules():
@@ -310,6 +336,53 @@ class DesktopTests(unittest.TestCase):
         self.assertNotIn("payments", response.text)
         self.assertNotIn(challenge["codeVerifier"], response.text)
         self.assertEqual(response.headers["referrer-policy"], "no-referrer")
+
+    def test_relogin_app_link_web_link_and_manual_command_use_the_new_request(self):
+        previous_token, previous_link = None, None
+        for _ in range(3):
+            challenge = self.start()
+            response = self.client.get(challenge["authorizationUrl"])
+            self.assertEqual(response.status_code, 200, response.text)
+            page = LoginPage(response.text)
+            direct, web = map(urlsplit, page.links)
+            self.assertEqual((direct.scheme, direct.netloc), ("tg", "resolve"))
+            self.assertEqual(parse_qs(direct.query)["domain"], ["example_bot"])
+            self.assertEqual((web.scheme, web.netloc, web.path), ("https", "t.me", "/example_bot"))
+            payload = parse_qs(direct.query)["start"][0]
+            self.assertEqual(parse_qs(web.query)["start"], [payload])
+            self.assertLessEqual(len(payload), 64)  # Telegram's deep-link limit.
+            self.assertEqual(page.command, "/start " + payload)
+            self.assertNotEqual(challenge["link"], previous_link)
+            if previous_link:
+                self.assertEqual(self.client.get(self.m.service.PREFIX + "/auth/telegram/authorize", params={"request": previous_link}).status_code, 410)
+                self.error("TOKEN_EXPIRED", self.auth.session, previous_token)
+            # Sending the page's fallback command reaches the exact same
+            # pending login as either Telegram link, including after logout.
+            command, argument = page.command.split()
+            self.assertEqual(command, "/start")
+            result = self.auth.prepare(argument.removeprefix("tvlogin_"), 42, "Viewer", "viewer")
+            self.assertEqual(result["displayCode"], challenge["displayCode"])
+            self.auth.decide(result["id"], 42, True)
+            token = self.auth.poll(challenge)["accessToken"]
+            self.auth.register(token, self.registration(token))
+            self.assertTrue(self.auth.session(token)["device"]["allowed"])
+            self.assertEqual(len(self.auth.devices(token)["devices"]), 1)
+            self.auth.logout(token)
+            previous_token, previous_link = token, challenge["link"]
+
+    def test_login_page_only_allows_its_nonce_protected_copy_script(self):
+        challenge = self.start()
+        first = self.client.get(challenge["authorizationUrl"])
+        second = self.client.get(challenge["authorizationUrl"])
+        first_page, second_page = LoginPage(first.text), LoginPage(second.text)
+        self.assertEqual(len(first_page.scripts), 1)
+        nonce = first_page.scripts[0]["nonce"]
+        self.assertNotEqual(nonce, second_page.scripts[0]["nonce"])
+        self.assertIn(f"script-src 'nonce-{nonce}'", first.headers["content-security-policy"])
+        self.assertNotIn("script-src 'unsafe-inline'", first.headers["content-security-policy"])
+        self.assertIn("default-src 'none'", first.headers["content-security-policy"])
+        self.assertEqual(first.headers["cache-control"], "no-store")
+        self.assertNotIn("script-src", self.client.get(self.m.service.PREFIX + "/config").headers["content-security-policy"])
 
     def test_server_whitelist_token_mapping_and_midflight_revocation(self):
         tokens = self.login()

@@ -3,6 +3,7 @@
 import asyncio
 import html
 import json
+import secrets
 import time
 from collections import OrderedDict, deque
 
@@ -16,6 +17,8 @@ from bot.func_helper.emby_identity import lookup_user_from_auth_db
 
 from . import runtime
 from .service import PREFIX, TVError, canonical_url
+
+RESPONSE_CSP = "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"
 
 
 class RateLimit:
@@ -68,8 +71,8 @@ class TVRoute(APIRoute):
                 # Never expose callback links, credentials or SQL parameters.
                 response = JSONResponse({"code": "SERVICE_UNAVAILABLE", "message": "登录服务暂时不可用，请稍后重试"}, status_code=503)
             response.headers.update({"Cache-Control": "no-store", "Referrer-Policy": "no-referrer",
-                                     "X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY",
-                                     "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"})
+                                     "X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY"})
+            response.headers.setdefault("Content-Security-Policy", RESPONSE_CSP)
             return response
         return safe
 
@@ -115,15 +118,36 @@ async def authorize(request: Request):
     _, _, username = runtime.settings()
     link = request.query_params.get("request", "")
     result = await invoke("landing", link)
+    username, payload = html.escape(username), html.escape(f"tvlogin_{link}")
+    nonce = secrets.token_urlsafe(24)
     # This page never handles Telegram passwords, OTPs or session credentials.
     return HTMLResponse(f"""<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>DuShengTV · Telegram 登录</title>
-<style>body{{margin:0;background:#10151d;color:#edf2fa;font:17px/1.8 system-ui,sans-serif;display:grid;min-height:100vh;place-items:center}}main{{max-width:430px;padding:36px}}h1{{font-size:32px}}.code{{letter-spacing:.3em;font-size:36px;font-weight:700}}a{{display:block;text-align:center;padding:12px;background:#299fda;color:white;border-radius:12px;text-decoration:none}}small{{color:#b7c2d1}}</style>
+<style>*{{box-sizing:border-box}}body{{margin:0;background:#10151d;color:#edf2fa;font:17px/1.8 system-ui,sans-serif;display:grid;min-height:100vh;place-items:center}}main{{width:100%;max-width:510px;padding:28px}}h1{{font-size:32px}}.code{{letter-spacing:.3em;font-size:36px;font-weight:700;margin:12px 0}}a,button{{display:block;width:100%;text-align:center;padding:12px;color:white;border-radius:12px;text-decoration:none;font:inherit}}.primary{{background:#299fda}}.secondary,button{{background:#1e2a38;border:1px solid #425168;margin-top:12px;cursor:pointer}}small,#copy-status{{color:#b7c2d1}}.fallback{{border-top:1px solid #425168;margin-top:24px;padding-top:8px}}textarea{{display:block;width:100%;padding:12px;border:1px solid #425168;border-radius:8px;background:#0c1118;color:#edf2fa;font:14px/1.6 monospace;resize:none}}#copy-status{{min-height:1.8em;font-size:14px}}</style>
 <main><h1>登录 DuShengTV</h1><p>确认下面的验证码与 TV 客户端一致，再前往 Telegram Bot 确认登录。</p>
 <p class="code">{html.escape(result['displayCode'])}</p>
-<a href="https://t.me/{html.escape(username)}?start=tvlogin_{html.escape(link)}" rel="noreferrer">打开 @{html.escape(username)}</a>
+<a class="primary" href="tg://resolve?domain={username}&amp;start={payload}" rel="noreferrer">打开 Telegram</a>
+<a class="secondary" href="https://t.me/{username}?start={payload}" rel="noreferrer">使用网页链接打开 @{username}</a>
+<p>进入 Bot 聊天后，点击底部的「开始 / Start」发送本次登录请求；即使以前登录过，也要发送新的请求。</p>
 <p>点击 Bot 的「确认登录」后，返回 DuShengTV，客户端会自动完成登录。</p>
-<small>请求 5 分钟内有效。如果不是你本人发起，请在 Bot 中拒绝。</small></main></html>""")
+<div class="fallback"><p>如果只打开了聊天、没有出现确认卡，可复制下面的完整指令，粘贴到 @{username} 私聊并发送。</p>
+<textarea id="login-command" rows="2" readonly spellcheck="false" aria-label="本次登录指令">/start {payload}</textarea>
+<button id="copy-command" type="button">复制本次登录指令</button>
+<p id="copy-status" role="status" aria-live="polite"></p></div>
+<small>请求 5 分钟内有效。请勿转发本页或登录指令；如果不是你本人发起，请在 Bot 中拒绝。</small></main>
+<script nonce="{nonce}">
+const command = document.getElementById('login-command');
+const status = document.getElementById('copy-status');
+document.getElementById('copy-command').addEventListener('click', async () => {{
+  try {{
+    await navigator.clipboard.writeText(command.value);
+    status.textContent = '已复制，请粘贴到 Bot 私聊并发送，再核对确认码。';
+  }} catch {{
+    command.focus(); command.select();
+    status.textContent = '已选中指令，请手动复制并发送到 Bot 私聊。';
+  }}
+}});
+</script></html>""", headers={"Content-Security-Policy": f"{RESPONSE_CSP}; script-src 'nonce-{nonce}'"})
 
 
 @router.post("/auth/telegram/poll")
