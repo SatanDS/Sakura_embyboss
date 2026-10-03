@@ -9,7 +9,9 @@ import sys
 import types
 import unittest
 from datetime import datetime, timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import Thread
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from urllib.parse import parse_qs, urlsplit
@@ -28,6 +30,7 @@ def load_modules():
     base = declarative_base()
     bot = types.ModuleType("bot")
     bot.__path__ = [str(ROOT / "bot")]
+    bot.config = SimpleNamespace(emby_url="http://emby-origin.test:8096")
     sql = types.ModuleType("bot.sql_helper")
     sql.Base = base
     sys.modules.update({"bot": bot, "bot.sql_helper": sql})
@@ -317,11 +320,55 @@ class DesktopTests(unittest.TestCase):
             result = self.client.post(path, headers=headers, json=data)
             self.assertEqual(result.status_code, 200, result.text)
             self.assertEqual(result.json()["telegramId"], "42")
+            verify.assert_awaited_with("http://emby-origin.test:8096", "user-token")
             async def revoke(*_):
                 self.auth.logout(tokens["accessToken"])
                 return "emby-42"
             verify.side_effect = revoke
             self.assertEqual(self.client.post(path, headers=headers, json=data).status_code, 401)
+
+    def test_public_alias_verifies_user_token_at_bot_origin(self):
+        tokens = self.login()
+        requests = []
+        user = {"Id": "emby-42", "Policy": {"IsDisabled": False}}
+
+        class Origin(BaseHTTPRequestHandler):
+            def log_message(self, *_):
+                pass
+
+            def do_GET(self):
+                requests.append((self.path, self.headers.get("X-Emby-Token")))
+                body = json.dumps(user).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        origin = ThreadingHTTPServer(("127.0.0.1", 0), Origin)
+        worker = Thread(target=origin.serve_forever, daemon=True)
+        worker.start()
+        config = SimpleNamespace(emby_url=f"http://127.0.0.1:{origin.server_port}/emby/",
+                                 emby_api="admin-key-must-not-be-sent")
+        data = {"serverUrl": "https://emby.test", "embyUserId": "emby-42", "embyAccessToken": "user-token"}
+        headers = {"Authorization": "Bearer " + tokens["accessToken"]}
+        path = self.m.service.PREFIX + "/servers/authorize"
+        try:
+            with patch.object(sys.modules["bot"], "config", config):
+                response = self.client.post(path, headers=headers, json=data)
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()["serverUrl"], "https://emby.test")
+                self.assertNotIn("user-token", response.text)
+                self.assertNotIn("127.0.0.1", response.text)
+                user["Id"] = "emby-43"
+                self.assertEqual(self.client.post(path, headers=headers, json=data).status_code, 403)
+                user["Id"], user["Policy"]["IsDisabled"] = "emby-42", True
+                self.assertEqual(self.client.post(path, headers=headers, json=data).status_code, 403)
+            self.assertEqual(requests, [("/emby/Users/Me", "user-token")] * 3)
+        finally:
+            origin.shutdown()
+            origin.server_close()
+            worker.join(timeout=5)
 
     def test_migration_matches_models_and_is_idempotent(self):
         from alembic.migration import MigrationContext

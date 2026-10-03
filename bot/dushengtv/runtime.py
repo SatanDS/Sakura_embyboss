@@ -38,3 +38,10 @@ def service():
 
     cfg, _, _ = settings()
     return DesktopAuth(Session, account_lookup, max_devices=cfg.max_devices, consent_version=cfg.privacy_version)
+
+
+def emby_origin():
+    """Verify user tokens against the Bot's primary Emby, shared by its aliases."""
+    from bot import config
+
+    return canonical_url(config.emby_url)

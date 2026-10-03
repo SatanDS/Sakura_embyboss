@@ -191,7 +191,7 @@ async def emby_identity(server_url, access_token):
                     raise TVError("SERVER_NOT_BOUND", "Emby 账号已停用")
                 return user.get("Id")
     except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
-        raise TVError("EMBY_UNAVAILABLE", "无法验证 Emby 账号，请稍后重试", 502) from None
+        raise TVError("EMBY_UNAVAILABLE", "Bot 暂时无法连接 Emby 验证服务，请稍后重试", 502) from None
 
 
 @router.post("/servers/authorize")
@@ -206,7 +206,10 @@ async def server_authorize(request: Request):
     access_token = data.get("embyAccessToken")
     if not isinstance(access_token, str) or not 1 <= len(access_token) <= 4096 or any(ord(c) < 32 for c in access_token):
         raise TVError("INVALID_REQUEST", "Emby 凭据格式无效", 400)
-    if await emby_identity(server_url, access_token) != identity["embyUserId"]:
+    # Whitelisted public URLs are aliases of the Bot's primary Emby. Verify
+    # the user's token at that configured origin; regional CDN DNS may send
+    # the Bot to a different or unavailable edge than the desktop client.
+    if await emby_identity(runtime.emby_origin(), access_token) != identity["embyUserId"]:
         raise TVError("SERVER_NOT_BOUND", "Emby 令牌不属于当前 Telegram 绑定的账号")
     # Recheck revocation and binding after the outbound request.
     if await invoke("server_identity", bearer) != identity:

@@ -29,7 +29,7 @@ DNS A / AAAA 记录指向 Bot 服务器 IP，DNS 不指定端口。公网使用 
 }
 ```
 
-`server_urls` 是 TV 可连接的 Emby 地址白名单，未列入的地址会被拒绝。这里只列出当前 Bot 主 Emby 服务器的真实访问地址／线路别名。每个地址应能以用户 token 调用 `/Users/Me`，返回同一个绑定的 Emby 用户 ID。不会把 Emby 管理 API Key 发送给这些地址。不同服务器如果使用不同用户 ID，需要另建绑定后才能开放。地址包含子路径时，填写完整基址。
+`server_urls` 是 TV 可连接的 Emby 地址白名单，未列入的地址会被拒绝。这里只列出当前 Bot 主 Emby 服务器的真实访问地址／线路别名，须共用同一套用户和登录凭据。Bot 使用现有顶层 `emby_url` 访问 `/Users/Me` 验证客户端取得的用户 token，返回的用户 ID 必须与 Telegram 绑定相符；这样服务端验证不会依赖公网线路的区域 DNS／CDN。请求只携带用户 token，不使用或下发 Emby 管理 API Key。验证成功后客户端继续使用原公网线路播放，不会收到来源地址。不同服务器如果使用不同用户 ID，需要另建绑定后才能开放。地址包含子路径时，填写完整基址。
 
 升级代码不会覆盖现有 `config.json` 的白名单；已有部署需在 `dushengtv.server_urls` 中补上 `https://www.dusheng.lol` 并重启 Bot。
 
@@ -107,4 +107,4 @@ python -m pip install -r requirements-test.txt
 python scripts/test_dushengtv.py -v
 ```
 
-测试使用隔离 SQLite 与伪造 Telegram 传输，覆盖真实授权服务、HTTP 路由、签名、状态／PKCE、消费／过期、设备上限、刷新重放、绑定变化、白名单与端口路由隔离。正式上线仍需在独立域名完成一次真实 Bot 点击授权。MySQL 的每用户行锁负责串行设备登记；SQLite 测试不证明 MySQL 并发行为。
+测试使用隔离 SQLite 与伪造 Telegram 传输，覆盖真实授权服务、HTTP 路由、签名、状态／PKCE、消费／过期、设备上限、刷新重放、绑定变化、白名单、通过来源地址验证用户 token 与端口路由隔离。正式上线仍需在独立域名完成一次真实 Bot 点击授权。MySQL 的每用户行锁负责串行设备登记；SQLite 测试不证明 MySQL 并发行为。
