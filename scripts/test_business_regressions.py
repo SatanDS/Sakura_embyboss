@@ -432,7 +432,7 @@ class RedEnvelopeTests(unittest.IsolatedAsyncioTestCase):
 class RedEnvelopeMigrationTests(unittest.TestCase):
     def test_migration_is_repeatable_and_the_only_head(self):
         script = ScriptDirectory.from_config(Config(str(ROOT / "alembic.ini")))
-        self.assertEqual(script.get_heads(), ["20260929_13"])
+        self.assertEqual(script.get_heads(), ["20261004_14"])
 
         engine = create_engine("sqlite:///:memory:")
         with engine.begin() as connection:

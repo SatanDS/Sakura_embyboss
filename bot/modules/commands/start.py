@@ -47,6 +47,9 @@ async def count_info(_, msg):
 # 私聊开启面板
 @bot.on_message(filters.command('start', prefixes) & filters.private)
 async def p_start(_, msg):
+    if len(getattr(msg, "command", [])) > 1 and str(msg.command[1]).startswith("tvlogin_"):
+        from bot.modules.commands.dushengtv import prepare_desktop_login
+        return await prepare_desktop_login(msg, str(msg.command[1]).removeprefix("tvlogin_"))
     # External payment site login: this branch intentionally precedes the
     # group-membership gate because a buyer may not have an Emby account yet.
     if len(getattr(msg, "command", [])) > 1 and str(msg.command[1]).startswith("paylogin_"):

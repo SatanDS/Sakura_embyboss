@@ -149,6 +149,18 @@ class API(BaseModel):
             self.allow_origins = ["*"]
             # 如果未设置，默认为 ["*"]，为了安全可以设置成本机ip&反代的域名，列表可包含多个
 
+class DuShengTV(BaseModel):
+    enabled: bool = False
+    public_url: str = "https://tv-api.dusheng.lol"
+    http_host: str = "127.0.0.1"
+    http_port: int = Field(default=8840, ge=1024, le=65535)
+    bot_username: str = "emby_dusheng_bot"
+    max_devices: int = Field(default=3, ge=1, le=100)
+    privacy_version: str = "2026-10-03"
+    # Explicit aliases of the primary Emby server; never arbitrary client URLs.
+    server_urls: List[str] = Field(default_factory=lambda: ["https://www.dusheng.xyz"])
+
+
 class Payments(BaseModel):
     enabled: bool = False
     public_url: str = ""
@@ -251,6 +263,7 @@ class Config(BaseModel):
     red_envelope: RedEnvelope = Field(default_factory=RedEnvelope)
     api: API = Field(default_factory=API)
     payments: Payments = Field(default_factory=Payments)
+    dushengtv: DuShengTV = Field(default_factory=DuShengTV)
 
     def __init__(self, **data):
         super().__init__(**data)

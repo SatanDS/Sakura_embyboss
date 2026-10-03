@@ -12,4 +12,5 @@ from .view_user import list_whitelist, whitelist_page, list_normaluser, normalus
 from .audit import audit_ip_command, audit_device_name_command, audit_client_name_command 
 from .watching import watching_command
 from .payment import payment_shop_command
+from .dushengtv import desktop_devices
 

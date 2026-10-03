@@ -122,3 +122,7 @@ check = Web()
 # 初始化
 loop = asyncio.get_event_loop()
 loop.create_task(check.start())
+
+# TV uses its own FastAPI application and port, independent of payments/API.
+from bot.dushengtv.server import start as start_tv_api
+tv_api_task = loop.create_task(start_tv_api(), name="dushengtv-api")

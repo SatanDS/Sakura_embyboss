@@ -1,5 +1,7 @@
 # DuSheng Emby 管理 Bot 部署指南
 
+DuShengTV 使用独立域名 `tv-api.dusheng.lol` 与本机端口 `8840`，和续费网站分开；配置及部署见 [TV 登录对接说明](docs/DUSHENGTV.md)。
+
 本文件整理本專案在 Debian 12 上的完整部署流程：Telegram Bot/API、Emby、MySQL、Docker、Caddy 線路檢測，以及 DuShengCDN/NPM 前置代理。
 
 > 將 <...> 換成自己的值。Token、API hash、Emby API key、資料庫密碼不要提交 Git 或貼到公開聊天。

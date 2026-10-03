@@ -1,0 +1,11 @@
+# Dedicated public TV hostname. Standard Caddy terminates TLS on 443.
+# Import this file from a Caddy configuration that already owns ports 80/443.
+tv-api.dusheng.lol {
+    @tv path /api/dushengtv/v1/*
+    handle @tv {
+        reverse_proxy 127.0.0.1:8840
+    }
+    handle {
+        respond "Not Found" 404
+    }
+}
