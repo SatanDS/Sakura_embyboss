@@ -26,11 +26,13 @@ DNS A / AAAA 记录指向 Bot 服务器 IP，DNS 不指定端口。公网使用 
   "bot_username": "emby_dusheng_bot",
   "max_devices": 3,
   "privacy_version": "2026-10-03",
-  "server_urls": ["https://www.dusheng.xyz"]
+  "server_urls": ["https://www.dusheng.xyz", "https://www.dusheng.lol"]
 }
 ```
 
-`server_urls` 只列出当前 Bot 主 Emby 服务器的真实访问地址／线路别名。每个地址应能以用户 token 调用 `/Users/Me`，返回同一个绑定的 Emby 用户 ID。不会把 Emby 管理 API Key 发送给这些地址。不同服务器如果使用不同用户 ID，需要另建绑定后才能开放，不能把任意第三方地址加入列表。地址包含子路径时，填写完整基址。
+`server_urls` 是 TV 可连接的 Emby 地址白名单，未列入的地址会被拒绝。这里只列出当前 Bot 主 Emby 服务器的真实访问地址／线路别名。每个地址应能以用户 token 调用 `/Users/Me`，返回同一个绑定的 Emby 用户 ID。不会把 Emby 管理 API Key 发送给这些地址。不同服务器如果使用不同用户 ID，需要另建绑定后才能开放。地址包含子路径时，填写完整基址。
+
+升级代码不会覆盖现有 `config.json` 的白名单；已有部署需在 `dushengtv.server_urls` 中补上 `https://www.dusheng.lol` 并重启 Bot。
 
 `enabled` 默认关闭，独立于 `api.status` 和 `payments.enabled`。`http_port` 不可与 `api.http_port` 相同。`bot_username` 留空时，服务使用已启动 Bot 的官方用户名。
 

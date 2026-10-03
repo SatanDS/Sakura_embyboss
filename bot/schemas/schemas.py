@@ -158,7 +158,7 @@ class DuShengTV(BaseModel):
     max_devices: int = Field(default=3, ge=1, le=100)
     privacy_version: str = "2026-10-03"
     # Explicit aliases of the primary Emby server; never arbitrary client URLs.
-    server_urls: List[str] = Field(default_factory=lambda: ["https://www.dusheng.xyz"])
+    server_urls: List[str] = Field(default_factory=lambda: ["https://www.dusheng.xyz", "https://www.dusheng.lol"])
 
 
 class Payments(BaseModel):

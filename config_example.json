@@ -157,6 +157,6 @@
     "bot_username": "emby_dusheng_bot",
     "max_devices": 3,
     "privacy_version": "2026-10-03",
-    "server_urls": ["https://www.dusheng.xyz"]
+    "server_urls": ["https://www.dusheng.xyz", "https://www.dusheng.lol"]
   }
 }
