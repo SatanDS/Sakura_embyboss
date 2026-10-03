@@ -45,3 +45,10 @@ def emby_origin():
     from bot import config
 
     return canonical_url(config.emby_url)
+
+
+def emby_auth_db_path():
+    from bot import config
+    from bot.func_helper.emby_identity import configured_auth_db_path
+
+    return configured_auth_db_path(config)

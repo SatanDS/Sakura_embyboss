@@ -180,7 +180,7 @@ class VIPIdentityTests(unittest.IsolatedAsyncioTestCase):
                 raise
             return connection
 
-        with patch.object(self.identity.sqlite3, "connect", side_effect=guarded_connect):
+        with patch.object(sys.modules["bot.func_helper.emby_identity"].sqlite3, "connect", side_effect=guarded_connect):
             self.assertEqual(self.lookup()[0], USER_ONE.hex)
         self.assertEqual(len(verified), 2)
 

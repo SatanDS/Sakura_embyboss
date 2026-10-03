@@ -12,6 +12,8 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.routing import APIRoute
 from starlette.concurrency import run_in_threadpool
 
+from bot.func_helper.emby_identity import lookup_user_from_auth_db
+
 from . import runtime
 from .service import PREFIX, TVError, canonical_url
 
@@ -177,19 +179,35 @@ async def revoke(request: Request, device_id: str):
 
 
 async def emby_identity(server_url, access_token):
+    db_path = runtime.emby_auth_db_path()
+    if not db_path:
+        raise TVError("EMBY_AUTH_NOT_CONFIGURED", "Bot 尚未配置 Emby 令牌验证，请管理员挂载认证数据库并设置 emby_auth_db_path", 503)
+    user_id, reason = await run_in_threadpool(lookup_user_from_auth_db, access_token, db_path)
+    if not user_id:
+        if reason.startswith("Emby authentication database"):
+            raise TVError("EMBY_AUTH_UNAVAILABLE", "Bot 无法读取 Emby 认证数据库，请管理员检查挂载和 emby_auth_db_path", 503)
+        raise TVError("SERVER_NOT_BOUND", "Emby 登录令牌无效或账号不可用，请重新登录 Emby")
+    # Emby 4.9 has no /Users/Me, and /Users/{Id} alone does not prove token
+    # ownership. This GUID comes exclusively from the read-only token DB.
+    # A live request then checks that Emby still accepts the user's token
+    # and that the canonical account is enabled. Never use the Bot API key.
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10), trust_env=False) as client:
-            async with client.get(f"{server_url}/Users/Me", headers={"X-Emby-Token": access_token}, allow_redirects=False) as response:
+            async with client.get(f"{server_url}/Users/{user_id}", headers={"X-Emby-Token": access_token}, allow_redirects=False) as response:
                 if response.status != 200:
-                    raise TVError("SERVER_NOT_BOUND", "Emby 登录令牌无效或账号不可用")
+                    if response.status in (400, 401, 403, 404):
+                        raise TVError("SERVER_NOT_BOUND", "Emby 登录令牌无效或账号不可用，请重新登录 Emby")
+                    raise TVError("EMBY_UNAVAILABLE", "Bot 暂时无法连接 Emby 验证服务，请稍后重试", 502)
                 # Bound the response even when Content-Length is absent.
                 raw = await response.content.read(65537)
                 if len(raw) > 65536:
-                    raise TVError("SERVER_NOT_BOUND", "Emby 响应无效")
+                    raise TVError("EMBY_UNAVAILABLE", "Emby 验证响应无效，请稍后重试", 502)
                 user = json.loads(raw)
-                if not isinstance(user, dict) or user.get("Policy", {}).get("IsDisabled"):
+                if not isinstance(user, dict) or user.get("Id") != user_id or not isinstance(user.get("Policy"), dict):
+                    raise TVError("EMBY_UNAVAILABLE", "Emby 验证响应无效，请稍后重试", 502)
+                if user["Policy"].get("IsDisabled"):
                     raise TVError("SERVER_NOT_BOUND", "Emby 账号已停用")
-                return user.get("Id")
+                return user_id
     except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
         raise TVError("EMBY_UNAVAILABLE", "Bot 暂时无法连接 Emby 验证服务，请稍后重试", 502) from None
 

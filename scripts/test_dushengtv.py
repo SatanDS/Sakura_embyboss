@@ -4,10 +4,15 @@ import base64
 import hashlib
 import importlib.util
 import json
+import os
 import secrets
+import sqlite3
 import sys
+import tempfile
 import types
 import unittest
+import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -285,6 +290,7 @@ class DesktopTests(unittest.TestCase):
         self.assertIn("accessToken", restarted.refresh({"refreshToken": tokens["refreshToken"], "installationId": self.installation}))
 
     def test_isolated_routes_and_bounded_json(self):
+        self.assertNotIn("bot.web", sys.modules)
         for path in ("/payments/shop", "/payments/products", "/emby/auth", "/user", "/auth", "/docs", "/openapi.json"):
             self.assertEqual(self.client.get(path).status_code, 404, path)
         prefix = self.m.service.PREFIX
@@ -327,21 +333,42 @@ class DesktopTests(unittest.TestCase):
             verify.side_effect = revoke
             self.assertEqual(self.client.post(path, headers=headers, json=data).status_code, 401)
 
-    def test_public_alias_verifies_user_token_at_bot_origin(self):
+    @contextmanager
+    def emby49_origin(self):
+        owner = uuid.UUID("01234567-89ab-cdef-0123-456789abcdef")
+        other = uuid.UUID("fedcba98-7654-3210-fedc-ba9876543210")
+        with self.sessions.begin() as db:
+            db.get(self.m.User, 42).embyid = owner.hex
         tokens = self.login()
-        requests = []
-        user = {"Id": "emby-42", "Policy": {"IsDisabled": False}}
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        directory = Path(temporary.name)
+        auth_db = directory / "authentication.db"
+        with sqlite3.connect(auth_db) as db:
+            db.execute("CREATE TABLE Tokens_2 (AccessToken TEXT, UserId INTEGER, IsActive INTEGER)")
+            db.executemany("INSERT INTO Tokens_2 VALUES (?, ?, 1)", [("user-token", 7), ("other-user-token", 8)])
+        with sqlite3.connect(directory / "users.db") as db:
+            db.execute("CREATE TABLE LocalUsersv2 (Id INTEGER, guid BLOB)")
+            db.executemany("INSERT INTO LocalUsersv2 VALUES (?, ?)", [(7, owner.bytes_le), (8, other.bytes_le)])
+        state = SimpleNamespace(requests=[], status=200, owner=owner.hex, other=other.hex, auth_db=auth_db,
+                                users={uid.hex: {"Id": uid.hex, "Policy": {"IsDisabled": False}} for uid in (owner, other)})
 
         class Origin(BaseHTTPRequestHandler):
             def log_message(self, *_):
                 pass
 
             def do_GET(self):
-                requests.append((self.path, self.headers.get("X-Emby-Token")))
-                body = json.dumps(user).encode()
-                self.send_response(200)
+                state.requests.append((self.path, self.headers.get("X-Emby-Token")))
+                user_id = self.path.removeprefix("/emby/Users/")
+                # Emby 4.9 rejects /Users/Me, while a valid token can fetch
+                # either user's record. The token DB must establish ownership.
+                status = state.status if user_id in state.users else 400
+                body = json.dumps(state.users.get(user_id, {"error": "Unrecognized Guid format"})).encode()
+                self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
+                if status == 302:
+                    self.send_header("Location", "/must-not-follow")
                 self.end_headers()
                 self.wfile.write(body)
 
@@ -349,26 +376,94 @@ class DesktopTests(unittest.TestCase):
         worker = Thread(target=origin.serve_forever, daemon=True)
         worker.start()
         config = SimpleNamespace(emby_url=f"http://127.0.0.1:{origin.server_port}/emby/",
-                                 emby_api="admin-key-must-not-be-sent")
-        data = {"serverUrl": "https://emby.test", "embyUserId": "emby-42", "embyAccessToken": "user-token"}
+                                 emby_api="admin-key-must-not-be-sent", emby_auth_db_path=str(auth_db))
+        state.config = config
+        data = {"serverUrl": "https://emby.test", "embyUserId": owner.hex, "embyAccessToken": "user-token"}
         headers = {"Authorization": "Bearer " + tokens["accessToken"]}
         path = self.m.service.PREFIX + "/servers/authorize"
+        state.authorize = lambda **changes: self.client.post(path, headers=headers, json={**data, **changes})
         try:
             with patch.object(sys.modules["bot"], "config", config):
-                response = self.client.post(path, headers=headers, json=data)
-                self.assertEqual(response.status_code, 200, response.text)
-                self.assertEqual(response.json()["serverUrl"], "https://emby.test")
-                self.assertNotIn("user-token", response.text)
-                self.assertNotIn("127.0.0.1", response.text)
-                user["Id"] = "emby-43"
-                self.assertEqual(self.client.post(path, headers=headers, json=data).status_code, 403)
-                user["Id"], user["Policy"]["IsDisabled"] = "emby-42", True
-                self.assertEqual(self.client.post(path, headers=headers, json=data).status_code, 403)
-            self.assertEqual(requests, [("/emby/Users/Me", "user-token")] * 3)
+                yield state
         finally:
             origin.shutdown()
             origin.server_close()
             worker.join(timeout=5)
+
+    def test_public_alias_verifies_emby49_token_owner_at_bot_origin(self):
+        with self.emby49_origin() as state:
+            response = state.authorize()
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["serverUrl"], "https://emby.test")
+            self.assertEqual(response.json()["embyUserId"], state.owner)
+            self.assertNotIn("user-token", response.text)
+            self.assertNotIn("127.0.0.1", response.text)
+            self.assertEqual(state.requests, [(f"/emby/Users/{state.owner}", "user-token")])
+            state.users[state.owner]["Policy"]["IsDisabled"] = True
+            self.assertEqual(state.authorize().status_code, 403)
+
+    def test_emby49_foreign_token_cannot_authorize_claimed_bound_user(self):
+        with self.emby49_origin() as state:
+            response = state.authorize(embyAccessToken="other-user-token")
+            self.assertEqual(response.status_code, 403, response.text)
+            self.assertEqual(response.json()["code"], "SERVER_NOT_BOUND")
+            self.assertEqual(state.requests, [(f"/emby/Users/{state.other}", "other-user-token")])
+
+    def test_emby49_revoked_unknown_and_ambiguous_tokens_fail_before_http(self):
+        with self.emby49_origin() as state:
+            cases = {
+                "revoked": [("user-token", 7, 0)],
+                "unknown": [("different-token", 7, 1)],
+                "ambiguous": [("user-token", 7, 1), ("user-token", 8, 1)],
+                "unmapped": [("user-token", 99, 1)],
+            }
+            for name, rows in cases.items():
+                with self.subTest(case=name):
+                    with sqlite3.connect(state.auth_db) as db:
+                        db.execute("DELETE FROM Tokens_2")
+                        db.executemany("INSERT INTO Tokens_2 VALUES (?, ?, ?)", rows)
+                    response = state.authorize()
+                    self.assertEqual(response.status_code, 403, response.text)
+                    self.assertEqual(response.json()["code"], "SERVER_NOT_BOUND")
+            self.assertEqual(state.requests, [])
+
+    def test_emby49_database_setup_failures_are_not_reported_as_bad_credentials(self):
+        with self.emby49_origin() as state, patch.dict(os.environ, {"EMBY_AUTH_DB_PATH": ""}):
+            state.config.emby_auth_db_path = ""
+            response = state.authorize()
+            self.assertEqual(response.status_code, 503, response.text)
+            self.assertEqual(response.json()["code"], "EMBY_AUTH_NOT_CONFIGURED")
+            # The same environment configuration as the existing line verifier works.
+            with patch.dict(os.environ, {"EMBY_AUTH_DB_PATH": str(state.auth_db)}):
+                self.assertEqual(state.authorize().status_code, 200)
+            state.requests.clear()
+            state.config.emby_auth_db_path = str(state.auth_db.with_name("missing.db"))
+            response = state.authorize()
+            self.assertEqual(response.status_code, 503, response.text)
+            self.assertEqual(response.json()["code"], "EMBY_AUTH_UNAVAILABLE")
+            self.assertNotIn(state.config.emby_auth_db_path, response.text)
+            self.assertFalse(Path(state.config.emby_auth_db_path).exists())
+            state.config.emby_auth_db_path = str(state.auth_db)
+            with sqlite3.connect(state.auth_db) as db:
+                db.execute("DROP TABLE Tokens_2")
+            response = state.authorize()
+            self.assertEqual(response.status_code, 503, response.text)
+            self.assertEqual(response.json()["code"], "EMBY_AUTH_UNAVAILABLE")
+            self.assertEqual(state.requests, [])
+
+    def test_emby49_live_origin_must_accept_token_and_return_canonical_account(self):
+        with self.emby49_origin() as state:
+            for status, expected in ((401, 403), (403, 403), (404, 403), (500, 502), (302, 502)):
+                with self.subTest(upstream_status=status):
+                    state.status = status
+                    response = state.authorize()
+                    self.assertEqual(response.status_code, expected, response.text)
+            state.status = 200
+            for user in ({"Id": state.other, "Policy": {}}, {"Id": state.owner, "Policy": None}, []):
+                with self.subTest(user=user):
+                    state.users[state.owner] = user
+                    self.assertEqual(state.authorize().status_code, 502)
+            self.assertEqual(state.requests, [(f"/emby/Users/{state.owner}", "user-token")] * 8)
 
     def test_migration_matches_models_and_is_idempotent(self):
         from alembic.migration import MigrationContext
