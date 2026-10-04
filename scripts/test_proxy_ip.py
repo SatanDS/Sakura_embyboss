@@ -9,9 +9,33 @@ from pathlib import Path
 HELPERS = runpy.run_path(str(Path(__file__).resolve().parents[1] / "bot/func_helper/proxy_ip.py"))
 validate_proxy_cidrs = HELPERS["validate_proxy_cidrs"]
 resolve_client_ip = HELPERS["resolve_client_ip"]
+is_trusted_proxy = HELPERS["is_trusted_proxy"]
 
 
 class ProxyIPTests(unittest.TestCase):
+    def test_origin_allowlist_checks_actual_peer_and_live_updates(self):
+        trusted = []
+        self.assertFalse(is_trusted_proxy("198.51.100.20", trusted))
+        self.assertFalse(is_trusted_proxy("127.0.0.1", trusted))
+        trusted.append("198.51.100.0/24")
+        self.assertTrue(is_trusted_proxy("198.51.100.20", trusted))
+        self.assertTrue(is_trusted_proxy("::ffff:198.51.100.20", trusted))
+        self.assertFalse(is_trusted_proxy("203.0.113.1", trusted))
+        trusted[0] = "2001:db8::/64"
+        self.assertFalse(is_trusted_proxy("198.51.100.20", trusted))
+        self.assertTrue(is_trusted_proxy("2001:db8::1", trusted))
+        trusted.clear()
+        self.assertFalse(is_trusted_proxy("2001:db8::1", trusted))
+
+    def test_origin_allowlist_rejects_entire_invalid_configuration(self):
+        for trusted in (None, "198.51.100.20", ["0.0.0.0/0"], ["::/0"], ["198.51.100.20", "bad"],
+                        [[]], ["198.51.100.20"] * 129):
+            with self.subTest(trusted=trusted):
+                self.assertFalse(is_trusted_proxy("198.51.100.20", trusted))
+        for peer in (None, "", "unknown", "198.51.100.20:443", "198.51.100.20, 203.0.113.1", "fe80::1%eth0"):
+            with self.subTest(peer=peer), self.assertRaises(ValueError):
+                is_trusted_proxy(peer, ["198.51.100.20"])
+
     def test_normalize_addresses_networks_and_duplicates(self):
         self.assertEqual(validate_proxy_cidrs([
             "198.51.100.20", "198.51.100.20/32", "2001:DB8::1", "192.0.2.25/24",

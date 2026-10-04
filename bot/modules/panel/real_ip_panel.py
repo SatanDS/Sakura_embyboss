@@ -73,7 +73,7 @@ def _proxy_inputs(text):
 async def _show_proxy_list(call):
     values = _proxy_snapshot()
     if not values:
-        return await sendMessage(call, "尚未添加 CDN 回源节点。使用连接来源 IP，不信任转发标头；不会阻止访问。")
+        return await sendMessage(call, "尚未添加 CDN 回源节点。Emby 使用连接来源 IP，不信任转发标头；不会阻止 Emby 访问。\n如已启用弹幕源站白名单，空列表将拒绝弹幕 CDN 回源。")
     # The settings panel is a photo caption; long lists require text replies.
     for start in range(0, len(values), 40):
         lines = "\n".join(f"{index + 1}. {value}" for index, value in enumerate(values[start:start + 40], start))
@@ -170,7 +170,7 @@ async def real_ip_settings(_, call):
     if action == "clear":
         token = secrets.token_hex(8)
         _proxy_clear_requests[actor_id] = (token, _proxy_snapshot(), monotonic() + 120)
-        return await editMessage(call, "确认清空所有 CDN 回源节点？\n清空后使用连接来源 IP，不信任转发标头；不会阻止普通或 VIP 用户访问。",
+        return await editMessage(call, "确认清空所有 CDN 回源节点？\n清空后 Emby 使用连接来源 IP，不信任转发标头；不会阻止普通或 VIP 用户访问 Emby。\n如已启用弹幕源站白名单，清空将立即拒绝弹幕 CDN 回源。",
                                  buttons=ikb([[("确认清空", f"cdn_ip_clear_confirm_{token}"), ("取消", "cdn_ip_panel")]]))
     if action.startswith("clear_confirm_"):
         pending = _proxy_clear_requests.pop(actor_id, None)
@@ -180,13 +180,14 @@ async def real_ip_settings(_, call):
         if _proxy_snapshot() != pending[1]:
             return await _proxy_feedback(call, "节点列表已被其他操作修改，请查看最新列表后重新确认。")
         saved = _save_proxies([], actor_id)
-        text = (f"已清空 {len(pending[1])} 个节点，当前共 0 个。新请求使用连接来源 IP。"
+        text = (f"已清空 {len(pending[1])} 个节点，当前共 0 个。Emby 新请求使用连接来源 IP；已启用的弹幕源站白名单拒绝所有 CDN 回源。"
                 if saved else "保存失败，节点列表未更新。")
         return await _proxy_feedback(call, text)
     return await editMessage(
         call, f"CDN 真实 IP\n\n当前回源节点：{len(_proxy_snapshot())} 项\n"
         "添加实际向服务器回源的 CDN 或代理节点 IP，也可填写 CIDR 网段。不要填写普通用户 IP。\n"
         "完成网关接入后，列表变更对新请求立即生效。普通用户直连 8096 不受影响。\n"
-        "空列表使用连接来源 IP，不信任转发标头，也不阻止访问。",
+        "空列表使用连接来源 IP，不信任转发标头，也不阻止 Emby 访问。\n"
+        "已启用弹幕源站白名单时，复用此列表；空列表拒绝弹幕 CDN 回源。",
         buttons=_proxy_keyboard(), parse_mode=enums.ParseMode.DISABLED,
     )

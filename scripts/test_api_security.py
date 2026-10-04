@@ -93,7 +93,7 @@ class APISecurityTests(unittest.IsolatedAsyncioTestCase):
         status = next(item["status"] for item in messages if item["type"] == "http.response.start")
         self.response_headers = dict(next(item["headers"] for item in messages if item["type"] == "http.response.start"))
         response = b"".join(item.get("body", b"") for item in messages if item["type"] == "http.response.body")
-        return status, json.loads(response)
+        return status, json.loads(response) if response else {}
 
     def playlist_headers(self, **changes):
         headers = {"X-DuSheng-Line-Token": INTERNAL_KEY, "X-Original-Method": "POST",
@@ -253,6 +253,51 @@ class APISecurityTests(unittest.IsolatedAsyncioTestCase):
         self.config.api.line_report_token = ""
         status, _ = await self.request("/emby/real_ip", headers={**headers, "X-DuSheng-Line-Token": INTERNAL_KEY})
         self.assertEqual(status, 403)
+
+    async def test_cdn_origin_requires_authenticated_local_gateway(self):
+        self.config.trusted_proxy_cidrs = ["198.51.100.20"]
+        for secret, peer in (("", "127.0.0.1"), ("wrong", "127.0.0.1"), (INTERNAL_KEY, "198.51.100.20")):
+            status, _ = await self.request("/emby/cdn_origin", peer=peer, headers={
+                "X-DuSheng-Line-Token": secret, "X-Proxy-Peer-IP": "198.51.100.20",
+                "X-Forwarded-For": "127.0.0.1", "X-Real-IP": "127.0.0.1",
+            })
+            self.assertEqual(status, 403)
+        self.config.api.line_report_token = ""
+        status, _ = await self.request("/emby/cdn_origin", headers={
+            "X-DuSheng-Line-Token": INTERNAL_KEY, "X-Proxy-Peer-IP": "198.51.100.20"})
+        self.assertEqual(status, 403)
+
+    async def test_cdn_origin_live_allowlist_never_uses_forwarded_client_ip(self):
+        headers = {"X-DuSheng-Line-Token": INTERNAL_KEY, "X-Proxy-Peer-IP": "198.51.100.20",
+                   "X-Forwarded-For": "203.0.113.8", "X-Proxy-Forwarded-For": "203.0.113.8",
+                   "X-Real-IP": "203.0.113.8", "X-Verified-Client-IP": "203.0.113.8"}
+        for trusted, expected in (([], 403), (["203.0.113.8"], 403), (["198.51.100.0/24"], 204),
+                                  ([], 403), (["198.51.100.20", "bad"], 403), (["0.0.0.0/0"], 403)):
+            self.config.trusted_proxy_cidrs = trusted
+            status, body = await self.request("/emby/cdn_origin", headers=headers)
+            self.assertEqual(status, expected)
+            self.assertEqual(self.response_headers[b"cache-control"], b"no-store")
+            self.assertNotIn("trusted_proxy_cidrs", body)
+        self.config.trusted_proxy_cidrs = ["198.51.100.20", "2001:db8::/64"]
+        for peer in ("::ffff:198.51.100.20", "2001:db8::1"):
+            status, _ = await self.request("/emby/cdn_origin", headers={**headers, "X-Proxy-Peer-IP": peer})
+            self.assertEqual(status, 204)
+        self.identity._get_user_from_token.assert_not_awaited()
+        self.emby.emby_change_policy.assert_not_awaited()
+        self.bot.send_message.assert_not_awaited()
+
+    async def test_cdn_origin_rejects_missing_duplicate_or_malformed_peer(self):
+        self.config.trusted_proxy_cidrs = ["198.51.100.20"]
+        headers = {"X-DuSheng-Line-Token": INTERNAL_KEY}
+        status, _ = await self.request("/emby/cdn_origin", headers=headers)
+        self.assertEqual(status, 400)
+        for peer in ("", "unknown", "198.51.100.20:443", "198.51.100.20, 203.0.113.1"):
+            status, _ = await self.request("/emby/cdn_origin", headers={**headers, "X-Proxy-Peer-IP": peer})
+            self.assertEqual(status, 400)
+        # Differently cased names produce two distinct ASGI header entries.
+        status, _ = await self.request("/emby/cdn_origin", headers={**headers,
+            "X-Proxy-Peer-IP": "198.51.100.20", "x-proxy-peer-ip": "198.51.100.20"})
+        self.assertEqual(status, 400)
 
     async def test_real_ip_ignores_public_forged_headers(self):
         headers = {"X-DuSheng-Line-Token": INTERNAL_KEY, "X-Proxy-Peer-IP": "198.51.100.20",

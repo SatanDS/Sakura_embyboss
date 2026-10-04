@@ -47,11 +47,40 @@ Bot 只向固定的 `/api/v1/dushengtv/danmaku` 发送 `Authorization: Bearer <T
 
 Bot 不跟随重定向，也不使用进程的代理环境变量。若弹幕源需要代理，应在 danmu_api 的源配置中设置。专用 danmu_api 接口须避免使用共享 Bot 来源 IP 来记录用户匹配偏好；部署时关闭 `REMEMBER_LAST_SELECT`，防止服务端公共偏好影响用户匹配。
 
+## CDN 弹幕源站复用 Bot 节点清单
+
+同一台 Debian 12 主机上的弹幕 TLS 源站可复用 Bot「CDN 真实 IP」面板已经维护的节点，无需手动同步 Nginx allow 文件。现有数据是最外层 `config.trusted_proxy_cidrs`：Bot 将其保存在 `config.json`，不是单独的 SQL 表。仅所有者和管理员可在 Bot 私聊中修改；成功保存后，下一次请求立即使用最新清单。保存失败时恢复原清单。
+
+Bot 新增只供同机代理使用的 `GET /emby/cdn_origin`。Nginx 的内部 `auth_request` 向 `http://127.0.0.1:8838/emby/cdn_origin` 请求，携带：
+
+- `X-DuSheng-Line-Token`：与现有 `config.api.line_report_token` 相同的内部密钥。
+- `X-Proxy-Peer-IP`：Nginx 的实际 TCP 连接来源 `$realip_remote_addr`，由 Nginx覆盖，不能采用客户端请求中的同名头或 `X-Forwarded-For`。
+
+接口同时要求真实连接来自 loopback 和正确的内部密钥。命中当前节点 IP/CIDR 返回 204；未命中、空清单或无效清单返回 403；来源头缺失、重复或无效返回 400。IPv4、IPv6 和 IPv4-mapped IPv6 均支持。响应禁止缓存，不返回整个清单，也不向弹幕容器下发数据库凭据。原 `/emby/real_ip` 只解析真实用户 IP，不执行白名单拒绝，不能代替这个新接口。
+
+确认现有 Bot 配置中的以下字段；编辑时保留 `api` 的其他设置及已有内部密钥，不要新建或替换整个配置文件：
+
+```json
+"api": {
+  "status": true,
+  "http_url": "127.0.0.1",
+  "http_port": 8838,
+  "line_report_token": "保留现有的至少32字符内部密钥"
+}
+```
+
+此监听器的开关是 `api.status`，不是 `dushengtv.enabled`；端口是 `api.http_port`。首次启用或修改这些字段后重建/替换 Bot 容器。日后仅通过 Bot 面板添加、删除节点不需要重启 Bot、Nginx 或弹幕容器。手工编辑磁盘上的 `config.json` 不会自动更新运行中的 Bot，必须重启后才生效。
+
+弹幕 TLS 源站的 Nginx 使用 host 网络，以 loopback 调用 Bot。不要把 8838 或认证子路径公开到 CDN，不缓存认证子请求；Bot 不可用时应拒绝回源。TLS 源站仍只开放弹幕业务接口并检查独立的弹幕凭据，节点白名单不能代替接口认证。Nginx 模板与配置命令见 danmu_api 的 CDN 源站部署说明。
+
+清空 Bot 节点清单会立即拒绝所有弹幕 CDN 回源；Emby 现有的真实 IP 解析行为保持不变。Bot 调用同机弹幕服务仍使用 `http://127.0.0.1:9321`，不依赖公开 CDN 域名、TLS 源站或这个额外白名单。
+
 ## 离线验证与回退
 
 ```bash
 python scripts/test_dushengtv_danmaku.py -v
 python scripts/test_dushengtv.py -v
+python -m unittest scripts.test_proxy_ip scripts.test_api_security scripts.test_real_ip_panel -v
 ```
 
 测试不访问真实 Telegram、Emby、弹幕源或生产数据库。上线后使用已有 TG 登录和已登记设备的客户端选一部电影及一集明确季数的剧集，检查加载弹幕、暂停、快进及本地导入。修改 `.env` 将两项配置清空，再运行 `docker compose up -d --no-deps embyboss` 即可关闭远程弹幕；TG 登录和播放继续使用原有接口。

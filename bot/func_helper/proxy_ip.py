@@ -54,6 +54,22 @@ def _trusted_networks(values):
     return tuple(ip_network(value) for value in validate_proxy_cidrs(values))
 
 
+def is_trusted_proxy(peer_ip, trusted_cidrs):
+    """Check the actual origin peer against the current administrator list.
+
+    Empty or malformed configuration denies every peer. Unlike client-address
+    resolution, this is an access decision and never consumes forwarded headers.
+    """
+    peer = _address(peer_ip)
+    if not isinstance(trusted_cidrs, (list, tuple)) or len(trusted_cidrs) > MAX_PROXY_CIDRS:
+        return False
+    try:
+        networks = _trusted_networks(tuple(trusted_cidrs))
+    except (TypeError, ValueError):
+        return False
+    return any(peer.version == network.version and peer in network for network in networks)
+
+
 def resolve_client_ip(peer_ip, forwarded_for, trusted_cidrs):
     """Use XFF only behind a configured peer; malformed chains use that peer.
 
