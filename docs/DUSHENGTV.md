@@ -2,6 +2,8 @@
 
 已有部署新增 Telegram 头像接口的拉取、重建、验证与回退步骤见 [头像更新说明](DUSHENGTV_AVATARS.md)。
 
+可选弹幕服务的配置、鉴权和更新步骤见 [弹幕接入说明](DUSHENGTV_DANMAKU.md)。
+
 TV 独立域名为 `https://tv-api.dusheng.lol`，Bot 为 `@emby_dusheng_bot`。
 
 TV 使用独立 FastAPI 应用、监听端口、配置和令牌表；不会把接口注册到续费网站。

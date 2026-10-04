@@ -33,6 +33,8 @@ services:
       TGBOT_TONCENTER_API_KEY: ${TGBOT_TONCENTER_API_KEY:-}
       TGBOT_BINANCE_API_KEY: ${TGBOT_BINANCE_API_KEY:-}
       TGBOT_BINANCE_API_SECRET: ${TGBOT_BINANCE_API_SECRET:-}
+      TGBOT_DANMU_API_URL: ${TGBOT_DANMU_API_URL:-}
+      TGBOT_DANMU_API_TOKEN: ${TGBOT_DANMU_API_TOKEN:-}
     volumes:
       - ./config.json:/app/config.json
       - ./log:/app/log

@@ -17,6 +17,7 @@ from bot.func_helper.emby_identity import lookup_user_from_auth_db
 
 from . import runtime
 from .avatars import avatar_cache, AvatarUnavailable
+from .danmaku import DanmakuError, fetch_danmaku
 from .service import PREFIX, TVError, canonical_url
 
 RESPONSE_CSP = "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"
@@ -281,5 +282,16 @@ async def server_authorize(request: Request):
 
 @router.post("/providers/danmaku")
 async def danmaku(request: Request):
-    await invoke("server_identity", token(request))
-    return {"available": False, "comments": [], "message": "暂未配置弹幕供应商，可导入本地弹幕"}
+    bearer = token(request)
+    identity = await invoke("server_identity", bearer)
+    limits.check((identity["telegramId"], "danmaku"), 12)
+    data = await body(request)
+    try:
+        result = await fetch_danmaku(data)
+    except DanmakuError as error:
+        # Recheck authorization even when the provider fails or times out.
+        await invoke("server_identity", bearer)
+        raise TVError(error.code, error.message, error.status) from None
+    if await invoke("server_identity", bearer) != identity:
+        raise TVError("TOKEN_EXPIRED", "登录状态已改变", 401)
+    return result

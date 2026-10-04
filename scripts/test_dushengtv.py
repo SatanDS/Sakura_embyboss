@@ -215,6 +215,51 @@ class DesktopTests(unittest.TestCase):
             self.assertNotIn(b"fixture", response.content)
 
 
+    def test_danmaku_requires_live_registered_identity_and_rechecks_after_fetch(self):
+        route = self.m.service.PREFIX + "/providers/danmaku"
+        data = {"title": "示例电影", "type": "Movie", "year": 2026}
+        with patch.object(self.m.api, "fetch_danmaku", new_callable=AsyncMock) as fetch:
+            self.assertEqual(self.client.post(route, json=data).status_code, 401)
+            pending = self.login(register=False)["accessToken"]
+            self.assertEqual(self.client.post(route, json=data, headers={"Authorization": "Bearer " + pending}).status_code, 403)
+            fetch.assert_not_called()
+        token = self.login()["accessToken"]
+        headers = {"Authorization": "Bearer " + token}
+        result = {"available": True, "comments": [{"time": 1, "mode": 1, "color": "#ffffff", "text": "private fixture"}]}
+        with patch.object(self.m.api, "fetch_danmaku", new=AsyncMock(return_value=result)) as fetch:
+            response = self.client.post(route, json=data, headers=headers)
+            self.assertEqual(response.json(), result)
+            self.assertEqual(response.headers["cache-control"], "no-store")
+            fetch.assert_awaited_once_with(data)
+        async def revoke(_):
+            self.auth.logout(token)
+            return result
+        with patch.object(self.m.api, "fetch_danmaku", new=revoke):
+            response = self.client.post(route, json=data, headers=headers)
+            self.assertEqual(response.status_code, 401)
+            self.assertNotIn("private fixture", response.text)
+
+    def test_danmaku_provider_failure_still_rechecks_authorization(self):
+        token = self.login()["accessToken"]
+        async def revoke(_):
+            self.auth.logout(token)
+            raise self.m.api.DanmakuError("DANMAKU_UNAVAILABLE", "provider failure", 502)
+        with patch.object(self.m.api, "fetch_danmaku", new=revoke):
+            response = self.client.post(self.m.service.PREFIX + "/providers/danmaku", json={"title": "Movie"}, headers={"Authorization": "Bearer " + token})
+        self.assertEqual(response.status_code, 401)
+        self.assertNotIn("provider failure", response.text)
+
+    def test_danmaku_limit_is_per_telegram_account(self):
+        route = self.m.service.PREFIX + "/providers/danmaku"
+        token = self.login()["accessToken"]
+        with patch.object(self.m.api, "fetch_danmaku", new=AsyncMock(return_value={"available": False, "comments": []})) as fetch:
+            for _ in range(12):
+                self.assertEqual(self.client.post(route, json={"title": "Movie"}, headers={"Authorization": "Bearer " + token}).status_code, 200)
+            self.assertEqual(self.client.post(route, json={"title": "Movie"}, headers={"Authorization": "Bearer " + token}).status_code, 429)
+            self.assertEqual(fetch.await_count, 12)
+            other = self.login(tg=43, installation="other-installation-1234")["accessToken"]
+            self.assertEqual(self.client.post(route, json={"title": "Movie"}, headers={"Authorization": "Bearer " + other}).status_code, 200)
+
     def test_denial_cancel_and_expiry(self):
         challenge = self.start()
         self.auth.prepare(challenge["link"], 42, "Viewer", "viewer")
