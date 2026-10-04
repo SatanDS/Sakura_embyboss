@@ -88,6 +88,16 @@ docker compose exec -T embyboss python - --title '老枪' --year 2024 < scripts/
 
 `BOT_ENV_NOT_LOADED` 表示容器未加载弹幕配置；`authentication.http=401` 表示 Bot 使用的 Token 被弹幕服务拒绝；鉴权通过后 `LIVE_PROVIDER_FAILED` 表示真实来源阶段失败；`NO_MATCH_OR_COMMENTS` 表示没有匹配或弹幕内容；`READY` 表示从 Bot 容器到来源的读取和格式验证通过。此诊断不替代客户端 TG 会话验证，也不会改变生产配置。
 
+若鉴权检查返回 401，可在同机宿主机直接同步配置。在 Bot 仓库目录执行：
+
+```bash
+python3 scripts/configure_danmaku.py --danmu-env /opt/danmu/config/.env
+env -u TGBOT_DANMU_API_URL -u TGBOT_DANMU_API_TOKEN docker compose up -d --no-deps --force-recreate embyboss
+docker compose exec -T embyboss python - --title '老枪' --year 2024 < scripts/diagnose_danmaku.py
+```
+
+同步工具先使用配置文件的 TOKEN 向实际运行的本机弹幕服务验证；通过后只修改 Bot `.env` 的 `TGBOT_DANMU_API_URL` 和 `TGBOT_DANMU_API_TOKEN`，将原文件备份到 `db_backup/danmaku-env-*/.env`，不输出密钥。验证失败时不修改 Bot 配置。默认连接 `127.0.0.1:9321`，自定义端口可用 `--port` 指定。重建容器时清除这两个同名 Shell 环境变量，确保 Compose 读取刚保存的 `.env`。不需要重新构建 Bot 镜像。
+
 ```bash
 python scripts/test_dushengtv_danmaku.py -v
 python scripts/test_dushengtv.py -v
