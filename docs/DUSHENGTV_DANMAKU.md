@@ -43,7 +43,7 @@ sudo nginx -t && sudo systemctl reload nginx
 
 Bot 只向固定的 `/api/v1/dushengtv/danmaku` 发送 `Authorization: Bearer <TGBOT_DANMU_API_TOKEN>`。请求为 `{title,type,season,episode,year,providerIds}`，不携带 TG token、Emby token、TG ID 或设备信息。`title` 最多 256 字符，`type` 支持 `Movie`、`Episode`、`local`；剧集必须有季数和集数。季数允许 0–999，集数允许 0–99999，年份允许 1800–2200。0 值原样传递，由弹幕服务返回特殊集暂不支持自动匹配的提示。Provider ID 最多 16 项，值最多 128 字符。
 
-供应商返回 `{available,comments,match?,message?}`；每条弹幕包含秒数 `time`、`mode`（1/4/5）、`color`（`#RRGGBB`）和最多 300 字符的 `text`。Bot 只返回这些已验证字段及有限的匹配信息，最多 50,000 条、12 MiB 的弹幕正文；来源响应上限 20 MiB。无匹配时返回 `available:false` 和可见提示。错误不会透传来源响应内容、URL 或 token；供应商的 401/403 转为 502，不会被客户端当成 Telegram 登录过期。超时为 504，供应商限流为 429。
+供应商返回 `{available,comments,match?,message?,reason?}`；每条弹幕包含秒数 `time`、`mode`（1/4/5）、`color`（`#RRGGBB`）和最多 300 字符的 `text`。Bot 只返回这些已验证字段及有限的匹配信息，最多 50,000 条、12 MiB 的弹幕正文；来源响应上限 20 MiB。正常无匹配时返回 `available:false`，客户端提示固定为“無彈幕匹配”；特殊集和网络错误继续使用独立提示。`reason` 只用于诊断，不将来源文字或原因字段透传给客户端。错误不会透传来源响应内容、URL 或 token；供应商的 401/403 转为 502，不会被客户端当成 Telegram 登录过期。超时为 504，供应商限流为 429。
 
 Bot 不跟随重定向，也不使用进程的代理环境变量。若弹幕源需要代理，应在 danmu_api 的源配置中设置。专用 danmu_api 接口须避免使用共享 Bot 来源 IP 来记录用户匹配偏好；部署时关闭 `REMEMBER_LAST_SELECT`，防止服务端公共偏好影响用户匹配。
 
@@ -84,9 +84,28 @@ git pull --ff-only origin master
 docker compose exec -T embyboss python - --title '老枪' --year 2024 < scripts/diagnose_danmaku.py
 ```
 
-将标题和年份替换为出错的电影。脚本从运行中的容器读取环境变量，依次检查健康接口、无需外部来源的鉴权探测、真实影片匹配与 Bot 返回格式，不打印令牌、原始响应正文或网络异常内容。只更新诊断脚本不需要重建镜像。
+将标题和年份替换为出错的电影。需要按具体影片 ID 检查时，可加入 `--douban-id` 和／或 `--imdb-id`，例如：
 
-`BOT_ENV_NOT_LOADED` 表示容器未加载弹幕配置；`authentication.http=401` 表示 Bot 使用的 Token 被弹幕服务拒绝；鉴权通过后 `LIVE_PROVIDER_FAILED` 表示真实来源阶段失败；`NO_MATCH_OR_COMMENTS` 表示没有匹配或弹幕内容；`READY` 表示从 Bot 容器到来源的读取和格式验证通过。此诊断不替代客户端 TG 会话验证，也不会改变生产配置。
+```bash
+docker compose exec -T embyboss python - --title '影片标题' --douban-id '<豆瓣正整数ID>' --imdb-id '<tt开头的IMDbID>' < scripts/diagnose_danmaku.py
+```
+
+将占位符换成真实 ID；没有对应 ID 时省略该参数。豆瓣 ID 只接受不带前导零的正整数，最多 16 位；IMDb ID 只接受 `tt` 加 1–16 位数字；不接受影片 URL。参数分别以 `providerIds.Douban` 和 `providerIds.Imdb` 发送给弹幕服务。ID 用于确定具体影片，不要通过更换相邻年份来猜测同名电影；没有确定匹配时显示“無彈幕匹配”。
+
+脚本从运行中的容器读取环境变量，依次检查健康接口、无需外部来源的鉴权探测、真实影片匹配与 Bot 返回格式，不打印 ID、令牌、原始响应正文、匹配文字或网络异常内容。只更新诊断脚本不需要重建镜像；更新 Bot 的客户端提示需要重建 Bot 镜像。
+
+`BOT_ENV_NOT_LOADED` 表示容器未加载弹幕配置；`authentication.http=401` 表示 Bot 使用的 Token 被弹幕服务拒绝；鉴权通过后 `LIVE_PROVIDER_FAILED` 表示真实来源阶段失败；`READY` 表示从 Bot 容器到来源的读取和格式验证通过。
+
+当 `movie.http=200`、`movie.available=false` 时，`result` 仍为 `NO_MATCH_OR_COMMENTS`，新增的 `movie.reason` 区分具体阶段：
+
+| `movie.reason` | 含义 |
+| --- | --- |
+| `NO_MATCH` | 没有找到唯一确定的匹配，可检查影片标题、年份及季集资料 |
+| `TYPE_MISMATCH` | 匹配结果的影片类型与请求不一致，例如电影匹配到剧集 |
+| `EMPTY_COMMENTS` | 已匹配影片，但没有可用弹幕内容 |
+| `NO_MATCH_OR_COMMENTS` | 服务未返回已知的固定原因，无法进一步区分 |
+
+诊断优先接受来源 `reason` 中的 `NO_MATCH`、`TYPE_MISMATCH`、`EMPTY_COMMENTS`，同时兼容旧版本的三个固定消息精确映射。只有通用“無彈幕匹配”或未知原因时归为 `NO_MATCH_OR_COMMENTS`；未知消息和匹配文字不会输出。`READY` 和 `NO_MATCH_OR_COMMENTS` 的退出码仍为 0，配置、鉴权、网络或返回格式失败为 1，非法命令行参数为 2。此诊断不替代客户端 TG 会话验证，也不会改变生产配置。
 
 若鉴权检查返回 401，可在同机宿主机直接同步配置。在 Bot 仓库目录执行：
 

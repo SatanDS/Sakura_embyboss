@@ -9,6 +9,7 @@ import asyncio
 import importlib.util
 import json
 from pathlib import Path
+import re
 from time import monotonic
 from urllib.parse import urlsplit
 
@@ -26,6 +27,26 @@ SAFE_MESSAGES = {
     "弹幕源响应过大": "PROVIDER_RESPONSE_TOO_LARGE",
     "弹幕源响应超时，请稍后重试": "PROVIDER_TIMEOUT",
 }
+
+# Match only fixed adapter messages; arbitrary provider text must never be reported.
+UNAVAILABLE_REASONS = {
+    "没有找到确定匹配的弹幕，可检查影片标题与季集资料，或导入本地弹幕": "NO_MATCH",
+    "匹配结果的影片类型不一致，请检查影片资料或导入本地弹幕": "TYPE_MISMATCH",
+    "已匹配影片，但目前没有可用弹幕": "EMPTY_COMMENTS",
+}
+SAFE_REASON_CODES = frozenset(UNAVAILABLE_REASONS.values())
+
+
+def douban_id(value):
+    if not re.fullmatch(r"[1-9][0-9]{0,15}", value):
+        raise argparse.ArgumentTypeError("Douban ID must be a positive integer of at most 16 digits")
+    return value
+
+
+def imdb_id(value):
+    if not re.fullmatch(r"tt[0-9]{1,16}", value):
+        raise argparse.ArgumentTypeError("IMDb ID must be tt followed by 1 to 16 digits")
+    return value
 
 
 def load_adapter():
@@ -99,6 +120,13 @@ async def diagnose(adapter, metadata):
             return {**report, "result": "BOT_RESPONSE_CONTRACT_FAILED"}
         report["movie"]["available"] = normalized["available"]
         report["movie"]["comments"] = len(normalized["comments"])
+        if not normalized["available"]:
+            reason, message = data.get("reason"), data.get("message")
+            if isinstance(reason, str) and reason in SAFE_REASON_CODES:
+                report["movie"]["reason"] = reason
+            else:
+                report["movie"]["reason"] = (UNAVAILABLE_REASONS.get(message, "NO_MATCH_OR_COMMENTS")
+                    if isinstance(message, str) else "NO_MATCH_OR_COMMENTS")
         return {**report, "result": "READY" if normalized["available"] and normalized["comments"] else "NO_MATCH_OR_COMMENTS"}
 
 
@@ -106,6 +134,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--title", required=True)
     parser.add_argument("--year", type=int)
+    parser.add_argument("--douban-id", type=douban_id)
+    parser.add_argument("--imdb-id", type=imdb_id)
     args = parser.parse_args()
     try:
         adapter = load_adapter()
@@ -113,7 +143,8 @@ def main():
         print(json.dumps({"result": "BOT_IMAGE_MISSING_DANMAKU_ADAPTER"}))
         return 1
     try:
-        report = asyncio.run(diagnose(adapter, {"title": args.title, "type": "Movie", "year": args.year}))
+        providers = {key: value for key, value in (("Douban", args.douban_id), ("Imdb", args.imdb_id)) if value is not None}
+        report = asyncio.run(diagnose(adapter, {"title": args.title, "type": "Movie", "year": args.year, "providerIds": providers}))
     except Exception:
         # Do not print exception strings: networking errors may contain secrets.
         report = {"result": "DIAGNOSTIC_FAILED"}

@@ -127,6 +127,11 @@ class DanmakuTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(caught.exception.status, 502)
 
     async def test_no_match_and_special_episode_have_safe_visible_messages(self):
+        for message in ("secret internal details", "無彈幕匹配", "已匹配影片，但目前没有可用弹幕"):
+            response = Response({"available": False, "comments": [], "message": message, "reason": "EMPTY_COMMENTS"})
+            with patch.object(danmaku.aiohttp, "ClientSession", return_value=Client(response)):
+                result = await danmaku.fetch_danmaku({"title": "Movie", "type": "Movie"})
+            self.assertEqual(result, {"available": False, "comments": [], "message": "無彈幕匹配"})
         response = Response({"available": False, "comments": [], "message": "secret internal details"})
         with patch.object(danmaku.aiohttp, "ClientSession", return_value=Client(response)):
             result = await danmaku.fetch_danmaku({**self.item, "season": 0})

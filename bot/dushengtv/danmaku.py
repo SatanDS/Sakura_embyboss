@@ -101,7 +101,7 @@ def response_comments(data):
     if not isinstance(data, dict) or type(data.get("available")) is not bool or not isinstance(data.get("comments"), list):
         raise DanmakuError("DANMAKU_UNAVAILABLE", UNAVAILABLE)
     if not data["available"]:
-        message = "未找到可用弹幕，可导入本地 XML / JSON 弹幕"
+        message = "無彈幕匹配"
         # The adapter also discovers specials in local filenames. Allow only its
         # known safe message, never arbitrary upstream errors or credentials.
         if data.get("message") == "特殊季或第 0 集暂不支持自动匹配，请在播放器导入本地弹幕":
