@@ -77,6 +77,17 @@ Bot 新增只供同机代理使用的 `GET /emby/cdn_origin`。Nginx 的内部 `
 
 ## 离线验证与回退
 
+客户端提示“弹幕服务暂时不可用”，但 danmu_api 自身的 smoke 检查通过时，可以使用运行中的 Bot 容器进行分段诊断。在宿主机 Bot 仓库拉取最新脚本后执行：
+
+```bash
+git pull --ff-only origin master
+docker compose exec -T embyboss python - --title '老枪' --year 2024 < scripts/diagnose_danmaku.py
+```
+
+将标题和年份替换为出错的电影。脚本从运行中的容器读取环境变量，依次检查健康接口、无需外部来源的鉴权探测、真实影片匹配与 Bot 返回格式，不打印令牌、原始响应正文或网络异常内容。只更新诊断脚本不需要重建镜像。
+
+`BOT_ENV_NOT_LOADED` 表示容器未加载弹幕配置；`authentication.http=401` 表示 Bot 使用的 Token 被弹幕服务拒绝；鉴权通过后 `LIVE_PROVIDER_FAILED` 表示真实来源阶段失败；`NO_MATCH_OR_COMMENTS` 表示没有匹配或弹幕内容；`READY` 表示从 Bot 容器到来源的读取和格式验证通过。此诊断不替代客户端 TG 会话验证，也不会改变生产配置。
+
 ```bash
 python scripts/test_dushengtv_danmaku.py -v
 python scripts/test_dushengtv.py -v
