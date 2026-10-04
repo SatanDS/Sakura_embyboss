@@ -191,6 +191,30 @@ class DesktopTests(unittest.TestCase):
         self.error("CHALLENGE_CLAIMED", self.auth.decide, challenge["challengeId"], 43, True)
         self.assertEqual(self.auth.poll(challenge)["status"], "pending")
 
+    def test_avatar_is_private_and_rechecks_revocation_after_fetch(self):
+        route = self.m.service.PREFIX + "/profile/avatar"
+        self.assertEqual(self.client.get(route).status_code, 401)
+        token = self.login()["accessToken"]
+        headers = {"Authorization": "Bearer " + token}
+        image = (b"\x89PNG\r\n\x1a\nfixture", "image/png")
+        with patch.object(self.m.api.avatar_cache, "get", new=AsyncMock(return_value=image)) as load:
+            response = self.client.get(route + "?telegramId=43", headers=headers)
+            load.assert_awaited_once_with("42")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.content, image[0])
+            self.assertEqual(response.headers["cache-control"], "no-store")
+            self.assertNotIn(token, str(response.headers))
+        with patch.object(self.m.api.avatar_cache, "get", new=AsyncMock(return_value=None)):
+            self.assertEqual(self.client.get(route, headers=headers).status_code, 204)
+        async def revoked(_):
+            self.auth.logout(token)
+            return image
+        with patch.object(self.m.api.avatar_cache, "get", new=revoked):
+            response = self.client.get(route, headers=headers)
+            self.assertEqual(response.status_code, 401)
+            self.assertNotIn(b"fixture", response.content)
+
+
     def test_denial_cancel_and_expiry(self):
         challenge = self.start()
         self.auth.prepare(challenge["link"], 42, "Viewer", "viewer")

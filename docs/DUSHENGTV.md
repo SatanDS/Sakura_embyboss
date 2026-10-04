@@ -1,5 +1,7 @@
 # DuShengTV Telegram 登录
 
+已有部署新增 Telegram 头像接口的拉取、重建、验证与回退步骤见 [头像更新说明](DUSHENGTV_AVATARS.md)。
+
 TV 独立域名为 `https://tv-api.dusheng.lol`，Bot 为 `@emby_dusheng_bot`。
 
 TV 使用独立 FastAPI 应用、监听端口、配置和令牌表；不会把接口注册到续费网站。

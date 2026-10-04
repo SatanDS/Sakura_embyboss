@@ -9,13 +9,14 @@ from collections import OrderedDict, deque
 
 import aiohttp
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.routing import APIRoute
 from starlette.concurrency import run_in_threadpool
 
 from bot.func_helper.emby_identity import lookup_user_from_auth_db
 
 from . import runtime
+from .avatars import avatar_cache, AvatarUnavailable
 from .service import PREFIX, TVError, canonical_url
 
 RESPONSE_CSP = "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"
@@ -165,6 +166,25 @@ async def cancel(request: Request):
 @router.get("/session")
 async def session_info(request: Request):
     return await invoke("session", token(request))
+
+
+@router.get("/profile/avatar")
+async def profile_avatar(request: Request):
+    bearer = token(request)
+    identity = await invoke("server_identity", bearer)
+    limits.check((identity["telegramId"], "avatar"), 30)
+    try:
+        image = await avatar_cache.get(identity["telegramId"])
+    except AvatarUnavailable:
+        raise TVError("AVATAR_UNAVAILABLE", "头像暂时无法加载", 503) from None
+    # A picture is private account data. Recheck logout, revocation and binding
+    # after the potentially slow Telegram fetch before returning any bytes.
+    if await invoke("server_identity", bearer) != identity:
+        raise TVError("TOKEN_EXPIRED", "登录状态已改变", 401)
+    if image is None:
+        return Response(status_code=204)
+    data, media_type = image
+    return Response(content=data, media_type=media_type)
 
 
 @router.post("/session/refresh")
