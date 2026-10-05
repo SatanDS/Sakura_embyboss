@@ -218,6 +218,20 @@ async def devices(request: Request):
     return await invoke("devices", token(request))
 
 
+@router.get("/settings/cloud")
+async def cloud_settings_get(request: Request):
+    bearer = token(request)
+    limits.check((bearer, "cloud-read"), 60)
+    return await invoke("cloud_settings", bearer)
+
+
+@router.post("/settings/cloud")
+async def cloud_settings_save(request: Request):
+    bearer = token(request)
+    limits.check((bearer, "cloud-write"), 10)
+    return await invoke("cloud_settings", bearer, await body(request))
+
+
 @router.delete("/devices/{device_id}")
 async def revoke(request: Request, device_id: str):
     return await invoke("revoke", token(request), device_id)

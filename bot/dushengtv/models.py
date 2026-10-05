@@ -1,8 +1,17 @@
 """Desktop credentials are stored as hashes; timestamps are naive UTC."""
 
-from sqlalchemy import BigInteger, Column, DateTime, JSON, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Column, DateTime, Integer, JSON, String, Text, UniqueConstraint
 
 from bot.sql_helper import Base
+
+
+class CloudSettings(Base):
+    __tablename__ = "tv_cloud_settings"
+    tg = Column(BigInteger, primary_key=True, autoincrement=False)
+    schema_version = Column(Integer, nullable=False)
+    revision = Column(Integer, nullable=False)
+    settings = Column(JSON, nullable=False)
+    updated_at = Column(DateTime, nullable=False)
 
 
 class LoginChallenge(Base):

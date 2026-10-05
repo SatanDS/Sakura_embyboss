@@ -184,6 +184,84 @@ class DesktopTests(unittest.TestCase):
             self.assertNotEqual(saved.access_hash, result["accessToken"])
             self.assertEqual(db.query(self.m.models.RefreshToken).one().token_hash, self.m.service.digest(result["refreshToken"]))
 
+    def test_cloud_settings_are_durable_and_shared_only_by_the_same_account(self):
+        route = self.m.service.PREFIX + "/settings/cloud"
+        one = self.login()["accessToken"]
+        two = self.login(installation="second-desktop-12345")["accessToken"]
+        other = self.login(tg=43, installation="other-desktop-12345")["accessToken"]
+        header = lambda value: {"Authorization": "Bearer " + value}
+        self.assertFalse(self.client.get(route, headers=header(one)).json()["available"])
+        settings = {"volume": 0, "theme": "dark", "danmakuRows": 8, "subtitleSize": 35}
+        response = self.client.post(route, headers=header(one), json={"schema": 1, "settings": settings})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["revision"], 1)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        self.assertEqual(self.client.get(route, headers=header(two)).json()["settings"], settings)
+        self.assertFalse(self.client.get(route + "?tg=42", headers=header(other)).json()["available"])
+        restarted = self.m.service.DesktopAuth(self.sessions, self.m.runtime.account_lookup, now=lambda: self.now)
+        self.assertEqual(restarted.cloud_settings(two)["settings"], settings)
+        restarted.cloud_settings(two, {"schema": 1, "settings": {"volume": 36}})
+        self.assertEqual(self.auth.cloud_settings(one)["revision"], 2)
+        with self.sessions() as db:
+            self.assertEqual(db.query(self.m.models.CloudSettings).count(), 1)
+
+    def test_cloud_settings_require_a_bound_account_and_live_registered_device(self):
+        route = self.m.service.PREFIX + "/settings/cloud"
+        self.assertEqual(self.client.get(route).status_code, 401)
+        pending = self.login(register=False)["accessToken"]
+        headers = {"Authorization": "Bearer " + pending}
+        self.assertEqual(self.client.get(route, headers=headers).json()["code"], "DEVICE_REQUIRED")
+        self.assertEqual(self.client.post(route, headers=headers, json={"schema": 1, "settings": {"volume": 30}}).status_code, 403)
+        token = self.login(installation="cloud-desktop-12345")["accessToken"]
+        headers = {"Authorization": "Bearer " + token}
+        with self.sessions.begin() as db:
+            db.query(self.m.models.Device).filter_by(installation_id="cloud-desktop-12345").one().revoked_at = self.now
+        self.assertEqual(self.client.get(route, headers=headers).json()["code"], "DEVICE_REVOKED")
+        token = self.login(installation="cloud-desktop-67890")["accessToken"]
+        with self.sessions.begin() as db:
+            db.get(self.m.User, 42).embyid = None
+        self.assertEqual(self.client.get(route, headers={"Authorization": "Bearer " + token}).json()["code"], "BOT_UNBOUND")
+
+    def test_cloud_settings_reject_secrets_unknown_keys_bad_values_and_partial_writes(self):
+        token = self.login()["accessToken"]
+        self.auth.cloud_settings(token, {"schema": 1, "settings": {"volume": 20}})
+        invalid = [{"schema": True, "settings": {"volume": 1}}, {"schema": 2, "settings": {"volume": 1}},
+                   {"schema": 1, "settings": {"volume": 30}, "tg": 43}]
+        for settings in [{}, {"volume": True}, {"volume": 131}, {"volume": -1}, {"volume": float("nan")},
+                         {"danmakuRows": 1.5}, {"theme": "unknown"}, {"volume": 30, "token": "secret"},
+                         {"proxyAddress": "http://private"}, {"gpu": "another-device"}, {"__proto__": {}},
+                         {"subtitleFont": "x\nunsafe"}, {"danmakuBlockedWords": "x" * 2049}]:
+            invalid.append({"schema": 1, "settings": settings})
+        for data in invalid:
+            self.error("INVALID_SETTINGS", self.auth.cloud_settings, token, data)
+            self.assertEqual(self.auth.cloud_settings(token)["settings"], {"volume": 20})
+
+    def test_cloud_settings_http_bounds_and_rate_limit(self):
+        route = self.m.service.PREFIX + "/settings/cloud"
+        token = self.login()["accessToken"]
+        headers = {"Authorization": "Bearer " + token}
+        self.assertEqual(self.client.post(route, headers=headers, content="{}").status_code, 415)
+        self.assertEqual(self.client.post(route, headers={**headers, "Content-Type": "application/json"}, content=" " * 32769).status_code, 413)
+        for _ in range(10):
+            self.assertEqual(self.client.post(route, headers=headers, json={"schema": 1, "settings": {"volume": 30}}).status_code, 200)
+        self.assertEqual(self.client.post(route, headers=headers, json={"schema": 1, "settings": {"volume": 90}}).status_code, 429)
+        self.assertEqual(self.auth.cloud_settings(token)["settings"], {"volume": 30})
+
+    def test_cloud_settings_migration_is_repeatable_and_preserves_backups(self):
+        from alembic.migration import MigrationContext
+        from alembic.operations import Operations
+        spec = importlib.util.spec_from_file_location("cloud_migration", ROOT / "bot/sql_helper/alembic/versions/20261005_15_add_tv_cloud_settings.py")
+        migration = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(migration)
+        token = self.login()["accessToken"]
+        self.auth.cloud_settings(token, {"schema": 1, "settings": {"volume": 0}})
+        with self.engine.begin() as connection:
+            with patch.object(migration, "op", Operations(MigrationContext.configure(connection))):
+                migration.upgrade()
+                migration.upgrade()
+        self.assertEqual(self.auth.cloud_settings(token)["settings"], {"volume": 0})
+        self.assertEqual(migration.down_revision, "20261004_14")
+
     def test_claim_cannot_be_taken_by_another_telegram_user(self):
         challenge = self.start()
         self.auth.prepare(challenge["link"], 42, "Viewer", "viewer")
@@ -618,6 +696,12 @@ class DesktopTests(unittest.TestCase):
             with patch.object(migration, "op", Operations(MigrationContext.configure(connection))):
                 migration.upgrade()
                 migration.upgrade()
+            cloud_spec = importlib.util.spec_from_file_location("cloud_migration", ROOT / "bot/sql_helper/alembic/versions/20261005_15_add_tv_cloud_settings.py")
+            cloud_migration = importlib.util.module_from_spec(cloud_spec)
+            cloud_spec.loader.exec_module(cloud_migration)
+            with patch.object(cloud_migration, "op", Operations(MigrationContext.configure(connection))):
+                cloud_migration.upgrade()
+                cloud_migration.upgrade()
             inspector = inspect(connection)
             for table in self.m.base.metadata.tables.values():
                 if table.name.startswith("tv_"):

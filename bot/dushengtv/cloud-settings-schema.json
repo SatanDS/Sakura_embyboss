@@ -1,0 +1,297 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "minProperties": 1,
+  "properties": {
+    "theme": {
+      "type": "string",
+      "enum": [
+        "dark",
+        "light",
+        "system"
+      ],
+      "maxLength": 2048,
+      "pattern": "^[^\\r\\n\\u0000]*$"
+    },
+    "accent": {
+      "type": "string",
+      "enum": [
+        "#9ccdbf",
+        "#a9bcec",
+        "#dbb7d6",
+        "#e5c397"
+      ],
+      "maxLength": 2048,
+      "pattern": "^[^\\r\\n\\u0000]*$"
+    },
+    "language": {
+      "type": "string",
+      "enum": [
+        "zh-CN",
+        "zh-TW"
+      ],
+      "maxLength": 2048,
+      "pattern": "^[^\\r\\n\\u0000]*$"
+    },
+    "startupPage": {
+      "type": "string",
+      "enum": [
+        "home",
+        "last"
+      ],
+      "maxLength": 2048,
+      "pattern": "^[^\\r\\n\\u0000]*$"
+    },
+    "sidebarCollapsed": {
+      "type": "boolean"
+    },
+    "hideLibrary": {
+      "type": "boolean"
+    },
+    "hideContinue": {
+      "type": "boolean"
+    },
+    "hideDaily": {
+      "type": "boolean"
+    },
+    "hideUnplayed": {
+      "type": "boolean"
+    },
+    "showRating": {
+      "type": "boolean"
+    },
+    "hideGallery": {
+      "type": "boolean"
+    },
+    "includeMediaInfo": {
+      "type": "boolean"
+    },
+    "searchHistory": {
+      "type": "boolean"
+    },
+    "posterScale": {
+      "type": "number",
+      "minimum": 0.75,
+      "maximum": 1.5
+    },
+    "imageQuality": {
+      "type": "number",
+      "minimum": 30,
+      "maximum": 100
+    },
+    "dataCache": {
+      "type": "boolean"
+    },
+    "dataCacheDays": {
+      "type": "number",
+      "minimum": 1,
+      "maximum": 90
+    },
+    "imageCacheDays": {
+      "type": "number",
+      "minimum": 1,
+      "maximum": 90
+    },
+    "recommendationFilter": {
+      "type": "string",
+      "maxLength": 2048,
+      "pattern": "^[^\\r\\n\\u0000]*$"
+    },
+    "defaultFullscreen": {
+      "type": "boolean"
+    },
+    "hideOnPlay": {
+      "type": "boolean"
+    },
+    "forwardSeconds": {
+      "type": "number",
+      "minimum": 1,
+      "maximum": 120
+    },
+    "backSeconds": {
+      "type": "number",
+      "minimum": 1,
+      "maximum": 120
+    },
+    "boostRate": {
+      "type": "number",
+      "minimum": 1,
+      "maximum": 4
+    },
+    "volume": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 130
+    },
+    "audioLanguage": {
+      "type": "string",
+      "enum": [
+        "auto",
+        "zh",
+        "eng",
+        "jpn"
+      ],
+      "maxLength": 2048,
+      "pattern": "^[^\\r\\n\\u0000]*$"
+    },
+    "subtitleLanguage": {
+      "type": "string",
+      "enum": [
+        "auto",
+        "zh-CN",
+        "zh-TW",
+        "eng",
+        "jpn",
+        "off"
+      ],
+      "maxLength": 2048,
+      "pattern": "^[^\\r\\n\\u0000]*$"
+    },
+    "secondarySubtitle": {
+      "type": "boolean"
+    },
+    "secondaryLanguage": {
+      "type": "string",
+      "enum": [
+        "off",
+        "eng",
+        "zh-CN",
+        "zh-TW",
+        "jpn"
+      ],
+      "maxLength": 2048,
+      "pattern": "^[^\\r\\n\\u0000]*$"
+    },
+    "preferredVersion": {
+      "type": "string",
+      "maxLength": 2048,
+      "pattern": "^[^\\r\\n\\u0000]*$"
+    },
+    "skipIntro": {
+      "type": "string",
+      "enum": [
+        "off",
+        "ask",
+        "auto"
+      ],
+      "maxLength": 2048,
+      "pattern": "^[^\\r\\n\\u0000]*$"
+    },
+    "thumbnails": {
+      "type": "boolean"
+    },
+    "chapterMarkers": {
+      "type": "boolean"
+    },
+    "rememberZoom": {
+      "type": "boolean"
+    },
+    "zoom": {
+      "type": "string",
+      "enum": [
+        "fit",
+        "fill",
+        "stretch"
+      ],
+      "maxLength": 2048,
+      "pattern": "^[^\\r\\n\\u0000]*$"
+    },
+    "liveDirect": {
+      "type": "boolean"
+    },
+    "lowQualityDecode": {
+      "type": "boolean"
+    },
+    "stereo": {
+      "type": "boolean"
+    },
+    "stretchSubtitle": {
+      "type": "boolean"
+    },
+    "preload": {
+      "type": "boolean"
+    },
+    "cacheSeconds": {
+      "type": "number",
+      "minimum": 30,
+      "maximum": 3600
+    },
+    "subtitleFont": {
+      "type": "string",
+      "maxLength": 2048,
+      "pattern": "^[^\\r\\n\\u0000]*$"
+    },
+    "subtitleSize": {
+      "type": "number",
+      "minimum": 12,
+      "maximum": 80
+    },
+    "subtitleColor": {
+      "type": "string",
+      "maxLength": 2048,
+      "pattern": "^#[0-9a-fA-F]{6}$"
+    },
+    "subtitleOutline": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 6
+    },
+    "subtitlePosition": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "minimizeToTray": {
+      "type": "boolean"
+    },
+    "danmakuEnabled": {
+      "type": "boolean"
+    },
+    "danmakuOpacity": {
+      "type": "number",
+      "minimum": 0.1,
+      "maximum": 1
+    },
+    "danmakuSize": {
+      "type": "number",
+      "minimum": 14,
+      "maximum": 48
+    },
+    "danmakuArea": {
+      "type": "number",
+      "minimum": 0.2,
+      "maximum": 1
+    },
+    "danmakuRows": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 8
+    },
+    "danmakuSpeed": {
+      "type": "number",
+      "minimum": 0.5,
+      "maximum": 2
+    },
+    "danmakuBlockedWords": {
+      "type": "string",
+      "maxLength": 2048,
+      "pattern": "^[^\\r\\n\\u0000]*$"
+    },
+    "tmdbLanguage": {
+      "type": "string",
+      "enum": [
+        "zh-CN",
+        "zh-TW",
+        "en-US"
+      ],
+      "maxLength": 2048,
+      "pattern": "^[^\\r\\n\\u0000]*$"
+    },
+    "tmdbEnabled": {
+      "type": "boolean"
+    },
+    "syncEmbyProgress": {
+      "type": "boolean"
+    }
+  }
+}

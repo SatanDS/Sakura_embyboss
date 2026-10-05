@@ -127,9 +127,12 @@ TV 登出／撤销时立即清理画面中的服务器、媒体卡片、详情�
 | POST | `/devices/register` | 硬件哈希、公钥、签名与用途同意 |
 | POST | `/devices/heartbeat` | 验证登记公钥和 nonce |
 | GET / DELETE | `/devices` / `/devices/{id}` | 查看／撤销当前用户设备 |
+| GET / POST | `/settings/cloud` | 读取／保存当前 TG 账号的可迁移设置备份 |
 | POST | `/servers/authorize` | 白名单地址、Emby 用户 ID 与用户 token 对应校验 |
 
 `authProvider: telegram` 表示身份来自受信任的 Telegram Bot 更新，不是客户端自报的 Telegram ID，也不声称使用 Telegram OIDC。身份确认与支付网页登录各用自己的协议和数据表。
+
+账号云端设置的更新步骤与恢复行为见 [DUSHENGTV_CLOUD_SETTINGS.md](DUSHENGTV_CLOUD_SETTINGS.md)。
 
 ```sh
 python -m pip install -r requirements-test.txt

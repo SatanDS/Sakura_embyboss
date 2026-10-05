@@ -33,7 +33,8 @@ def main():
             with fixture.sessions.begin() as db:
                 db.get(fixture.m.User, 42).embyid = None
         prepared = fixture.auth.prepare(data["link"], 42, "Fixture viewer", "fixture")
-        fixture.auth.decide(prepared["id"], 42, data.get("approve", True))
+        if not data.get("prepareOnly"):
+            fixture.auth.decide(prepared["id"], 42, data.get("approve", True))
         return {"ok": True}
 
     @app.on_event("startup")

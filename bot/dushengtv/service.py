@@ -14,7 +14,8 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from .models import DesktopSession, Device, LoginChallenge, RefreshToken
+from .models import CloudSettings, DesktopSession, Device, LoginChallenge, RefreshToken
+from .cloud_settings import validate_cloud_settings
 
 PREFIX = "/api/dushengtv/v1"
 LOGIN_SECONDS, ACCESS_SECONDS, SESSION_SECONDS = 300, 900, 30 * 86400
@@ -192,6 +193,40 @@ class DesktopAuth:
                     "user": {"telegramId": str(session.tg), "displayName": session.display_name, "username": session.username},
                     "device": {"installationId": session.installation_id, "allowed": device is not None},
                     "maxDevices": self.max_devices}
+
+    @staticmethod
+    def _cloud_result(row):
+        if row is None:
+            return {"available": False, "schema": 1, "revision": 0, "updatedAt": None}
+        return {"available": True, "schema": row.schema_version, "revision": row.revision,
+                "updatedAt": row.updated_at.isoformat(timespec="milliseconds") + "Z", "settings": row.settings}
+
+    def cloud_settings(self, token, data=None):
+        with self.sessions.begin() as db:
+            session, _ = self._identity(db, token)
+            if data is not None:
+                try:
+                    values = validate_cloud_settings(data)
+                except (ValueError, TypeError, OverflowError):
+                    raise TVError("INVALID_SETTINGS", "云端设置格式无效或包含不支持的项目", 400) from None
+                fields = {"tg": session.tg, "schema_version": 1, "revision": 1,
+                          "settings": values, "updated_at": self.now()}
+                # Atomic upsert also covers a first upload from two devices.
+                if db.bind.dialect.name == "sqlite":
+                    from sqlalchemy.dialects.sqlite import insert
+                    statement = insert(CloudSettings).values(**fields)
+                    statement = statement.on_conflict_do_update(index_elements=["tg"], set_={
+                        **{key: fields[key] for key in ("schema_version", "settings", "updated_at")},
+                        "revision": CloudSettings.revision + 1})
+                else:
+                    from sqlalchemy.dialects.mysql import insert
+                    statement = insert(CloudSettings).values(**fields)
+                    statement = statement.on_duplicate_key_update(
+                        **{key: fields[key] for key in ("schema_version", "settings", "updated_at")},
+                        revision=CloudSettings.revision + 1)
+                db.execute(statement)
+            row = db.query(CloudSettings).filter_by(tg=session.tg).populate_existing().one_or_none()
+            return self._cloud_result(row)
 
     def refresh(self, data):
         token = valid(data.get("refreshToken"), r"[A-Za-z0-9_-]{43}")
