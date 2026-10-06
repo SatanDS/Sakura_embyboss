@@ -101,7 +101,8 @@ class MoviePilotGateway:
             for row in rows:
                 if not isinstance(row, dict):
                     continue
-                candidate = normalize({**row, "title": row.get("name")}, item["source"], item["type"])
+                media = {**row, "title": row.get("name")}
+                candidate = normalize(media, "tmdb", item["type"]) or normalize(media, "douban", item["type"])
                 if candidate and same_identity(item, candidate) and (item["type"] == "movie" or row.get("season") == season):
                     if row.get("id"):
                         return str(row["id"])

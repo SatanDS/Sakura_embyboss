@@ -70,12 +70,17 @@ def normalize(row, source, kind):
     except (ValueError, TypeError):
         rating = 0
     seasons = []
-    for season in (row.get("seasons") if isinstance(row.get("seasons"), list) else [])[:1000]:
+    season_rows = row.get("seasons") if isinstance(row.get("seasons"), list) else row.get("season_info")
+    for season in (season_rows if isinstance(season_rows, list) else [])[:1000]:
         if not isinstance(season, dict):
             continue
         number = season.get("season_number")
         if type(number) is int and 0 <= number <= 999:
             seasons.append({"number": number, "name": text(season.get("name")), "episodeCount": season.get("episode_count") if type(season.get("episode_count")) is int else None})
+    def people(field):
+        return [{"name": text(person.get("name")), "role": text(person.get("character") or person.get("job")),
+                 "photo": image_url(person.get("profile_path") or person.get("avatar"))}
+                for person in (row.get(field) if isinstance(row.get(field), list) else [])[:30] if isinstance(person, dict) and person.get("name")]
     return {"key": f"{source}:{kind}:{media_id}", "source": source, "id": media_id, "type": kind,
             "title": title, "originalTitle": text(row.get("original_title") or row.get("original_name")),
             "year": int(year) if re.fullmatch(r"(?:18|19|20|21)\d\d", year) else None,
@@ -83,6 +88,11 @@ def normalize(row, source, kind):
             "poster": image_url(row.get("poster_path") or row.get("poster")),
             "backdrop": image_url(row.get("backdrop_path") or row.get("backdrop")),
             "rating": rating, "providerIds": ids, "seasons": seasons,
+            "tagline": text(row.get("tagline"), 512), "releaseDate": text(row.get("release_date") or row.get("first_air_date"), 40),
+            "status": text(row.get("status"), 80), "language": text(row.get("original_language"), 40),
+            "countries": [text(value.get("name") if isinstance(value, dict) else value, 80) for value in (row.get("origin_country") or row.get("production_countries") or [])[:20]],
+            "studios": [text(value.get("name") if isinstance(value, dict) else value, 120) for value in (row.get("production_companies") or [])[:20]],
+            "cast": people("actors"), "directors": people("directors"),
             "genres": [text(v.get("name") if isinstance(v, dict) else v, 60) for v in (row.get("genres") if isinstance(row.get("genres"), list) else [])[:20]]}
 
 

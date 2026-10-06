@@ -17,6 +17,13 @@ def serialize(row):
             "item": row.item, "updatedAt": row.updated_at.isoformat() + "Z", "error": row.error}
 
 
+def canonical_media_key(item):
+    # A verified cross-source TMDB mapping shares the same DB exclusion key.
+    # Title/year display deduplication is intentionally not used here.
+    tmdb = item.get("providerIds", {}).get("Tmdb")
+    return f"tmdb:{item['type']}:{tmdb}" if tmdb else item["key"]
+
+
 class RequestStore:
     def __init__(self, sessions, daily_limit=20):
         self.sessions, self.daily_limit = sessions, daily_limit
@@ -34,7 +41,8 @@ class RequestStore:
             return {"items": [serialize(row) for row in rows[:30]], "page": page, "hasMore": len(rows) > 30}
 
     def claim(self, tg, item, season):
-        key = item["key"] + (f":s{season}" if item["type"] == "tv" else "")
+        media_key = canonical_media_key(item)
+        key = media_key + (f":s{season}" if item["type"] == "tv" else "")
         now = datetime.utcnow()
         # Unique media/season PK is the cross-worker exclusion guard. An uncertain
         # external POST retains pending state; subsequent calls only reconcile it.
@@ -49,7 +57,7 @@ class RequestStore:
                     db.add(MediaRequestOwner(tg=tg, request_key=key, created_at=now))
                 claimed = row is None or row.state == "failed"
                 if row is None:
-                    row = MediaRequest(key=key, media_key=item["key"], season=season, item=item, state="pending", created_at=now, updated_at=now)
+                    row = MediaRequest(key=key, media_key=media_key, season=season, item=item, state="pending", created_at=now, updated_at=now)
                     db.add(row)
                 elif claimed:
                     row.state, row.error, row.updated_at = "pending", None, now
@@ -131,7 +139,7 @@ class MediaRequests:
 
     async def detail(self, identity, key):
         item = await self.media(key)
-        library, subscriptions = await asyncio.gather(self.library(identity, item), run_in_threadpool(self.store.find, int(identity["telegramId"]), item["key"]))
+        library, subscriptions = await asyncio.gather(self.library(identity, item), run_in_threadpool(self.store.find, int(identity["telegramId"]), canonical_media_key(item)))
         if library["available"]:
             for record in subscriptions:
                 # A Series entry alone does not establish that a requested season

@@ -99,6 +99,23 @@ class RequestTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.store.mine(20, 1)["items"]), 1)
         self.assertEqual(self.store.mine(30, 1)["items"], [])
 
+    async def test_verified_cross_source_ids_share_one_subscription_and_detail_record(self):
+        await self.service.subscribe(self.identity, self.movie["key"], None, self.recheck)
+        douban = self.media.normalize({"douban_id": 888, "tmdb_id": 123, "title": "片名", "year": 2026, "type": "电影"}, "douban", "movie")
+        self.gateway.detail.return_value = douban
+        second = await self.service.subscribe(self.identity, douban["key"], None, self.recheck)
+        self.assertTrue(second["duplicate"])
+        self.gateway.subscribe.assert_awaited_once()
+        self.assertEqual((await self.service.detail(self.identity, douban["key"]))["subscription"]["state"], "subscribed")
+
+    async def test_mp_season_info_and_cast_are_normalized_without_untrusted_images(self):
+        item = self.media.normalize({"tmdb_id": 456, "title": "剧名", "type": "电视剧", "seasons": {"1": [1, 2]},
+            "season_info": [{"season_number": 0, "episode_count": 2}], "actors": [{"name": "演员", "character": "角色", "profile_path": "/actor.jpg"},
+            {"name": "演员二", "profile_path": "https://attacker.test/avatar"}]}, "tmdb", "tv")
+        self.assertEqual(item["seasons"][0]["number"], 0)
+        self.assertEqual(item["cast"][0]["photo"], "https://image.tmdb.org/t/p/w780/actor.jpg")
+        self.assertEqual(item["cast"][1]["photo"], "")
+
     async def test_same_time_calls_only_submit_once(self):
         async def accept(*_):
             await asyncio.sleep(.05)
