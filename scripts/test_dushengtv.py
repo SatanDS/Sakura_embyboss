@@ -201,13 +201,82 @@ class DesktopTests(unittest.TestCase):
         with self.sessions.begin() as db:
             row = db.query(self.m.models.CloudSettings).filter_by(tg=42).one()
             row.settings = {**settings, "danmakuArea": 0.8}
+            saved_updated_at = row.updated_at
         self.assertEqual(self.client.get(route, headers=header(one)).json()["settings"], settings)
         restarted = self.m.service.DesktopAuth(self.sessions, self.m.runtime.account_lookup, now=lambda: self.now)
         self.assertEqual(restarted.cloud_settings(two)["settings"], settings)
+        with self.sessions() as db:
+            row = db.query(self.m.models.CloudSettings).filter_by(tg=42).one()
+            self.assertEqual(row.settings, {**settings, "danmakuArea": 0.8})
+            self.assertEqual(row.revision, 1)
+            self.assertEqual(row.updated_at, saved_updated_at)
         restarted.cloud_settings(two, {"schema": 1, "settings": {"volume": 36}})
         self.assertEqual(self.auth.cloud_settings(one)["revision"], 2)
         with self.sessions() as db:
             self.assertEqual(db.query(self.m.models.CloudSettings).count(), 1)
+
+    def test_cloud_settings_current_and_legacy_clients_upload_and_read_across_devices(self):
+        from bot.dushengtv.cloud_settings import SCHEMA
+        route = self.m.service.PREFIX + "/settings/cloud"
+        one = {"Authorization": "Bearer " + self.login()["accessToken"]}
+        two = {"Authorization": "Bearer " + self.login(installation="second-desktop-12345")["accessToken"]}
+        other = {"Authorization": "Bearer " + self.login(tg=43, installation="other-desktop-12345")["accessToken"]}
+        defaults = json.loads((ROOT / "scripts/fixtures/dushengtv-portable-settings-0.0.28.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(defaults), 75)
+        self.assertEqual(set(defaults), set(SCHEMA["properties"]))
+        for revision, (upload, reader, values) in enumerate([
+            (one, two, defaults),
+            (two, one, {"theme": "dark", "volume": 36, "danmakuArea": 0.8}),
+            (one, two, {**defaults, "anime4kPreset": "ca", "subtitleAutoAvoidance": False}),
+        ], 1):
+            with self.subTest(revision=revision):
+                expected = {key: value for key, value in values.items() if key != "danmakuArea"}
+                response = self.client.post(route, headers=upload, json={"schema": 1, "settings": values})
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()["revision"], revision)
+                self.assertEqual(response.json()["settings"], expected)
+                readback = self.client.get(route, headers=reader)
+                self.assertEqual(readback.status_code, 200, readback.text)
+                self.assertEqual(readback.json(), response.json())
+                self.assertFalse(self.client.get(route, headers=other).json()["available"])
+                with self.sessions() as db:
+                    rows = db.query(self.m.models.CloudSettings).all()
+                    self.assertEqual(len(rows), 1)
+                    self.assertEqual(rows[0].settings, expected)
+
+    def test_cloud_settings_legacy_input_is_validated_and_unknown_fields_still_rejected(self):
+        route = self.m.service.PREFIX + "/settings/cloud"
+        token = self.login()["accessToken"]
+        headers = {"Authorization": "Bearer " + token}
+        self.auth.cloud_settings(token, {"schema": 1, "settings": {"volume": 20}})
+        invalid = [
+            {"volume": 30, "danmakuArea": True}, {"volume": 30, "danmakuArea": "0.8"},
+            {"volume": 30, "danmakuArea": 0.19}, {"volume": 30, "danmakuArea": 1.01},
+            {"volume": 30, "unknownFuturePreference": True},
+            {"volume": 30, "danmakuArea": 0.8, "assrtToken": "private"},
+            {"danmakuArea": 0.8},
+        ]
+        for settings in invalid:
+            with self.subTest(settings=settings):
+                response = self.client.post(route, headers=headers, json={"schema": 1, "settings": settings})
+                self.assertEqual(response.status_code, 400, response.text)
+                self.assertEqual(response.json()["code"], "INVALID_SETTINGS")
+                saved = self.auth.cloud_settings(token)
+                self.assertEqual(saved["settings"], {"volume": 20})
+                self.assertEqual(saved["revision"], 1)
+
+    def test_cloud_settings_read_compatibility_only_removes_known_deprecated_fields(self):
+        from bot.dushengtv.cloud_settings import validate_cloud_settings, without_deprecated_settings
+        for value in (0.2, 1):
+            original = {"volume": 30, "danmakuArea": value}
+            self.assertEqual(validate_cloud_settings({"schema": 1, "settings": original}), {"volume": 30})
+            self.assertEqual(original["danmakuArea"], value)
+        for value in (float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                validate_cloud_settings({"schema": 1, "settings": {"volume": 30, "danmakuArea": value}})
+        original = {"volume": 30, "danmakuArea": 0.8, "unknownFuturePreference": True}
+        self.assertEqual(without_deprecated_settings(original), {"volume": 30, "unknownFuturePreference": True})
+        self.assertIn("danmakuArea", original)
 
     def test_cloud_settings_require_a_bound_account_and_live_registered_device(self):
         route = self.m.service.PREFIX + "/settings/cloud"

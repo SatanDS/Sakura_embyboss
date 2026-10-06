@@ -37,4 +37,6 @@ curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8840/api/dushengtv/v1
 
 设置规则在 `bot/dushengtv/cloud-settings-schema.json`，与客户端同名规范一致。任何未知字段、凭据字段或无效值都会拒绝整份更新，保留旧备份。
 
-离线验证：`python scripts/test_dushengtv.py`。涵盖跨账号隔离、同账号跨设备、数据库保存、设备撤销、类型／尺寸／限流和迁移重复执行。
+兼容旧客户端的已废弃项 `danmakuArea`：上传时仍按原有数值范围 0.2–1 校验，通过后忽略，不保存或返回该项。已有备份读出时仅剔除此项，不改动数据库中的原记录、版本号或更新时间。实际弹幕显示区域继续由 `danmakuRows`（1–8 行）控制；只含废弃项的空备份不会覆盖现有设置。
+
+离线验证：`python scripts/test_dushengtv.py`。涵盖跨账号隔离、同账号跨设备、数据库保存、设备撤销、类型／尺寸／限流和迁移重复执行。`scripts/fixtures/dushengtv-portable-settings-0.0.28.json` 由该版客户端的 `portableSettings(defaults)` 生成，用于完整 75 项默认设置的 HTTP 上传、跨设备读回及新旧客户端交替上传回归。

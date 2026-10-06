@@ -15,7 +15,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from .models import CloudSettings, DesktopSession, Device, LoginChallenge, RefreshToken
-from .cloud_settings import validate_cloud_settings
+from .cloud_settings import validate_cloud_settings, without_deprecated_settings
 
 PREFIX = "/api/dushengtv/v1"
 LOGIN_SECONDS, ACCESS_SECONDS, SESSION_SECONDS = 300, 900, 30 * 86400
@@ -199,10 +199,10 @@ class DesktopAuth:
         if row is None:
             return {"available": False, "schema": 1, "revision": 0, "updatedAt": None}
         # Older clients briefly stored the removed danmakuArea preference.
-        # Keep those backups readable after the schema was tightened; only
-        # fields in the current portable allow-list may leave the Bot.
+        # Keep those backups readable without rewriting the saved record or
+        # silently hiding other fields that would indicate a schema mismatch.
         settings = row.settings if isinstance(row.settings, dict) else {}
-        settings = {key: value for key, value in settings.items() if key in SCHEMA["properties"]}
+        settings = without_deprecated_settings(settings)
         if not settings:
             return {"available": False, "schema": 1, "revision": 0, "updatedAt": None}
         return {"available": True, "schema": row.schema_version, "revision": row.revision,
