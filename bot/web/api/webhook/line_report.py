@@ -17,6 +17,11 @@ from bot.sql_helper.sql_emby import (
     sql_get_emby_by_embyid,
     sql_update_emby,
 )
+from bot.sql_helper.sql_emby2 import (
+    Emby2,
+    sql_get_emby2_by_embyid,
+    sql_update_emby2,
+)
 from bot import LOGGER, bot, config
 from bot.func_helper.emby import emby
 from bot.func_helper.emby_identity import (
@@ -176,7 +181,7 @@ def classify_line_request(host: str, line: str) -> Optional[str]:
     return host_role if line_role == host_role else None
 
 
-def is_user_whitelisted(user_details: Optional[Emby]) -> bool:
+def is_user_whitelisted(user_details: Optional[Emby | Emby2]) -> bool:
     """
     检查用户是否是白名单用户
     :param user_details: 用户详情
@@ -191,11 +196,13 @@ def is_user_whitelisted(user_details: Optional[Emby]) -> bool:
     )
 
 
-def effective_line_entitlement(user_details: Optional[Emby]):
+def effective_line_entitlement(user_details: Optional[Emby | Emby2]):
     """Resolve a managed paid period at request time; preserve legacy rows."""
     if not user_details:
         return None
-    if not hasattr(config, "payments"):
+    # Manual non-Telegram accounts have their own lv/ex entitlement and no
+    # Telegram ID in the payment ledger.
+    if not getattr(user_details, "tg", None) or not hasattr(config, "payments"):
         return user_details
     try:
         from bot.payments.entitlements import resolve_entitlement, AccountEntitlement
@@ -788,7 +795,7 @@ async def handle_line_violation(
     user_name: str,
     session_id: str,
     client_name: str,
-    user_details: Optional[Emby],
+    user_details: Optional[Emby | Emby2],
 ) -> dict:
     """
     处理线路权限违规
@@ -817,7 +824,11 @@ async def handle_line_violation(
         block_success = await emby.emby_change_policy(emby_id=emby_id, disable=True)
         if block_success:
             if user_details:
-                sql_update_emby(Emby.tg == user_details.tg, lv="c")
+                tg_id = getattr(user_details, "tg", None)
+                if tg_id is not None:
+                    sql_update_emby(Emby.tg == tg_id, lv="c")
+                else:
+                    sql_update_emby2(Emby2.embyid == emby_id, lv="c")
             action_taken_list.append("✅ 已封禁用户")
             LOGGER.info(f"成功封禁违规用户 {emby_id}")
         else:
@@ -831,7 +842,7 @@ async def handle_line_violation(
         user_name=user_name,
         session_id=session_id,
         client_name=client_name,
-        tg_id=user_details.tg if user_details else None,
+        tg_id=getattr(user_details, "tg", None),
         user_lv=user_details.lv if user_details else None,
         action_taken=action_taken,
     )
@@ -963,6 +974,8 @@ async def line_report(
     # matches Telegram IDs and names and is unsafe for authorization.
     try:
         user_details = sql_get_emby_by_embyid(resolved_user_id, raise_on_error=True)
+        if user_details is None:
+            user_details = sql_get_emby2_by_embyid(resolved_user_id, raise_on_error=True)
         user_details = effective_line_entitlement(user_details)
     except Exception as exc:
         LOGGER.error(f"Line entitlement lookup unavailable: {type(exc).__name__}")

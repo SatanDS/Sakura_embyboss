@@ -607,6 +607,7 @@ line_report 回傳 403 對 Caddy 來說代表阻止原始播放請求，是預�
 - Owner 對 Bot 使用 /proadmin <TG_ID> 新增管理員，/revadmin <TG_ID> 移除。
 - 管理員面板可設定邀請等級、建立註冊碼/續期碼/白名單碼、查看使用者。
 - /prouser <TG_ID 或 username> 可把已有有效訂閱的 Emby 帳戶設成白名單；白名單會隨 ex 到期。
+- 非 TG 帳戶可用 `/ucr 用户名 天数` 建立、`/renew 用户名 天数` 續期，再用 `/prouser 用户名` 設為白名單。續期本身不會把普通帳戶升為白名單；VIP 線路會按認證後的 Emby ID 查詢 TG 與非 TG 帳戶，仍需白名單等級及有效訂閱期限。
 - 產生兌換碼格式：
 
 ~~~text

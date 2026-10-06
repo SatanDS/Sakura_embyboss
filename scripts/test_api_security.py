@@ -55,6 +55,8 @@ class APISecurityTests(unittest.IsolatedAsyncioTestCase):
         module("bot.sql_helper.sql_emby", Emby=type("Emby", (), {"embyid": "embyid", "tg": "tg"}),
                sql_get_emby=Mock(return_value=self.user),
                sql_get_emby_by_embyid=Mock(return_value=self.user), sql_update_emby=Mock(return_value=True))
+        module("bot.sql_helper.sql_emby2", Emby2=type("Emby2", (), {"embyid": "embyid"}),
+               sql_get_emby2_by_embyid=Mock(return_value=None), sql_update_emby2=Mock(return_value=True))
         module("bot.sql_helper.sql_favorites", EmbyFavorites=Mock(), sql_add_favorites=Mock())
 
         self.api = importlib.import_module("bot.web.api")

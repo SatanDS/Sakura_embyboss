@@ -43,6 +43,23 @@ def sql_get_emby2(name):
             return None
 
 
+def sql_get_emby2_by_embyid(embyid, *, raise_on_error=False):
+    """Look up a non-Telegram account by its Emby ID for authorization.
+
+    Unlike the administrator lookup, account names must never match here.
+    Strict callers distinguish a database outage from an absent account.
+    """
+    if embyid is None:
+        return None
+    with Session() as session:
+        try:
+            return session.query(Emby2).filter(Emby2.embyid == str(embyid)).first()
+        except Exception:
+            if raise_on_error:
+                raise
+            return None
+
+
 def get_all_emby2(condition):
     """
     查询所有emby记录

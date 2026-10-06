@@ -20,6 +20,14 @@ USER_TWO = uuid.UUID("fedcba98-7654-3210-fedc-ba9876543210")
 CLIENT_TOKEN = "synthetic-client-token"
 
 
+class LookupColumn:
+    def __init__(self, name):
+        self.name = name
+
+    def __eq__(self, value):
+        return self.name, value
+
+
 def load_identity_module(config, emby):
     logger = types.SimpleNamespace(**{name: Mock() for name in ("error", "warning", "info", "debug")})
     modules = {}
@@ -29,7 +37,11 @@ def load_identity_module(config, emby):
         "bot.func_helper.emby": {"emby": emby},
         "bot.sql_helper": {},
         "bot.sql_helper.sql_emby": {
-            "Emby": type("Emby", (), {}), "sql_get_emby_by_embyid": Mock(), "sql_update_emby": Mock()},
+            "Emby": type("Emby", (), {"tg": LookupColumn("tg")}),
+            "sql_get_emby_by_embyid": Mock(return_value=None), "sql_update_emby": Mock(return_value=True)},
+        "bot.sql_helper.sql_emby2": {
+            "Emby2": type("Emby2", (), {"embyid": LookupColumn("embyid")}),
+            "sql_get_emby2_by_embyid": Mock(return_value=None), "sql_update_emby2": Mock(return_value=True)},
     }.items():
         module = types.ModuleType(name)
         if name in ('bot', 'bot.func_helper'):
@@ -49,6 +61,28 @@ def load_identity_module(config, emby):
             else:
                 sys.modules[name] = original
     return module
+
+
+def load_sqlite_emby2_lookup():
+    """Run the real account model and helpers without loading Bot services."""
+    from sqlalchemy import Column, DateTime, Integer, String, create_engine, or_
+    from sqlalchemy.orm import declarative_base, sessionmaker
+
+    base = declarative_base()
+    engine = create_engine("sqlite://")
+    session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+    source = (ROOT / "bot/sql_helper/sql_emby2.py").read_text(encoding="utf-8")
+    names = {"Emby2", "sql_get_emby2", "sql_get_emby2_by_embyid"}
+    nodes = [node for node in ast.parse(source).body
+             if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and node.name in names]
+    namespace = {"Base": base, "Session": session_factory, "Column": Column,
+                 "DateTime": DateTime, "Integer": Integer, "String": String, "or_": or_}
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), "<sqlite-emby2-test>", "exec"), namespace)
+    base.metadata.create_all(engine)
+    return types.SimpleNamespace(engine=engine, Session=session_factory,
+                                 Emby2=namespace["Emby2"], namespace=namespace,
+                                 lookup=namespace["sql_get_emby2_by_embyid"],
+                                 broad_lookup=namespace["sql_get_emby2"])
 
 
 class VIPIdentityTests(unittest.IsolatedAsyncioTestCase):
@@ -285,6 +319,7 @@ class VIPIdentityTests(unittest.IsolatedAsyncioTestCase):
         result = await self.report_line()
         self.assertEqual(result.status_code, 503)
         self.identity.sql_get_emby_by_embyid.assert_called_once_with(USER_ONE.hex, raise_on_error=True)
+        self.identity.sql_get_emby2_by_embyid.assert_not_called()
         self.identity.handle_line_violation.assert_not_awaited()
         self.identity.update_cooldown.assert_not_called()
 
@@ -296,6 +331,174 @@ class VIPIdentityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.report_line())["status"], "allowed")
         self.identity.handle_line_violation.assert_not_awaited()
         self.identity.update_cooldown.assert_not_called()
+
+
+class NonTelegramLineTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.config = types.SimpleNamespace(
+            emby_line="normal.example.test", emby_whitelist_line="vip.example.test",
+            line_filter_terminate_session=True, line_filter_block_user=False)
+        self.emby = types.SimpleNamespace(
+            _request=AsyncMock(side_effect=AssertionError("Unexpected remote lookup")),
+            terminate_session=AsyncMock(return_value=True),
+            emby_change_policy=AsyncMock(return_value=True))
+        self.identity = load_identity_module(self.config, self.emby)
+        self.session = {"Id": "client-session", "UserName": "宏旺", "Client": "Infuse-Direct"}
+        self.identity.resolve_user_context = AsyncMock(return_value=(USER_ONE.hex, self.session, "test-token"))
+        self.enforce_line_violation = self.identity.handle_line_violation
+        self.identity.handle_line_violation = AsyncMock(return_value={})
+        self.identity.update_cooldown = Mock()
+
+    def account(self, *, lv="a", ex=None):
+        account = self.identity.Emby2()
+        account.embyid = USER_ONE.hex
+        account.name = "宏旺"
+        account.lv = lv
+        account.ex = ex
+        return account
+
+    async def report_line(self):
+        return await self.identity.line_report(
+            line="vip", host="vip.example.test", token=CLIENT_TOKEN,
+            x_emby_authorization=None, authorization=None, x_emby_token=None, x_original_uri=None)
+
+    async def test_active_non_telegram_whitelist_uses_emby2_entitlement(self):
+        account = self.account(ex=datetime.now() + timedelta(days=1000))
+        self.identity.sql_get_emby2_by_embyid.return_value = account
+        result = await self.report_line()
+        self.assertEqual(result["status"], "allowed")
+        self.identity.sql_get_emby_by_embyid.assert_called_once_with(USER_ONE.hex, raise_on_error=True)
+        self.identity.sql_get_emby2_by_embyid.assert_called_once_with(USER_ONE.hex, raise_on_error=True)
+        self.identity.handle_line_violation.assert_not_awaited()
+        self.identity.update_cooldown.assert_not_called()
+        self.emby.terminate_session.assert_not_awaited()
+        self.emby.emby_change_policy.assert_not_awaited()
+
+    async def test_non_telegram_normal_expired_and_banned_accounts_are_denied(self):
+        for lv, expiry in (("b", datetime.now() + timedelta(days=1)),
+                           ("a", datetime.now() - timedelta(days=1)),
+                           ("c", datetime.now() + timedelta(days=1)), ("a", None)):
+            with self.subTest(level=lv, expiry=expiry):
+                account = self.account(lv=lv, ex=expiry)
+                self.identity.sql_get_emby2_by_embyid.return_value = account
+                result = await self.report_line()
+                self.assertEqual(result.status_code, 403)
+                self.identity.handle_line_violation.assert_awaited_with(
+                    emby_id=USER_ONE.hex, user_name="宏旺", session_id="client-session",
+                    client_name="Infuse-Direct", user_details=account)
+
+    async def test_telegram_entitlement_cannot_be_upgraded_by_duplicate_emby2_record(self):
+        self.identity.sql_get_emby2_by_embyid.return_value = self.account(
+            ex=datetime.now() + timedelta(days=1000))
+        for lv, expiry in (("b", datetime.now() + timedelta(days=1)),
+                           ("c", datetime.now() + timedelta(days=1)),
+                           ("a", datetime.now() - timedelta(days=1))):
+            with self.subTest(level=lv):
+                telegram_account = types.SimpleNamespace(
+                    tg=101, embyid=USER_ONE.hex, name="宏旺", lv=lv, ex=expiry)
+                self.identity.sql_get_emby_by_embyid.return_value = telegram_account
+                result = await self.report_line()
+                self.assertEqual(result.status_code, 403)
+                self.identity.sql_get_emby2_by_embyid.assert_not_called()
+                self.assertIs(self.identity.handle_line_violation.await_args.kwargs["user_details"],
+                              telegram_account)
+
+    async def test_emby2_database_outage_is_503_without_enforcement_or_cooldown(self):
+        self.identity.sql_get_emby2_by_embyid.side_effect = sqlite3.OperationalError("database unavailable")
+        result = await self.report_line()
+        self.assertEqual(result.status_code, 503)
+        self.identity.handle_line_violation.assert_not_awaited()
+        self.identity.update_cooldown.assert_not_called()
+        self.emby.terminate_session.assert_not_awaited()
+        self.emby.emby_change_policy.assert_not_awaited()
+
+    async def test_non_telegram_whitelist_recovers_immediately_after_database_outage(self):
+        account = self.account(ex=datetime.now() + timedelta(days=1))
+        self.identity.sql_get_emby2_by_embyid.side_effect = [sqlite3.OperationalError("offline"), account]
+        self.assertEqual((await self.report_line()).status_code, 503)
+        self.assertEqual((await self.report_line())["status"], "allowed")
+        self.identity.handle_line_violation.assert_not_awaited()
+        self.identity.update_cooldown.assert_not_called()
+
+    def test_payment_configuration_does_not_apply_telegram_ledger_to_emby2(self):
+        self.config.payments = types.SimpleNamespace()
+        account = self.account(ex=datetime.now() + timedelta(days=1))
+        sql_module = types.ModuleType("bot.sql_helper")
+        sql_module.Session = Mock(side_effect=AssertionError("Unexpected Telegram ledger lookup"))
+        ledger_module = types.ModuleType("bot.payments.entitlements")
+        ledger_module.resolve_entitlement = Mock(side_effect=AssertionError("Unexpected Telegram entitlement"))
+        ledger_module.AccountEntitlement = Mock()
+        with patch.dict(sys.modules, {"bot.sql_helper": sql_module,
+                                      "bot.payments.entitlements": ledger_module}):
+            self.assertIs(self.identity.effective_line_entitlement(account), account)
+        sql_module.Session.assert_not_called()
+        ledger_module.resolve_entitlement.assert_not_called()
+
+    async def test_non_telegram_username_collision_does_not_grant_vip_access(self):
+        database = load_sqlite_emby2_lookup()
+        self.addCleanup(database.engine.dispose)
+        with database.Session() as session:
+            session.add(database.Emby2(embyid=USER_TWO.hex, name=USER_ONE.hex, lv="a",
+                                       ex=datetime.now() + timedelta(days=1)))
+            session.commit()
+        self.assertEqual(database.broad_lookup(USER_ONE.hex).embyid, USER_TWO.hex)
+        self.identity.sql_get_emby2_by_embyid = database.lookup
+        result = await self.report_line()
+        self.assertEqual(result.status_code, 403)
+        self.assertIsNone(self.identity.handle_line_violation.await_args.kwargs["user_details"])
+
+    async def test_non_telegram_enforcement_writes_emby2_and_logs_level_without_tg(self):
+        account = self.account(lv="b", ex=datetime.now() + timedelta(days=1))
+        self.config.line_filter_block_user = True
+        self.config.group = [999]
+        notification = types.SimpleNamespace(forward=AsyncMock())
+        self.identity.bot = types.SimpleNamespace(send_message=AsyncMock(return_value=notification))
+        result = await self.enforce_line_violation(
+            emby_id=USER_ONE.hex, user_name=account.name, session_id="client-session",
+            client_name="Infuse-Direct", user_details=account)
+        self.assertTrue(result["terminate_success"])
+        self.assertTrue(result["block_success"])
+        self.emby.emby_change_policy.assert_awaited_once_with(emby_id=USER_ONE.hex, disable=True)
+        self.identity.sql_update_emby2.assert_called_once_with(("embyid", USER_ONE.hex), lv="c")
+        self.identity.sql_update_emby.assert_not_called()
+        self.identity.bot.send_message.assert_awaited_once()
+        text = self.identity.bot.send_message.await_args.kwargs["text"]
+        self.assertIn("📱 TG ID: Unknown", text)
+        self.assertIn("🏷️ 用户等级: 普通用户", text)
+        notification.forward.assert_not_awaited()
+
+
+class StrictNonTelegramEntitlementLookupTests(unittest.TestCase):
+    def setUp(self):
+        self.database = load_sqlite_emby2_lookup()
+        self.addCleanup(self.database.engine.dispose)
+
+    def test_exact_lookup_finds_only_the_canonical_emby_id(self):
+        with self.database.Session() as session:
+            session.add_all([
+                self.database.Emby2(embyid=USER_TWO.hex, name=USER_ONE.hex, lv="a"),
+                self.database.Emby2(embyid=USER_ONE.hex, name="宏旺", lv="b"),
+            ])
+            session.commit()
+        account = self.database.lookup(USER_ONE.hex, raise_on_error=True)
+        self.assertEqual(account.embyid, USER_ONE.hex)
+        self.assertEqual(account.name, "宏旺")
+        self.assertEqual(account.lv, "b")
+
+    def test_name_matching_without_an_emby_id_match_is_absent(self):
+        with self.database.Session() as session:
+            session.add(self.database.Emby2(embyid=USER_TWO.hex, name=USER_ONE.hex, lv="a"))
+            session.commit()
+        self.assertIsNone(self.database.lookup(USER_ONE.hex, raise_on_error=True))
+        self.assertIsNone(self.database.lookup(None, raise_on_error=True))
+
+    def test_strict_lookup_preserves_sqlite_errors_and_default_remains_compatible(self):
+        from sqlalchemy.exc import OperationalError
+
+        self.database.Emby2.__table__.drop(self.database.engine)
+        self.assertIsNone(self.database.lookup(USER_ONE.hex))
+        with self.assertRaises(OperationalError):
+            self.database.lookup(USER_ONE.hex, raise_on_error=True)
 
 
 class StrictEntitlementLookupTests(unittest.TestCase):
