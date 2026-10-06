@@ -198,6 +198,10 @@ class DesktopTests(unittest.TestCase):
         self.assertEqual(response.headers["cache-control"], "no-store")
         self.assertEqual(self.client.get(route, headers=header(two)).json()["settings"], settings)
         self.assertFalse(self.client.get(route + "?tg=42", headers=header(other)).json()["available"])
+        with self.sessions.begin() as db:
+            row = db.query(self.m.models.CloudSettings).filter_by(tg=42).one()
+            row.settings = {**settings, "danmakuArea": 0.8}
+        self.assertEqual(self.client.get(route, headers=header(one)).json()["settings"], settings)
         restarted = self.m.service.DesktopAuth(self.sessions, self.m.runtime.account_lookup, now=lambda: self.now)
         self.assertEqual(restarted.cloud_settings(two)["settings"], settings)
         restarted.cloud_settings(two, {"schema": 1, "settings": {"volume": 36}})

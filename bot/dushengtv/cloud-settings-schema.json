@@ -302,11 +302,6 @@
       "minimum": 14,
       "maximum": 48
     },
-    "danmakuArea": {
-      "type": "number",
-      "minimum": 0.2,
-      "maximum": 1
-    },
     "danmakuRows": {
       "type": "integer",
       "minimum": 1,

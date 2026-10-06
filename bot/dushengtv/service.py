@@ -198,8 +198,15 @@ class DesktopAuth:
     def _cloud_result(row):
         if row is None:
             return {"available": False, "schema": 1, "revision": 0, "updatedAt": None}
+        # Older clients briefly stored the removed danmakuArea preference.
+        # Keep those backups readable after the schema was tightened; only
+        # fields in the current portable allow-list may leave the Bot.
+        settings = row.settings if isinstance(row.settings, dict) else {}
+        settings = {key: value for key, value in settings.items() if key in SCHEMA["properties"]}
+        if not settings:
+            return {"available": False, "schema": 1, "revision": 0, "updatedAt": None}
         return {"available": True, "schema": row.schema_version, "revision": row.revision,
-                "updatedAt": row.updated_at.isoformat(timespec="milliseconds") + "Z", "settings": row.settings}
+                "updatedAt": row.updated_at.isoformat(timespec="milliseconds") + "Z", "settings": settings}
 
     def cloud_settings(self, token, data=None):
         with self.sessions.begin() as db:
