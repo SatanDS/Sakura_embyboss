@@ -4,6 +4,7 @@ import json
 import math
 import re
 from pathlib import Path
+from urllib.parse import urlsplit
 
 SCHEMA = json.loads(Path(__file__).with_name("cloud-settings-schema.json").read_text(encoding="utf-8"))
 
@@ -29,6 +30,17 @@ def validate_cloud_settings(data):
             raise ValueError("设置数值超出范围")
         if kind == "string" and (len(value) > rule["maxLength"] or not re.fullmatch(rule["pattern"], value)):
             raise ValueError("设置内容无效")
+        if key == "subtitleTranslationEndpoint":
+            try:
+                endpoint = urlsplit(value)
+                if (endpoint.scheme not in {"http", "https"} or not endpoint.hostname
+                        or endpoint.username is not None or endpoint.password is not None
+                        or endpoint.query or endpoint.fragment or endpoint.port == 0
+                        or any(char.isspace() or ord(char) < 32 for char in value)
+                        or (endpoint.scheme == "http" and endpoint.hostname not in {"127.0.0.1", "localhost", "::1"})):
+                    raise ValueError()
+            except ValueError:
+                raise ValueError("翻译 API 地址无效，不能包含密钥或账号密码") from None
     if len(json.dumps(data, ensure_ascii=False, allow_nan=False).encode("utf-8")) > 32768:
         raise ValueError("设置内容过大")
     return dict(values)

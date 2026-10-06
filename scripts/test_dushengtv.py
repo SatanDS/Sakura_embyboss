@@ -702,11 +702,68 @@ class DesktopTests(unittest.TestCase):
             with patch.object(cloud_migration, "op", Operations(MigrationContext.configure(connection))):
                 cloud_migration.upgrade()
                 cloud_migration.upgrade()
+            request_spec = importlib.util.spec_from_file_location("request_migration", ROOT / "bot/sql_helper/alembic/versions/20261006_16_add_tv_media_requests.py")
+            request_migration = importlib.util.module_from_spec(request_spec)
+            request_spec.loader.exec_module(request_migration)
+            with patch.object(request_migration, "op", Operations(MigrationContext.configure(connection))):
+                request_migration.upgrade()
+                request_migration.upgrade()
             inspector = inspect(connection)
             for table in self.m.base.metadata.tables.values():
                 if table.name.startswith("tv_"):
                     self.assertEqual({c["name"] for c in inspector.get_columns(table.name)}, set(table.columns.keys()))
         other.dispose()
+
+    def test_requests_require_bound_device_and_recheck_revocation_after_discovery(self):
+        from bot.dushengtv import requests_api
+        prefix = self.m.service.PREFIX + "/requests"
+        fake = SimpleNamespace(catalog=AsyncMock(return_value={"items": [], "page": 1}),
+                               detail=AsyncMock(), subscribe=AsyncMock())
+        with patch.object(requests_api, "permission"), patch.object(requests_api, "service", return_value=fake):
+            self.assertEqual(self.client.get(prefix + "/catalog").status_code, 401)
+            not_registered = self.login(register=False)
+            header = {"Authorization": "Bearer " + not_registered["accessToken"]}
+            self.assertEqual(self.client.get(prefix + "/catalog", headers=header).status_code, 403)
+            fake.catalog.assert_not_awaited()
+            self.auth.register(not_registered["accessToken"], self.registration(not_registered["accessToken"]))
+            self.assertEqual(self.client.get(prefix + "/catalog", headers=header).status_code, 200)
+            async def revoke_while_fetching(*_):
+                self.auth.logout(not_registered["accessToken"])
+                return {"items": []}
+            fake.catalog.side_effect = revoke_while_fetching
+            self.assertEqual(self.client.get(prefix + "/catalog", headers=header).status_code, 401)
+            self.assertEqual(self.client.post(prefix + "/subscribe", headers=header, json={"key": "tmdb:movie:123"}).status_code, 401)
+            fake.subscribe.assert_not_awaited()
+
+    def test_requests_preserve_moviepilot_account_policy(self):
+        from bot.dushengtv import requests_api
+        import bot
+        import bot.sql_helper as sql
+        identity = {"telegramId": "42", "embyUserId": "emby-42"}
+        config = SimpleNamespace(moviepilot=SimpleNamespace(status=False, douban_status=True, url="http://mp", lv="a"),
+                                 dushengtv=SimpleNamespace(requests_enabled=True), admins=[], owner=99)
+        with patch.object(bot, "config", config), patch.object(sql, "Session", self.sessions, create=True):
+            self.error("REQUESTS_FORBIDDEN", requests_api.permission, identity)
+            config.moviepilot.lv = "b"
+            requests_api.permission(identity)
+            config.dushengtv.requests_enabled = False
+            self.error("REQUESTS_NOT_CONFIGURED", requests_api.permission, identity)
+
+    def test_translation_cloud_settings_exclude_keys_and_unsafe_endpoints(self):
+        from bot.dushengtv.cloud_settings import validate_cloud_settings
+        settings = {"subtitleTranslationProvider": "openai", "subtitleTranslationEndpoint": "https://api.example.com/v1",
+                    "subtitleTranslationModel": "gpt-4o-mini", "subtitleTranslationLanguage": "zh-CN",
+                    "subtitleTranslationMode": "translation", "subtitleTranslationOriginalScale": .8}
+        self.assertEqual(validate_cloud_settings({"schema": 1, "settings": settings}), settings)
+        for extra in ({"subtitleTranslationApiKey": "private"}, {"hiddenLibraries": {}},
+                      {"subtitleTranslationEndpoint": "https://api.example.com/v1?key=private"},
+                      {"subtitleTranslationEndpoint": "https://user:secret@api.example.com/v1"},
+                      {"subtitleTranslationEndpoint": "http://other-host/v1"},
+                      {"subtitleTranslationOriginalScale": 0}, {"subtitleTranslationModel": " "}):
+            with self.assertRaises(ValueError):
+                validate_cloud_settings({"schema": 1, "settings": {**settings, **extra}})
+        for endpoint in ("http://127.0.0.1:8080/v1", "http://localhost/v1", "http://[::1]:8080/v1"):
+            validate_cloud_settings({"schema": 1, "settings": {**settings, "subtitleTranslationEndpoint": endpoint}})
 
 
 if __name__ == "__main__":

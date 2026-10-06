@@ -3,11 +3,13 @@
 from fastapi import FastAPI
 
 from .api import router
+from .requests_api import router as requests_router
 
 
 def create_app():
     app = FastAPI(title="DuShengTV API", docs_url=None, redoc_url=None, openapi_url=None)
     app.include_router(router)
+    app.include_router(requests_router)
     return app
 
 

@@ -3,6 +3,39 @@
   "additionalProperties": false,
   "minProperties": 1,
   "properties": {
+    "subtitleTranslationProvider": {
+      "type": "string",
+      "enum": ["google", "openai"],
+      "maxLength": 2048,
+      "pattern": "^[^\\r\\n\\u0000]*$"
+    },
+    "subtitleTranslationEndpoint": {
+      "type": "string",
+      "maxLength": 2048,
+      "pattern": "^https?://[^\\r\\n\\u0000]+$"
+    },
+    "subtitleTranslationModel": {
+      "type": "string",
+      "maxLength": 128,
+      "pattern": "^[^\\r\\n\\u0000]*\\S[^\\r\\n\\u0000]*$"
+    },
+    "subtitleTranslationLanguage": {
+      "type": "string",
+      "enum": ["zh-CN", "zh-TW", "en", "ja", "ko"],
+      "maxLength": 2048,
+      "pattern": "^[^\\r\\n\\u0000]*$"
+    },
+    "subtitleTranslationMode": {
+      "type": "string",
+      "enum": ["bilingual", "translation"],
+      "maxLength": 2048,
+      "pattern": "^[^\\r\\n\\u0000]*$"
+    },
+    "subtitleTranslationOriginalScale": {
+      "type": "number",
+      "minimum": 0.4,
+      "maximum": 1.5
+    },
     "theme": {
       "type": "string",
       "enum": [

@@ -150,6 +150,8 @@
     "binance_network": "POL"
   },
   "dushengtv": {
+    "requests_enabled": true,
+    "requests_daily_limit": 20,
     "enabled": false,
     "public_url": "https://tv-api.dusheng.lol",
     "http_host": "127.0.0.1",

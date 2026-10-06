@@ -37,6 +37,7 @@ def _legacy_create_all_tables():
     from bot.sql_helper import sql_code, sql_emby, sql_red_envelope, sql_emby2, sql_favorites, sql_partition, sql_request_record, sql_douban  # noqa: F401
     from bot.payments import models as payment_models  # noqa: F401
     from bot.dushengtv import models as tv_models  # noqa: F401
+    from bot.dushengtv import request_models as tv_request_models  # noqa: F401
 
     Base.metadata.create_all(bind=engine, checkfirst=True)
 

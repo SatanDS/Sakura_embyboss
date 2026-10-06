@@ -151,6 +151,8 @@ class API(BaseModel):
 
 class DuShengTV(BaseModel):
     enabled: bool = False
+    requests_enabled: bool = True
+    requests_daily_limit: int = Field(default=20, ge=1, le=200)
     public_url: str = "https://tv-api.dusheng.lol"
     http_host: str = "127.0.0.1"
     http_port: int = Field(default=8840, ge=1024, le=65535)
