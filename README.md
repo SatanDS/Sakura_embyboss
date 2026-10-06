@@ -214,6 +214,25 @@ chmod 600 config.json
 python3 -m json.tool config.json >/dev/null && echo 'config.json JSON OK'
 ~~~
 
+### Optional manual channel for users without Telegram
+
+The default is disabled. Owners and administrators can open `/config` and
+choose `非 TG 用户通道` to configure an HTTPS support or manual-registration
+URL, edit the notice, and enable the channel. When enabled, the URL is added
+to the post-registration message buttons. This path is intentionally manual:
+it does not expose Emby passwords, create fake Telegram IDs, or grant Bot
+group, points, or administrator permissions. Existing non-Telegram accounts
+can still be created by an administrator with `/ucr 用户名 天数`.
+
+The equivalent persisted configuration is:
+
+```json
+"non_telegram_channel": {
+  "enabled": false,
+  "url": "https://support.example.com/emby",
+  "notice": "没有 Telegram？请通过下方人工通道联系服主办理账号或续期。"
+}
+```
 ## 8. 啟動 MySQL 與 Bot
 
 ~~~bash

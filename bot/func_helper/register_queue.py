@@ -6,14 +6,21 @@ from typing import Optional
 from bot import LOGGER, _open, config, schedall
 from bot.func_helper.concurrency import get_user_lock
 from bot.func_helper.emby import emby
-from bot.func_helper.fix_bottons import re_create_ikb, registration_notice_ikb
+from bot.func_helper.fix_bottons import re_create_ikb, registration_notice_buttons, registration_notice_ikb
 from bot.func_helper.msg_utils import editMessage, sendMessage
 from bot.func_helper.registration_notice import DEFAULT_REGISTRATION_NOTICE, get_registration_notice
+from bot.func_helper.non_telegram_channel import channel_enabled
 from bot.func_helper.utils import tem_adduser
 from bot.sql_helper.sql_emby import sql_get_emby, sql_update_emby, Emby
 
 
 REGISTRATION_NOTICE = DEFAULT_REGISTRATION_NOTICE
+
+
+def _registration_buttons():
+    # Preserve the long-standing keyboard object when the optional channel is
+    # disabled; build it dynamically only after an operator enables the path.
+    return registration_notice_buttons() if channel_enabled(config) else registration_notice_ikb
 
 
 @dataclass
@@ -219,7 +226,7 @@ class RegisterQueueManager:
                 notice_result = await sendMessage(
                     job.status_message,
                     get_registration_notice(config),
-                    buttons=registration_notice_ikb,
+                    buttons=_registration_buttons(),
                 )
                 if notice_result is not True:
                     LOGGER.warning(
