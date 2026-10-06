@@ -6,7 +6,7 @@ from typing import Optional
 from bot import LOGGER, _open, config, schedall
 from bot.func_helper.concurrency import get_user_lock
 from bot.func_helper.emby import emby
-from bot.func_helper.fix_bottons import re_create_ikb, registration_notice_buttons
+from bot.func_helper.fix_bottons import re_create_ikb, registration_notice_ikb
 from bot.func_helper.msg_utils import editMessage, sendMessage
 from bot.func_helper.registration_notice import DEFAULT_REGISTRATION_NOTICE, get_registration_notice
 from bot.func_helper.utils import tem_adduser
@@ -219,7 +219,7 @@ class RegisterQueueManager:
                 notice_result = await sendMessage(
                     job.status_message,
                     get_registration_notice(config),
-                    buttons=registration_notice_buttons(),
+                    buttons=registration_notice_ikb,
                 )
                 if notice_result is not True:
                     LOGGER.warning(

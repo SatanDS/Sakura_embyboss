@@ -214,24 +214,6 @@ chmod 600 config.json
 python3 -m json.tool config.json >/dev/null && echo 'config.json JSON OK'
 ~~~
 
-### 没有 Telegram 的用户：人工注册与续期
-
-默认关闭。管理员私聊 Bot 发送 `/config`，进入「非 TG 用户通道」，先设置 HTTPS 联系页面及通道说明，再开启。请使用没有 Telegram 也能访问、联系到服主的页面，例如展示微信联系方式的客服页。说明按纯文本显示，可随时修改，保存后立即生效，无需重启。
-
-开启后，购买页面 `/payments/shop` 会在登录前显示「人工注册与续期」入口；独立页面 `/payments/manual` 无需 Telegram 登录，即使在线支付暂停也能使用。可以直接把 `https://你的支付域名/payments/manual` 发给非 TG 用户。关闭通道后，入口隐藏，独立页面返回 404。现有 Caddy 的 `/payments/*` 代理即可转发该页面。
-
-用户点击「联系服主」后由管理员人工办理：创建账号使用 `/ucr 用户名 天数`，给已有非 TG 账号续期使用 `/renew Emby账户名 天数`。账号沿用已有的非 TG 用户记录；此入口不提供 Emby 密码登录，不自动收款、发码，也不授予 TG 群组或积分权限。TG 注册成功后的须知也会附带人工通道按钮，开关即时生效；已经发送的旧消息不会自动修改。
-
-设置保存在 `config.json` 顶层：
-
-```json
-"non_telegram_channel": {
-  "enabled": false,
-  "url": "https://support.example.com/emby",
-  "notice": "没有 Telegram？请通过下方人工通道联系服主办理账号或续期。"
-}
-```
-
 ## 8. 啟動 MySQL 與 Bot
 
 ~~~bash

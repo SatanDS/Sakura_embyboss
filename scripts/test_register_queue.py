@@ -76,7 +76,6 @@ class RegisterQueueTests(unittest.IsolatedAsyncioTestCase):
         }
         self.old_activity_days = rq.config.activity_check_days
         self.old_notice = rq.config.registration_notice
-        self.old_manual_channel = rq.config.non_telegram_channel.model_copy(deep=True)
 
         rq._open.all_user = 10
         rq._open.tem = 0
@@ -86,7 +85,6 @@ class RegisterQueueTests(unittest.IsolatedAsyncioTestCase):
         rq.schedall.low_activity = False
         rq.config.activity_check_days = 10
         rq.config.registration_notice = None
-        rq.config.non_telegram_channel.enabled = False
 
         self.users = {}
         self.messages = []
@@ -159,7 +157,6 @@ class RegisterQueueTests(unittest.IsolatedAsyncioTestCase):
         rq.schedall.low_activity = self.old_schedall["low_activity"]
         rq.config.activity_check_days = self.old_activity_days
         rq.config.registration_notice = self.old_notice
-        rq.config.non_telegram_channel = self.old_manual_channel
 
     async def _cancel_workers(self):
         for task in self.manager._workers:
@@ -325,33 +322,8 @@ class RegisterQueueTests(unittest.IsolatedAsyncioTestCase):
             await self.manager.enqueue(rq.RegisterJob(user_id, f"notice-{user_id}", "2468", False, 30, message))
             await asyncio.wait_for(self.manager._queue.join(), timeout=2)
             notices = [item for item in message.history if item[0] == "send"]
-            self.assertEqual(len(notices), 1)
-            self.assertEqual(notices[0][:2], ("send", text))
-            self.assertEqual(len(notices[0][2].inline_keyboard), 1)
-            self.assertEqual(notices[0][2].inline_keyboard[0][0].url, _telegram_url(rq.config.main_group))
+            self.assertEqual(notices, [("send", text, rq.registration_notice_ikb)])
             self.assertEqual(self.users[user_id].embyid, f"emby-notice-{user_id}")
-
-    async def test_notice_buttons_follow_manual_channel_enabled_then_disabled(self):
-        channel = rq.config.non_telegram_channel
-        channel.url = "https://support.example.org/manual"
-        with patch.object(rq, "registration_notice_buttons", wraps=rq.registration_notice_buttons) as build_buttons:
-            for user_id, enabled in ((4201, True), (4202, False)):
-                channel.enabled = enabled
-                self.users[user_id] = SimpleNamespace(tg=user_id, embyid=None, us=30)
-                message = FakeMessage()
-                accepted, _, _ = await self.manager.enqueue(
-                    rq.RegisterJob(user_id, f"notice-{user_id}", "2468", False, 30, message)
-                )
-                self.assertTrue(accepted)
-                await asyncio.wait_for(self.manager._queue.join(), timeout=2)
-                notices = [item for item in message.history if item[0] == "send"]
-                self.assertEqual(len(notices), 1)
-                urls = [button.url for row in notices[0][2].inline_keyboard for button in row]
-                expected = [_telegram_url(rq.config.main_group)]
-                if enabled:
-                    expected.append(channel.url)
-                self.assertEqual(urls, expected)
-            self.assertEqual(build_buttons.call_count, 2)
 
     async def test_notice_send_failure_does_not_undo_successful_registration(self):
         for user_id, raises in ((4101, False), (4102, True)):

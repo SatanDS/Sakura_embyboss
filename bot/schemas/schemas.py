@@ -164,13 +164,6 @@ class DuShengTV(BaseModel):
     server_urls: List[str] = Field(default_factory=lambda: ["https://www.dusheng.xyz", "https://www.dusheng.lol"])
 
 
-class NonTelegramChannel(BaseModel):
-    """Operator-controlled manual path for users without Telegram."""
-    enabled: bool = False
-    url: str = ""
-    notice: str = "没有 Telegram？请通过下方人工通道联系服主办理账号或续期。"
-
-
 class Payments(BaseModel):
     enabled: bool = False
     public_url: str = ""
@@ -274,7 +267,6 @@ class Config(BaseModel):
     api: API = Field(default_factory=API)
     payments: Payments = Field(default_factory=Payments)
     dushengtv: DuShengTV = Field(default_factory=DuShengTV)
-    non_telegram_channel: NonTelegramChannel = Field(default_factory=NonTelegramChannel)
 
     def __init__(self, **data):
         super().__init__(**data)

@@ -159,10 +159,5 @@
     "bot_username": "emby_dusheng_bot",
     "privacy_version": "2026-10-03",
     "server_urls": ["https://www.dusheng.xyz", "https://www.dusheng.lol"]
-  },
-  "non_telegram_channel": {
-    "enabled": false,
-    "url": "",
-    "notice": "没有 Telegram？请通过下方人工通道联系服主办理账号或续期。"
   }
 }

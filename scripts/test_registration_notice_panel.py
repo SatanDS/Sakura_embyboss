@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from pyrogram import enums, filters
-from pyrogram.types import ForceReply, InlineKeyboardMarkup
+from pyrogram.types import ForceReply
 from pyromod.exceptions import ListenerTimeout
 from pyromod.helpers import ikb
 
@@ -24,31 +24,10 @@ def load_helper():
     return module
 
 
-def load_notice_buttons(config):
-    spec = importlib.util.spec_from_file_location(
-        "manual_channel_notice_test", ROOT / "bot/func_helper/non_telegram_channel.py"
-    )
-    channel = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(channel)
-    source = ast.parse((ROOT / "bot/func_helper/fix_bottons.py").read_text(encoding="utf-8"))
-    functions = [node for node in source.body
-                 if isinstance(node, ast.FunctionDef)
-                 and node.name in {"_telegram_url", "registration_notice_buttons"}]
-    env = dict(config=config, main_group="https://t.me/+GroupInvite", ikb=ikb,
-               InlineKeyboardMarkup=InlineKeyboardMarkup,
-               channel_enabled=channel.channel_enabled, channel_url=channel.channel_url)
-    exec(compile(ast.Module(body=functions, type_ignores=[]), str(ROOT / "notice_buttons"), "exec"), env)
-    return env["registration_notice_buttons"]
-
-
 class NoticeEditorTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.helper = load_helper()
-        self.config = SimpleNamespace(
-            owner=10, admins=[11], registration_notice="original",
-            non_telegram_channel=SimpleNamespace(enabled=False, url="https://support.example.org/manual"),
-        )
-        self.buttons = Mock(wraps=load_notice_buttons(self.config))
+        self.config = SimpleNamespace(owner=10, admins=[11], registration_notice="original")
         self.message = SimpleNamespace(text="**new rules**\nKeep your account private.",
                                        from_user=SimpleNamespace(id=10), reply_to_message_id=100)
         self.chat = SimpleNamespace(id=10, listen=AsyncMock(side_effect=lambda **kwargs: self.message))
@@ -57,7 +36,7 @@ class NoticeEditorTests(unittest.IsolatedAsyncioTestCase):
                                     reply=AsyncMock(return_value=SimpleNamespace(id=100))))
         self.env = dict(config=self.config, save_config=Mock(), LOGGER=Mock(), bot=Mock(),
                         enums=enums, filters=filters, ForceReply=ForceReply, ListenerTimeout=ListenerTimeout,
-                        ikb=ikb, registration_notice_buttons=self.buttons, _notice_editors=set(),
+                        ikb=ikb, registration_notice_ikb="join-group", _notice_editors=set(),
                         get_registration_notice=self.helper.get_registration_notice,
                         validate_registration_notice=self.helper.validate_registration_notice,
                         sendMessage=AsyncMock(return_value=True), editMessage=AsyncMock(return_value=True),
@@ -74,31 +53,12 @@ class NoticeEditorTests(unittest.IsolatedAsyncioTestCase):
         await self.env["registration_notice_settings"](None, self.call)
         self.assertEqual(self.config.registration_notice, self.message.text)
         self.env["save_config"].assert_called_once_with()
-        self.env["sendMessage"].assert_awaited_once()
-        preview = self.env["sendMessage"].call_args
-        self.assertEqual(preview.args, (self.call, self.message.text))
-        keyboard = preview.kwargs["buttons"].inline_keyboard
-        self.assertEqual(len(keyboard), 1)
-        self.assertEqual(keyboard[0][0].url, "https://t.me/+GroupInvite")
+        self.env["sendMessage"].assert_awaited_once_with(self.call, self.message.text, buttons="join-group")
         self.assertFalse(self.env["_notice_editors"])
         listener = self.chat.listen.call_args.kwargs
         self.assertEqual(listener["user_id"], 10)
         self.assertFalse(await listener["filters"](None, SimpleNamespace(text="unrelated", reply_to_message_id=101)))
         self.assertTrue(await listener["filters"](None, self.message))
-
-    async def test_previews_rebuild_buttons_after_manual_channel_is_disabled(self):
-        for action in ("registration_notice_preview", "registration_notice_edit"):
-            self.call.data = action
-            for enabled in (True, False):
-                self.config.non_telegram_channel.enabled = enabled
-                await self.env["registration_notice_settings"](None, self.call)
-                keyboard = self.env["sendMessage"].call_args.kwargs["buttons"].inline_keyboard
-                urls = [button.url for row in keyboard for button in row]
-                expected = ["https://t.me/+GroupInvite"]
-                if enabled:
-                    expected.append(self.config.non_telegram_channel.url)
-                self.assertEqual(urls, expected)
-        self.assertEqual(self.buttons.call_count, 4)
 
     async def test_non_admin_and_group_callbacks_cannot_edit(self):
         for user_id, chat_id in ((99, 99), (10, -1001)):

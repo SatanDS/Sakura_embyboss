@@ -35,13 +35,6 @@
     </header>
     <main id="main" tabindex="-1">
       <div class="page-heading"><div><p class="eyebrow">{{ brand_name }} 会员服务</p><h1>{{ page_title }}</h1></div><button id="refresh-button" class="icon-button" title="刷新" aria-label="刷新" type="button"><i data-lucide="refresh-cw"></i></button></div>
-      {% if page == 'shop' and manual_channel and manual_channel.enabled %}
-      <section id="manual-channel" class="manual-channel" aria-labelledby="manual-channel-title">
-        <h2 id="manual-channel-title">没有 Telegram？</h2>
-        <p class="manual-channel-copy">{{ manual_channel.notice }}</p>
-        <a class="button" href="/payments/manual">人工注册与续期</a>
-      </section>
-      {% endif %}
       <div id="page-error" class="notice danger" role="alert" hidden></div>
       <div id="page-status" class="empty-state" role="status"><span class="spinner"></span><p>正在加载</p></div>
       {% if page == 'shop' %}

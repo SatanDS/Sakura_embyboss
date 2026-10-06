@@ -7,7 +7,6 @@ from bot import chanel, main_group, bot_name, extra_emby_libs, tz_id, tz_ad, tz_
 from bot.func_helper import nezha_res
 from bot.func_helper.emby import emby
 from bot.func_helper.utils import members_info
-from bot.func_helper.non_telegram_channel import channel_enabled, channel_url
 
 cache = Cache()
 
@@ -69,17 +68,7 @@ judge_group_ikb = ikb([[('🌟 频道入口 ', _telegram_url(chanel), 'url'),
                        [('❌ 关闭消息', 'closeit')]])
 # Registration notice: after reading the account rules, users can join the
 # group managed by the bot without leaving the private chat.
-def registration_notice_buttons() -> InlineKeyboardMarkup:
-    """Build post-registration buttons from the current configuration."""
-    rows = [[('💫 加入群组', _telegram_url(main_group), 'url')]]
-    if channel_enabled(config):
-        rows.append([('🆘 无 Telegram 用户通道', channel_url(config), 'url')])
-    return ikb(rows)
-
-
-# Kept for compatibility with older imports; live callers should use the
-# function above so a config change takes effect immediately.
-registration_notice_ikb = registration_notice_buttons()
+registration_notice_ikb = ikb([[('💫 加入群组', _telegram_url(main_group), 'url')]])
 
 """members ↓"""
 
@@ -425,7 +414,6 @@ def config_preparation() -> InlineKeyboardMarkup:
          [('🎬 显/隐指定库', 'set_block'), (f'{fuxx_pt} 皮套人过滤功能', 'set_fuxx_pitao')],
          [('💠 普通用户线路', 'set_line'),('🌟 白名单线路', 'set_whitelist_line')],
          [('📡 客户端过滤', 'set_client_filter'), ('注册须知', 'registration_notice_panel')],
-         [('🆘 非 TG 用户通道', 'non_telegram_channel_panel')],
          [('CDN 真实 IP', 'cdn_ip_panel')],
          [(f'{leave_ban} 退群封禁', 'leave_ban'), (f'{uplays} 观影奖励结算', 'set_uplays')],
          [(f'{auto_up} 自动更新bot', 'set_update'), (f'{mp_set} 点播', 'set_mp')],

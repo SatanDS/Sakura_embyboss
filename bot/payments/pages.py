@@ -11,7 +11,6 @@ _TITLES = {
     "orders": "我的订单",
     "order": "订单详情",
     "admin": "销售管理",
-    "manual": "人工注册与续期",
 }
 _TEMPLATES = Environment(
     loader=FileSystemLoader(_ROOT / "templates"),
@@ -26,5 +25,4 @@ def render_page(name, context=None):
     values = dict(context or {})
     values.update(page=name, page_title=_TITLES[name])
     values.setdefault("brand_name", "DuSheng")
-    template = "manual.html" if name == "manual" else "page.html"
-    return _TEMPLATES.get_template(template).render(**values)
+    return _TEMPLATES.get_template("page.html").render(**values)
