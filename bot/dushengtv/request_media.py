@@ -14,16 +14,28 @@ def parse_key(key):
     return key.split(":")
 
 
-def image_url(value):
+def image_url(value, size="w780"):
+    # MoviePilot's Douban people use avatar.normal; TMDB people keep a path.
+    if isinstance(value, dict):
+        value = value.get("normal") or value.get("large") or value.get("medium") or value.get("url")
     if not isinstance(value, str) or len(value) > 2048:
         return ""
     if value.startswith("/") and not value.startswith("//"):
-        value = "https://image.tmdb.org/t/p/w780" + value
+        if not re.fullmatch(r"/[\w-]+\.(?:jpg|jpeg|png|webp)", value, re.I):
+            return ""
+        value = f"https://image.tmdb.org/t/p/{size}" + value
     try:
         url = urlsplit(value)
         host = (url.hostname or "").lower()
-        if (url.scheme == "https" and not url.username and not url.password and not url.fragment
-                and url.port in (None, 443) and (host == "image.tmdb.org" or host.endswith(".doubanio.com"))):
+        if url.scheme != "https" or url.username or url.password or url.fragment or url.port not in (None, 443):
+            return ""
+        # A configured TMDB image mirror has the same immutable /t/p/ path.
+        # Canonicalize that path, never grant the mirror's arbitrary host.
+        tmdb = re.fullmatch(r"/t/p/(original|w\d+(?:_and_h\d+_bestv2)?|h\d+)/([\w-]+\.(?:jpg|jpeg|png|webp))", url.path, re.I)
+        if tmdb and not url.query:
+            selected = size if tmdb[1] == "original" or host != "image.tmdb.org" else tmdb[1]
+            return f"https://image.tmdb.org/t/p/{selected}/{tmdb[2]}"
+        if host.endswith(".doubanio.com") and url.path.startswith(("/view/", "/img/")):
             return value
     except ValueError:
         pass
@@ -79,14 +91,14 @@ def normalize(row, source, kind):
             seasons.append({"number": number, "name": text(season.get("name")), "episodeCount": season.get("episode_count") if type(season.get("episode_count")) is int else None})
     def people(field):
         return [{"name": text(person.get("name")), "role": text(person.get("character") or person.get("job")),
-                 "photo": image_url(person.get("profile_path") or person.get("avatar"))}
+                 "photo": image_url(person.get("profile_path") or person.get("avatar"), "w185")}
                 for person in (row.get(field) if isinstance(row.get(field), list) else [])[:30] if isinstance(person, dict) and person.get("name")]
     return {"key": f"{source}:{kind}:{media_id}", "source": source, "id": media_id, "type": kind,
             "title": title, "originalTitle": text(row.get("original_title") or row.get("original_name")),
             "year": int(year) if re.fullmatch(r"(?:18|19|20|21)\d\d", year) else None,
             "overview": text(row.get("overview"), 16000),
-            "poster": image_url(row.get("poster_path") or row.get("poster")),
-            "backdrop": image_url(row.get("backdrop_path") or row.get("backdrop")),
+            "poster": image_url(row.get("poster_path") or row.get("poster"), "w500"),
+            "backdrop": image_url(row.get("backdrop_path") or row.get("backdrop"), "w1280"),
             "rating": rating, "providerIds": ids, "seasons": seasons,
             "tagline": text(row.get("tagline"), 512), "releaseDate": text(row.get("release_date") or row.get("first_air_date"), 40),
             "status": text(row.get("status"), 80), "language": text(row.get("original_language"), 40),

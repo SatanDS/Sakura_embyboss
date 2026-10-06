@@ -30,11 +30,14 @@ def fixture_server(respond):
             request = {"method": self.command, "url": urlsplit(self.path), "headers": dict(self.headers),
                        "body": self.rfile.read(int(self.headers.get("Content-Length", "0")))}
             calls.append(request)
-            status, result = respond(request)
-            data = json.dumps(result).encode()
+            answer = respond(request)
+            status, result = answer[:2]
+            data = result if isinstance(result, bytes) else json.dumps(result).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))
+            for key, value in (answer[2] if len(answer) > 2 else {}).items():
+                self.send_header(key, value)
             self.end_headers()
             self.wfile.write(data)
         do_GET = do_POST = handle_request
@@ -113,7 +116,7 @@ class RequestTests(unittest.IsolatedAsyncioTestCase):
             "season_info": [{"season_number": 0, "episode_count": 2}], "actors": [{"name": "演员", "character": "角色", "profile_path": "/actor.jpg"},
             {"name": "演员二", "profile_path": "https://attacker.test/avatar"}]}, "tmdb", "tv")
         self.assertEqual(item["seasons"][0]["number"], 0)
-        self.assertEqual(item["cast"][0]["photo"], "https://image.tmdb.org/t/p/w780/actor.jpg")
+        self.assertEqual(item["cast"][0]["photo"], "https://image.tmdb.org/t/p/w185/actor.jpg")
         self.assertEqual(item["cast"][1]["photo"], "")
 
     async def test_same_time_calls_only_submit_once(self):
@@ -221,6 +224,67 @@ class RequestTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.media.image_url("https://img1.doubanio.com/view/photo/a.jpg"), "https://img1.doubanio.com/view/photo/a.jpg")
         for invalid in ("http://image.tmdb.org/a", "https://image.tmdb.org.evil.test/a", "https://name:secret@image.tmdb.org/a", "https://127.0.0.1/private"):
             self.assertEqual(self.media.image_url(invalid), "")
+
+    async def test_official_moviepilot_image_shapes_and_sizes(self):
+        # MP MediaCard replaces original with w500; PersonCard supports
+        # Douban avatar.normal objects and TMDB profile_path strings.
+        item = self.media.normalize({"tmdb_id": 123, "title": "实际字段形态", "type": "电影",
+            "poster_path": "https://tmdb-image.example/t/p/original/poster.jpg",
+            "backdrop_path": "https://image.tmdb.org/t/p/original/background.jpg",
+            "actors": [{"name": "演员", "avatar": {"normal": "https://img1.doubanio.com/view/celebrity/s_ratio_celebrity/public/p1.webp"}},
+                       {"name": "演员2", "profile_path": "/actor.jpg"}]}, "tmdb", "movie")
+        self.assertEqual(item["poster"], "https://image.tmdb.org/t/p/w500/poster.jpg")
+        self.assertEqual(item["backdrop"], "https://image.tmdb.org/t/p/w1280/background.jpg")
+        self.assertEqual(item["cast"][0]["photo"], "https://img1.doubanio.com/view/celebrity/s_ratio_celebrity/public/p1.webp")
+        self.assertEqual(item["cast"][1]["photo"], "https://image.tmdb.org/t/p/w185/actor.jpg")
+        for value in ("/../config", "//localhost/secret", "https://image.tmdb.org/api/private", "https://image.tmdb.org/t/p/w500/a.jpg?token=hidden"):
+            self.assertEqual(self.media.image_url(value), "")
+
+    async def test_real_image_proxy_cookie_refresh_binary_validation_and_coalescing(self):
+        png = b"\x89PNG\r\n\x1a\n" + b"fixture-bytes"
+        def respond(request):
+            self.assertEqual(request["headers"].get("Authorization"), "Bearer fixture-api")
+            if request["url"].path == "/api/v1/user/current":
+                return 200, {"name": "fixture"}, {"Set-Cookie": "MoviePilot=fixture-resource; HttpOnly; Path=/"}
+            self.assertEqual(request["url"].path, "/api/v1/system/img/1")
+            self.assertEqual(parse_qs(request["url"].query), {"imgurl": ["https://image.tmdb.org/t/p/w500/a.jpg"], "cache": ["true"]})
+            if request["headers"].get("Cookie") != "MoviePilot=fixture-resource":
+                return 401, {"detail": "resource cookie required"}
+            return 200, png, {"Content-Type": "image/png"}
+        with fixture_server(respond) as (origin, calls):
+            gateway = self.gateway_mod.MoviePilotGateway(origin, "Bearer fixture-api")
+            results = await asyncio.gather(*(gateway.images.get("https://image.tmdb.org/t/p/w500/a.jpg") for _ in range(12)))
+            self.assertTrue(all(row == (png, "image/png") for row in results))
+            self.assertEqual(len(calls), 3)
+            self.assertEqual(await gateway.images.get("https://image.tmdb.org/t/p/w500/a.jpg"), results[0])
+            self.assertEqual(len(calls), 3)
+
+    async def test_resource_cookie_received_on_catalog_survives_to_douban_proxy(self):
+        def respond(request):
+            if request["url"].path == "/api/v1/recommend/douban_movies":
+                return 200, [], {"Set-Cookie": "MoviePilot=resource-from-api; HttpOnly; Path=/"}
+            self.assertEqual(request["url"].path, "/api/v1/system/img/0")
+            self.assertEqual(request["headers"].get("Cookie"), "MoviePilot=resource-from-api")
+            return 200, b"\xff\xd8\xffvalid-jpeg-signature", {"Content-Type": "image/jpeg"}
+        with fixture_server(respond) as (origin, calls):
+            gateway = self.gateway_mod.MoviePilotGateway(origin, "Bearer fixture-api")
+            await gateway.recommend("douban", "movie", 1)
+            image = await gateway.images.get("https://img1.doubanio.com/view/photo/a.jpg")
+            self.assertEqual(image[1], "image/jpeg")
+            self.assertEqual(len(calls), 2)
+
+    async def test_image_proxy_rejects_ssrf_html_and_redirects_without_requesting_target(self):
+        gateway = self.gateway_mod.MoviePilotGateway("http://127.0.0.1:1", "Bearer fixture")
+        for url in ("https://127.0.0.1/private", "https://mirror.invalid/t/p/w500/a.jpg", "https://image.tmdb.org/api/private"):
+            with self.assertRaises(self.mod.TVError) as caught:
+                await gateway.images.get(url)
+            self.assertEqual(caught.exception.code, "INVALID_REQUEST_IMAGE")
+        for status, body, headers in ((200, b"<html>login</html>", {}), (302, b"", {"Location": "http://127.0.0.1/private"})):
+            with fixture_server(lambda _: (status, body, headers)) as (origin, calls):
+                gateway = self.gateway_mod.MoviePilotGateway(origin, "Bearer fixture")
+                with self.assertRaises(self.mod.TVError):
+                    await gateway.images.get("https://image.tmdb.org/t/p/w500/a.jpg")
+                self.assertEqual(len(calls), 1)
 
     async def test_moviepilot_v2_detail_is_checked_by_requested_id(self):
         gateway = self.gateway_mod.MoviePilotGateway("http://127.0.0.1:1", "Bearer fixture")

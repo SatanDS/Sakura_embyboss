@@ -6,6 +6,7 @@ from urllib.parse import quote, urlsplit
 import aiohttp
 
 from .request_media import SOURCES, normalize, parse_key, same_identity
+from .request_images import RequestImages, MAX_IMAGE_BYTES, image_type
 from .service import TVError, canonical_url
 
 
@@ -14,13 +15,18 @@ class MoviePilotGateway:
         self.origin = canonical_url(origin)
         self.token, self.username, self.password = token, username, password
         self._login_lock = asyncio.Lock()
+        self._resource_lock = asyncio.Lock()
+        self._cookies = {}
+        self.images = RequestImages(self._image)
 
-    async def _request(self, method, path, *, params=None, data=None, auth=True):
+    async def _request(self, method, path, *, params=None, data=None, auth=True, binary=False):
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=35), trust_env=False) as client:
                 async with client.request(method, self.origin + "/api/v1" + path, params=params,
                                           json=data if auth else None, data=data if not auth else None,
-                                          headers={"Authorization": self.token} if auth else {}, allow_redirects=False) as response:
+                                          headers={"Authorization": self.token} if auth else {}, cookies=self._cookies,
+                                          allow_redirects=False) as response:
+                    self._cookies.update({key: value.value for key, value in response.cookies.items()})
                     if response.status == 401:
                         raise TVError("MOVIEPILOT_AUTH", "MoviePilot 认证失败，请管理员检查配置", 503)
                     if response.status == 403:
@@ -31,11 +37,16 @@ class MoviePilotGateway:
                         raise TVError("MOVIEPILOT_API_VERSION", "MoviePilot API 版本不兼容，请管理员更新 MoviePilot", 502)
                     if response.status != 200:
                         raise TVError("MOVIEPILOT_UNAVAILABLE", "MoviePilot 暂时无法响应，请稍后重试", 502)
+                    bound = MAX_IMAGE_BYTES if binary else 4 * 1024 * 1024
+                    if response.content_length and response.content_length > bound:
+                        raise TVError("MOVIEPILOT_INVALID_RESPONSE", "MoviePilot 返回内容过大", 502)
                     raw = bytearray()
                     async for chunk in response.content.iter_chunked(65536):
                         raw.extend(chunk)
-                        if len(raw) > 4 * 1024 * 1024:
+                        if len(raw) > bound:
                             raise TVError("MOVIEPILOT_INVALID_RESPONSE", "MoviePilot 返回内容过大", 502)
+                    if binary:
+                        return bytes(raw), image_type(raw)
                     return json.loads(raw)
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
             raise TVError("MOVIEPILOT_UNAVAILABLE", "MoviePilot 暂时无法响应，请稍后重试", 502) from None
@@ -56,6 +67,24 @@ class MoviePilotGateway:
                     raise TVError("MOVIEPILOT_AUTH", "MoviePilot 认证失败，请管理员检查配置", 503)
                 self.token = "Bearer " + data["access_token"]
         return await self._request(method, path, **kwargs)
+
+    async def _image(self, url):
+        # Match MP's image API: Douban bypasses its outbound proxy; TMDB may
+        # use the configured proxy. Resource cookies stay solely on the Bot.
+        proxy = "0" if urlsplit(url).hostname.endswith(".doubanio.com") else "1"
+        params = {"imgurl": url, "cache": "true"}
+        cookies = dict(self._cookies)
+        try:
+            return await self._request("GET", "/system/img/" + proxy, params=params, binary=True)
+        except TVError as error:
+            if error.code != "MOVIEPILOT_AUTH":
+                raise
+        # Recent MP separates resource Cookies from its API Bearer token.
+        # A harmless authenticated GET refreshes the resource Cookie once.
+        async with self._resource_lock:
+            if self._cookies == cookies:
+                await self.request("GET", "/user/current")
+        return await self._request("GET", "/system/img/" + proxy, params=params, binary=True)
 
     async def recommend(self, source, kind, page):
         endpoint = f"/recommend/{source}_{'movies' if kind == 'movie' else 'tvs'}"

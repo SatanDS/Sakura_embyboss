@@ -1,5 +1,6 @@
 """Private desktop API for discovery and direct MoviePilot subscriptions."""
 from fastapi import APIRouter, Request
+from fastapi.responses import Response
 from starlette.concurrency import run_in_threadpool
 
 from .api import TVRoute, body, invoke, limits, token
@@ -83,6 +84,15 @@ async def catalog(request: Request):
     result = await service().catalog(kind, page_number(request.query_params.get("page", "1")))
     await recheck(bearer, identity)
     return result
+
+
+@router.get("/image")
+async def image(request: Request):
+    bearer, identity = await authorized(request)
+    limits.check((identity["telegramId"], "request-image"), 360)
+    data, mime = await service().gateway.images.get(request.query_params.get("url"))
+    await recheck(bearer, identity)
+    return Response(data, media_type=mime)
 
 
 @router.get("/detail")

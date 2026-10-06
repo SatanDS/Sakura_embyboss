@@ -15,7 +15,7 @@
 }
 ```
 
-把这两个字段合并进现有 `dushengtv` 配置，不要覆盖现有登录域名、端口或服务器列表。一天内每个 TG 默认最多登记 20 部／季；重复查看、重复点击既有请求不额外占配额。这是 MP 自动订阅流程，不会触发旧的按下载大小积分扣费，也不修改 DoubanSync 插件想看用户列表。
+现有配置缺失这两个字段时自动使用以上默认值，无须手动添加；要调整时仅合并对应字段，不要覆盖现有登录域名、端口或服务器列表。一天内每个 TG 默认最多登记 20 部／季；重复查看、重复点击既有请求不额外占配额。这是 MP 自动订阅流程，不会触发旧的按下载大小积分扣费，也不修改 DoubanSync 插件想看用户列表。
 
 ## 服务器更新
 
@@ -40,10 +40,24 @@ MP 接受订阅后，由 MP 自己的订阅搜索、下载、整理计划执行�
 | `GET /detail?key=tmdb:movie:123` | `item, library, subscription, subscriptions, canSubscribe` |
 | `POST /subscribe` | 请求 `{key, season?}`；返回 `state, requestId, key, season, item, updatedAt, error, duplicate`；已入库返回 `state: "available"` 和 `library` |
 | `GET /mine?page=1` | 当前 TG 的 `items, page, hasMore`，每页 30 条 |
+| `GET /image?url=...` | 受认证的 TMDB／豆瓣图片字节；拒绝任意主机、重定向、HTML 和超过 10 MiB 的图片 |
 
 规范媒体 key 为 `tmdb:movie:123`、`tmdb:tv:123`、`douban:movie:123`、`douban:tv:123`。
 
 `item` 字段：`key, source, id, type, title, originalTitle, year, overview, poster, backdrop, rating, providerIds, seasons, genres`。`seasons` 项为 `{number, name, episodeCount}`。`poster/backdrop` 只允许 HTTPS 的 `image.tmdb.org` 和 `*.doubanio.com` 图片；未许可地址输出空字符串。客户端应以当前 TG／图片许可为范围转为自身的图片协议，不开放任意 URL 代理。
+
+图片链路参考 MoviePilot 前端 `src/utils/imageUtils.ts`、`MediaCard.vue` 和 `PersonCard.vue`：识别豆瓣演员 `avatar.normal`，TMDB 原图按海报 w500、背景 w1280、头像 w185 缩放；自定义 TMDB 图片域名只提取符合 `/t/p/...` 的不可变图片路径，统一映射到标准域名，不授予任意镜像 URL 的访问权限。Bot 经 MP `/system/img/0`（豆瓣）或 `/system/img/1`（TMDB）及其缓存获取图片，保留 MP 独立资源 Cookie；Cookie 过期通过只读 `/user/current` 刷新，MP 凭据不会下发客户端。
+
+图片代理在下载前后检查 TG 账户和设备权限，同 URL 合并下载、最多六路并发，服务器图片缓存有字节上限。客户端海报、背景、演员头像按 TG 与标准 URL 持久缓存并建立索引，成功下载起保留 30 天；回到页面或重启不重复下载有效图片。过期重新获取成功后原子替换，临时失败保留旧图；手动清图片缓存也会清索引。旧 Bot 没有图片端点时客户端每分钟最多一次兼容探测，然后使用原有公开图片源。
+
+更新后可在服务器只读检查实际 MP 图片认证与下载，不会创建订阅，也不会输出 Token：
+
+```bash
+cd /opt/Tgbot
+docker compose exec -T embyboss python - < scripts/diagnose_request_images.py
+```
+
+报告只包含图片字段类型、公开图片域名、结果码、格式和字节数。本地没有生产 MP 配置时，离线回归不能替代这一步实际部署验证。
 
 `library` 为 `{available, items:[{id,name,type,serverUrl}], serverUrls}`。`serverUrls` 是 Bot 配置的同一 Emby 服务别名；客户端映射已登录的本地连接后，仍需以当前 Emby 用户重新读取影片再播放。
 
