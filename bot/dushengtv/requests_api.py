@@ -5,6 +5,7 @@ from starlette.concurrency import run_in_threadpool
 
 from .api import TVRoute, body, invoke, limits, token
 from .request_gateway import MoviePilotGateway, library_lookup
+from .request_completion import RequestCompletion
 from .requests import MediaRequests, RequestStore
 from .service import PREFIX, TVError, canonical_url
 
@@ -45,8 +46,9 @@ def service():
                 row["serverUrl"] = server
             result["serverUrls"] = [canonical_url(url) for url in aliases]
             return result
-        _instance = MediaRequests(MoviePilotGateway(cfg.url, cfg.access_token or "", cfg.username or "", cfg.password or ""),
-                                  RequestStore(Session, getattr(config.dushengtv, "requests_daily_limit", 20)), library)
+        gateway = MoviePilotGateway(cfg.url, cfg.access_token or "", cfg.username or "", cfg.password or "")
+        _instance = MediaRequests(gateway, RequestStore(Session, getattr(config.dushengtv, "requests_daily_limit", 20)), library,
+                                  RequestCompletion(config.emby_url, config.emby_api, gateway))
         _configuration = configuration
     return _instance
 
@@ -118,6 +120,6 @@ async def subscribe(request: Request):
 async def mine(request: Request):
     bearer, identity = await authorized(request)
     limits.check((identity["telegramId"], "request-mine"), 30)
-    result = await run_in_threadpool(service().store.mine, int(identity["telegramId"]), page_number(request.query_params.get("page", "1")))
+    result = await service().mine(identity, page_number(request.query_params.get("page", "1")))
     await recheck(bearer, identity)
     return result

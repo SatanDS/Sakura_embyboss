@@ -1,5 +1,6 @@
 """Authenticated browse/subscribe workflow. No chat sends or wanted-list writes."""
 import asyncio
+import json
 from collections import OrderedDict
 from datetime import datetime, timedelta
 import time
@@ -77,7 +78,7 @@ class RequestStore:
         with self.sessions.begin() as db:
             row = db.query(MediaRequest).filter_by(key=key).with_for_update().one()
             # Once accepted, a late timed-out caller cannot revert the job.
-            if row.state in {"subscribed", "complete"} and state in {"pending", "failed"}:
+            if (row.state in {"subscribed", "complete"} and state in {"pending", "failed"}) or (row.state == "complete" and state == "subscribed"):
                 return serialize(row)
             row.state, row.error, row.updated_at = state, error, datetime.utcnow()
             if mp_id:
@@ -86,8 +87,10 @@ class RequestStore:
 
 
 class MediaRequests:
-    def __init__(self, gateway, store, library):
+    def __init__(self, gateway, store, library, completion=None):
         self.gateway, self.store, self.library = gateway, store, library
+        self.completion = completion
+        self.observations = OrderedDict()
         self.cache, self.pending = OrderedDict(), {}
 
     async def cached(self, key, loader, ttl):
@@ -137,10 +140,54 @@ class MediaRequests:
         parse_key(key)
         return await self.cached(("detail", key), lambda: self.gateway.detail(key), 3600)
 
+    async def reconcile(self, identity, records):
+        if not self.completion or not records:
+            return records
+        candidates = [row for row in records if row["state"] in {"pending", "subscribed", "complete"}]
+        if not candidates:
+            return records
+        scope = str(identity["telegramId"]), str(identity["embyUserId"])
+        def observation_key(record):
+            item = record.get("item") or {}
+            return (*scope, record["requestId"], json.dumps([item.get("providerIds"), item.get("seasons")], sort_keys=True))
+        key = ("completion", *scope, tuple(sorted(observation_key(row) for row in candidates)))
+        try:
+            result = await self.cached(key, lambda: self.completion(identity, candidates), 30)
+        except (TVError, asyncio.TimeoutError, OSError, ValueError, TypeError):
+            result = {}
+        output = []
+        for record in records:
+            arrived = result.get(record["requestId"])
+            observed = observation_key(record)
+            if arrived is True or arrived is False:
+                self.observations[observed] = arrived
+                self.observations.move_to_end(observed)
+                while len(self.observations) > 2048:
+                    self.observations.popitem(last=False)
+            else:
+                arrived = self.observations.get(observed)
+            if arrived is True:
+                if record["state"] != "complete":
+                    record = await run_in_threadpool(self.store.update, record["requestId"], "complete")
+                output.append({**record, "state": "complete"})
+            elif arrived is not True and record["state"] == "complete":
+                # The shared job remembers delivery. Current-user visibility
+                # must not globally downgrade another owner's delivered job.
+                output.append({**record, "state": "subscribed"})
+            else:
+                output.append(record)
+        return output
+
+    async def mine(self, identity, page):
+        result = await run_in_threadpool(self.store.mine, int(identity["telegramId"]), page)
+        return {**result, "items": await self.reconcile(identity, result["items"])}
+
     async def detail(self, identity, key):
         item = await self.media(key)
         library, subscriptions = await asyncio.gather(self.library(identity, item), run_in_threadpool(self.store.find, int(identity["telegramId"]), canonical_media_key(item)))
-        if library["available"]:
+        if self.completion:
+            subscriptions = await self.reconcile(identity, subscriptions)
+        elif library["available"]:
             for record in subscriptions:
                 # A Series entry alone does not establish that a requested season
                 # has arrived, so never mark a TV subscription complete here.

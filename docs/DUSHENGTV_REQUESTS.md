@@ -39,7 +39,7 @@ MP 接受订阅后，由 MP 自己的订阅搜索、下载、整理计划执行�
 | `GET /catalog?type=movie&page=1` | `items, page, hasMore, warnings, enabled`；`type` 为 `movie` 或 `tv` |
 | `GET /detail?key=tmdb:movie:123` | `item, library, subscription, subscriptions, canSubscribe` |
 | `POST /subscribe` | 请求 `{key, season?}`；返回 `state, requestId, key, season, item, updatedAt, error, duplicate`；已入库返回 `state: "available"` 和 `library` |
-| `GET /mine?page=1` | 当前 TG 的 `items, page, hasMore`，每页 30 条 |
+| `GET /mine?page=1` | 当前 TG 的 `items, page, hasMore`，每页 30 条；按当前 Emby 用户核对入库，已完整入库返回 `state: "complete"` |
 | `GET /image?url=...` | 受认证的 TMDB／豆瓣图片字节；拒绝任意主机、重定向、HTML 和超过 10 MiB 的图片 |
 
 规范媒体 key 为 `tmdb:movie:123`、`tmdb:tv:123`、`douban:movie:123`、`douban:tv:123`。
@@ -61,7 +61,13 @@ docker compose exec -T embyboss python - < scripts/diagnose_request_images.py
 
 `library` 为 `{available, items:[{id,name,type,serverUrl}], serverUrls}`。`serverUrls` 是 Bot 配置的同一 Emby 服务别名；客户端映射已登录的本地连接后，仍需以当前 Emby 用户重新读取影片再播放。
 
-`subscription` 是当前 TG 最近一条该作品记录，没有记录时 `{state:"none"}`；`subscriptions` 包含该作品的各季请求。状态为 `pending`（结果核对中）、`subscribed`（MP 已接受）、`failed`（明确拒绝，可重试）、`complete`（电影已在 Emby 可见）。剧集目录存在不代表整季齐全，因此不会仅凭 Series 条目自动宣布整季下载完成。`subscribed` 也不等于已经下载完成。
+`subscription` 是当前 TG 最近一条该作品记录，没有记录时 `{state:"none"}`；`subscriptions` 包含该作品的各季请求。状态为 `pending`（结果核对中）、`subscribed`（MP 已接受）、`failed`（明确拒绝，可重试）、`complete`（电影或订阅的完整季已在当前用户的 Emby 中入库）。0.0.26 客户端已经支持把 `complete` 显示为卡片右上角“已入库”，本次只需更新 Bot。
+
+打开“我的订阅”或详情时自动核对：电影要求类型与所有共享 ProviderIds 一致，且 Emby 返回实际 `MediaSources.Path`；剧集要求 MP 的准确季总集数大于零、`/tmdb/{tmdbid}/{season}` 的完整去重分集清单与总数一致，再逐集验证当前用户的 Emby 可播放文件。不会把 Series 目录、缺集、虚拟待播项、重复版本或另一季当作整季入库；合并集使用 `IndexNumberEnd` 展开，特别篇季 0 按真实编号集合匹配。MP 的 `season_info[].episode_count` 表示季总集数，不以 Emby 的文件数量或已播集数猜测；订阅时已有较大的总集数也不会被后来较小的清单覆盖。
+
+核对先合并当前页的 Emby 电影／剧集身份查询，最多三路源站请求。每页总预算六秒，慢源超时返回已确认的部分，列表仍可使用；同一 TG＋Emby 用户＋请求及影片元数据的核对结果短缓存 30 秒，MP 季元数据缓存五分钟。离开再进入页面会重新获取状态，短缓存到期后重查。Emby 明确删除、隐藏或变成缺集时当前账户显示“已订阅”；源站暂时故障保留该账户最后明确状态。共享数据库记录中的历史 `complete` 本身不证明另一个账户现在可见；没有该账户的入库证据时保守显示“已订阅”，也不会让一个用户的权限变化全局降级其他人的已完成任务。
+
+无可验证 TMDB 映射、季总集数未知、分集资料不全或相互矛盾时不能可靠宣布整季完成，保持待核对状态。MP 仅显示下载完成也不等于已入库，必须通过上述 Emby 文件核对。详情的 Series 播放入口仍表示该剧已存在，不代表所有季完成；每条订阅按所选季独立显示状态。
 
 跨用户、跨进程以媒体 key＋季数的数据库主键防止重复请求。超时／断连可能发生在 MP 已接受之后，状态保留 `pending`；用户再次点击只核对 MP 相同 ProviderId 和季数，不能盲目重发。若 MP 始终没有该订阅，需要管理员检查 MP 任务／日志，再将确认未提交的该记录置为 `failed` 后允许重试；不能直接删除不确定状态记录。MP 明确拒绝、权限／参数错误和限流可以在修正后重试。
 

@@ -67,6 +67,7 @@ class RequestTests(unittest.IsolatedAsyncioTestCase):
         cls.media = importlib.import_module("bot.dushengtv.request_media")
         cls.mod = importlib.import_module("bot.dushengtv.requests")
         cls.gateway_mod = importlib.import_module("bot.dushengtv.request_gateway")
+        cls.completion_mod = importlib.import_module("bot.dushengtv.request_completion")
 
     @classmethod
     def tearDownClass(cls):
@@ -201,6 +202,155 @@ class RequestTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(self.mod.TVError) as caught:
             await self.service.subscribe(self.identity, self.tv["key"], 1, self.recheck)
         self.assertEqual(caught.exception.code, "REQUEST_LIMIT_REACHED")
+
+    async def test_mine_refreshes_movie_completion_and_isolates_last_known_visibility(self):
+        record = await self.service.subscribe(self.identity, self.movie["key"], None, self.recheck)
+        completion = AsyncMock(return_value={record["requestId"]: True})
+        self.service.completion = completion
+        first = await self.service.mine(self.identity, 1)
+        self.assertEqual(first["items"][0]["state"], "complete")
+        self.assertEqual(self.store.mine(10, 1)["items"][0]["state"], "complete")
+        await self.service.mine(self.identity, 1)
+        completion.assert_awaited_once()
+        # A delayed accepted-subscription response cannot undo delivery.
+        self.assertEqual(self.store.update(record["requestId"], "subscribed", "late-mp-id")["state"], "complete")
+        self.service.cache.clear()
+        completion.return_value = {record["requestId"]: False}
+        self.assertEqual((await self.service.mine(self.identity, 1))["items"][0]["state"], "subscribed")
+        self.assertEqual(self.store.mine(10, 1)["items"][0]["state"], "complete")
+        self.service.cache.clear()
+        completion.side_effect = self.mod.TVError("LIBRARY_UNAVAILABLE", "temporary", 502)
+        self.assertEqual((await self.service.mine(self.identity, 1))["items"][0]["state"], "subscribed")
+        self.store.claim(20, self.movie, None)
+        second_user = {"telegramId": "20", "embyUserId": "other-user"}
+        self.assertEqual((await self.service.mine(second_user, 1))["items"][0]["state"], "subscribed")
+        completion.side_effect = None
+        self.service.cache.clear()
+        completion.return_value = {record["requestId"]: True}
+        self.assertEqual((await self.service.mine(self.identity, 1))["items"][0]["state"], "complete")
+        self.service.cache.clear()
+        completion.return_value = {}
+        self.assertEqual((await self.service.mine(self.identity, 1))["items"][0]["state"], "complete")
+
+    async def test_mine_checks_subscribed_seasons_independently_and_refreshes_details_too(self):
+        self.gateway.detail.return_value = self.tv
+        zero = await self.service.subscribe(self.identity, self.tv["key"], 0, self.recheck)
+        one = await self.service.subscribe(self.identity, self.tv["key"], 1, self.recheck)
+        self.service.completion = AsyncMock(return_value={zero["requestId"]: True, one["requestId"]: False})
+        mine = await self.service.mine(self.identity, 1)
+        self.assertEqual({row["season"]: row["state"] for row in mine["items"]}, {0: "complete", 1: "subscribed"})
+        detail = await self.service.detail(self.identity, self.tv["key"])
+        self.assertEqual({row["season"]: row["state"] for row in detail["subscriptions"]}, {0: "complete", 1: "subscribed"})
+        self.service.completion.assert_awaited_once()
+
+    async def test_real_completion_batches_identity_lookup_and_requires_playable_exact_season(self):
+        tv = {**self.tv, "seasons": [{"number": 0, "episodeCount": 2}, {"number": 1, "episodeCount": 3}]}
+        gateway = types.SimpleNamespace(detail=AsyncMock(return_value=tv), request=AsyncMock(side_effect=lambda method, path: [
+            {"season_number": int(path.rsplit('/', 1)[1]), "episode_number": number, "show_id": 456}
+            for number in ([2, 8] if path.endswith('/0') else [1, 2, 3])]))
+        records = [{"requestId": "movie", "item": self.movie, "season": None},
+                   {"requestId": "specials", "item": tv, "season": 0}, {"requestId": "season-one", "item": tv, "season": 1}]
+        source = [{"Path": "/media/video.mkv"}]
+        movie_missing, season_arrived = False, False
+        def episode(number, season, **extra):
+            return {"Type": "Episode", "Id": f"ep-{season}-{number}", "SeriesId": "series", "ParentIndexNumber": season,
+                    "IndexNumber": number, "MediaSources": source, **extra}
+        def respond(request):
+            params = parse_qs(request["url"].query)
+            self.assertEqual(request["headers"].get("X-Emby-Token"), "fixture")
+            if request["url"].path == "/Users/user-1/Items":
+                self.assertEqual(params["IncludeItemTypes"], ["Movie,Series"])
+                self.assertIn("MediaSources", params["Fields"][0])
+                return 200, {"Items": [
+                    {"Id": "wrong-type", "Type": "Series", "ProviderIds": {"Tmdb": "123"}, "MediaSources": source},
+                    {"Id": "conflict", "Type": "Movie", "ProviderIds": {"Tmdb": "123", "Imdb": "tt999"}, "MediaSources": source},
+                    {"Id": "virtual", "Type": "Movie", "ProviderIds": {"Tmdb": "123"}, "LocationType": "Virtual", "MediaSources": source},
+                    {"Id": "movie", "Type": "Movie", "ProviderIds": {"Tmdb": "123", "Imdb": "tt123"}, "MediaSources": [] if movie_missing else source},
+                    {"Id": "series", "Type": "Series", "ProviderIds": {"Tmdb": "456"}}]}
+            self.assertEqual(request["url"].path, "/Shows/series/Episodes")
+            self.assertEqual(params["UserId"], ["user-1"])
+            if params["Season"] == ["0"]:
+                return 200, {"Items": [episode(2, 0), episode(8, 0)]}
+            if season_arrived:
+                return 200, {"Items": [episode(1, 1, IndexNumberEnd=3)]}
+            return 200, {"Items": [episode(1, 1), episode(1, 1), episode(3, 1), episode(2, 2),
+                episode(2, 1, IsMissing=True), episode(2, 1, SeriesId="other-series"), episode(2, 1, IsVirtualItem=True)]}
+        with fixture_server(respond) as (origin, calls):
+            checker = self.completion_mod.RequestCompletion(origin, "fixture", gateway)
+            result = await checker(self.identity, records)
+            self.assertEqual(result, {"movie": True, "specials": True, "season-one": False})
+            self.assertEqual(sum(call["url"].path == "/Users/user-1/Items" for call in calls), 1)
+            gateway.detail.assert_awaited_once()
+            movie_missing, season_arrived = True, True
+            self.assertEqual(await checker(self.identity, records), {"movie": False, "specials": True, "season-one": True})
+        self.assertEqual(self.completion_mod.episode_numbers([episode(1, 1, IndexNumberEnd=3)], "series", 1), {1, 2, 3})
+        self.assertFalse(self.completion_mod.playable({"Type": "Movie", "Path": "/folder", "MediaSources": []}))
+
+    async def test_expected_season_does_not_guess_unknown_total_or_ignore_identity_and_duplicate_numbers(self):
+        tv = {**self.tv, "seasons": [{"number": 0, "episodeCount": 2}]}
+        gateway = types.SimpleNamespace(detail=AsyncMock(return_value=tv), request=AsyncMock(return_value=[
+            {"season_number": 0, "episode_number": 2}, {"season_number": 0, "episode_number": 8}]))
+        checker = self.completion_mod.RequestCompletion("http://127.0.0.1:1", "fixture", gateway)
+        self.assertEqual(await checker.expected(tv, 0), {2, 8})
+        for invalid in ([{"season_number": 0, "episode_number": 2}] * 2,
+                        [{"season_number": 0, "episode_number": 2}, {"season_number": 1, "episode_number": 8}],
+                        [{"season_number": 0, "episode_number": 2}, {"season_number": 0, "episode_number": 8, "show_id": 999}]):
+            checker.metadata.clear(); gateway.request.return_value = invalid
+            self.assertIsNone(await checker.expected(tv, 0))
+        checker.metadata.clear(); gateway.request.return_value = [{"season_number": 0, "episode_number": 2}, {"season_number": 0, "episode_number": 8}]
+        self.assertIsNone(await checker.expected({**tv, "seasons": [{"number": 0, "episodeCount": 10}]}, 0))
+        checker.metadata.clear(); gateway.detail.return_value = {**tv, "seasons": []}
+        self.assertIsNone(await checker.expected({**tv, "seasons": []}, 0))
+        checker.metadata.clear(); gateway.detail.return_value = {**tv, "providerIds": {"Tmdb": "999"}}
+        self.assertIsNone(await checker.expected(tv, 0))
+
+    async def test_completion_total_deadline_keeps_fast_results_and_shared_metadata_finishes_cleanly(self):
+        gate = asyncio.Event()
+        async def slow_detail(_):
+            await gate.wait()
+            return self.tv
+        gateway = types.SimpleNamespace(detail=AsyncMock(side_effect=slow_detail), request=AsyncMock())
+        def respond(_):
+            return 200, {"Items": [
+                {"Id": "movie", "Type": "Movie", "ProviderIds": {"Tmdb": "123"}, "MediaSources": [{"Path": "/movie.mkv"}]},
+                {"Id": "series", "Type": "Series", "ProviderIds": {"Tmdb": "456"}}]}
+        with fixture_server(respond) as (origin, _):
+            checker = self.completion_mod.RequestCompletion(origin, "fixture", gateway, budget_seconds=.08)
+            started = asyncio.get_running_loop().time()
+            result = await checker(self.identity, [{"requestId": "movie", "item": self.movie}, {"requestId": "series", "item": self.tv, "season": 1}])
+            self.assertEqual(result, {"movie": True})
+            self.assertLess(asyncio.get_running_loop().time() - started, .3)
+            self.assertEqual(len(checker.pending), 1)
+            gate.set()
+            for _ in range(30):
+                if not checker.pending:
+                    break
+                await asyncio.sleep(.01)
+            self.assertEqual(checker.pending, {})
+            self.assertIn(("media", "456"), checker.metadata)
+
+    async def test_metadata_work_is_bounded_and_cancellation_consumes_failed_tasks(self):
+        checker = self.completion_mod.RequestCompletion("http://127.0.0.1:1", "fixture", self.gateway)
+        active, peak = 0, 0
+        async def load():
+            nonlocal active, peak
+            active += 1; peak = max(peak, active)
+            await asyncio.sleep(.01)
+            active -= 1
+            return []
+        await asyncio.gather(*(checker._metadata(("test", number), load) for number in range(18)))
+        self.assertEqual(peak, 3)
+        self.assertEqual(checker.pending, {})
+        gate = asyncio.Event()
+        async def fail():
+            await gate.wait()
+            raise self.mod.TVError("UPSTREAM", "failure")
+        waiting = asyncio.create_task(checker._metadata(("cancelled",), fail))
+        await asyncio.sleep(.01); waiting.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await waiting
+        gate.set(); await asyncio.sleep(.02)
+        self.assertEqual(checker.pending, {})
 
     async def test_transport_contract_and_nonretry_on_uncertain_mutation(self):
         gateway = self.gateway_mod.MoviePilotGateway("http://127.0.0.1:1", "Bearer fixture")
