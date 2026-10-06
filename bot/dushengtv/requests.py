@@ -6,9 +6,10 @@ from datetime import datetime, timedelta
 import time
 
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy import or_, func
 from starlette.concurrency import run_in_threadpool
 
-from .request_media import deduplicate, parse_key
+from .request_media import deduplicate, parse_key, search_query
 from .request_models import MediaRequest, MediaRequestOwner
 from .service import TVError
 
@@ -35,10 +36,13 @@ class RequestStore:
                 MediaRequestOwner.tg == tg, MediaRequest.media_key == media_key).order_by(MediaRequest.updated_at.desc()).all()
             return [serialize(row) for row in rows]
 
-    def mine(self, tg, page):
+    def mine(self, tg, page, query=""):
         with self.sessions() as db:
-            rows = db.query(MediaRequest).join(MediaRequestOwner, MediaRequestOwner.request_key == MediaRequest.key).filter(
-                MediaRequestOwner.tg == tg).order_by(MediaRequestOwner.created_at.desc()).offset((page - 1) * 30).limit(31).all()
+            query = search_query(query)
+            lookup = db.query(MediaRequest).join(MediaRequestOwner, MediaRequestOwner.request_key == MediaRequest.key).filter(MediaRequestOwner.tg == tg)
+            if query:
+                lookup = lookup.filter(or_(*(func.lower(MediaRequest.item[key].as_string()).contains(query.lower(), autoescape=True) for key in ("title", "originalTitle"))))
+            rows = lookup.order_by(MediaRequestOwner.created_at.desc(), MediaRequest.key).offset((page - 1) * 30).limit(31).all()
             return {"items": [serialize(row) for row in rows[:30]], "page": page, "hasMore": len(rows) > 30}
 
     def claim(self, tg, item, season):
@@ -122,7 +126,16 @@ class MediaRequests:
             if job.done():
                 self.pending.pop(key, None)
 
-    async def catalog(self, kind, page):
+    async def catalog(self, kind, page, query=""):
+        query = search_query(query)
+        if query:
+            async def search():
+                result = await self.gateway.search(kind, page, query)
+                items = result["items"]
+                return {"items": deduplicate([item for item in items if item["source"] == "tmdb"],
+                                              [item for item in items if item["source"] != "tmdb"]),
+                        "page": page, "hasMore": result["hasMore"], "warnings": [], "enabled": True}
+            return await self.cached(("search", kind, page, query), search, 300)
         async def load():
             values = await asyncio.gather(self.gateway.recommend("tmdb", kind, page), self.gateway.recommend("douban", kind, page), return_exceptions=True)
             warnings = []
@@ -178,8 +191,8 @@ class MediaRequests:
                 output.append(record)
         return output
 
-    async def mine(self, identity, page):
-        result = await run_in_threadpool(self.store.mine, int(identity["telegramId"]), page)
+    async def mine(self, identity, page, query=""):
+        result = await run_in_threadpool(self.store.mine, int(identity["telegramId"]), page, search_query(query))
         return {**result, "items": await self.reconcile(identity, result["items"])}
 
     async def detail(self, identity, key):

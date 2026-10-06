@@ -727,6 +727,7 @@ class DesktopTests(unittest.TestCase):
             fake.catalog.assert_not_awaited()
             self.auth.register(not_registered["accessToken"], self.registration(not_registered["accessToken"]))
             self.assertEqual(self.client.get(prefix + "/catalog", headers=header).status_code, 200)
+            fake.catalog.assert_awaited_once_with("movie", 1, "")
             async def revoke_while_fetching(*_):
                 self.auth.logout(not_registered["accessToken"])
                 return {"items": []}
@@ -734,6 +735,28 @@ class DesktopTests(unittest.TestCase):
             self.assertEqual(self.client.get(prefix + "/catalog", headers=header).status_code, 401)
             self.assertEqual(self.client.post(prefix + "/subscribe", headers=header, json={"key": "tmdb:movie:123"}).status_code, 401)
             fake.subscribe.assert_not_awaited()
+
+    def test_request_search_routes_preserve_identity_query_and_revocation_checks(self):
+        from bot.dushengtv import requests_api
+        prefix = self.m.service.PREFIX + "/requests"
+        fake = SimpleNamespace(catalog=AsyncMock(return_value={"items": [], "hasMore": True}),
+                               mine=AsyncMock(return_value={"items": [], "hasMore": False}))
+        with patch.object(requests_api, "permission"), patch.object(requests_api, "service", return_value=fake):
+            unbound = self.login(register=False)
+            header = {"Authorization": "Bearer " + unbound["accessToken"]}
+            self.assertEqual(self.client.get(prefix + "/mine", params={"query": "片名"}, headers=header).status_code, 403)
+            fake.mine.assert_not_awaited()
+            self.auth.register(unbound["accessToken"], self.registration(unbound["accessToken"]))
+            self.assertEqual(self.client.get(prefix + "/catalog", params={"type": "tv", "page": 2, "query": "剧名"}, headers=header).status_code, 200)
+            fake.catalog.assert_awaited_once_with("tv", 2, "剧名")
+            self.assertEqual(self.client.get(prefix + "/mine", params={"page": 3, "query": "我的影片"}, headers=header).status_code, 200)
+            expected = self.auth.server_identity(unbound["accessToken"])
+            fake.mine.assert_awaited_once_with(expected, 3, "我的影片")
+            async def revoke_while_fetching(*_):
+                self.auth.logout(unbound["accessToken"])
+                return {"items": []}
+            fake.mine.side_effect = revoke_while_fetching
+            self.assertEqual(self.client.get(prefix + "/mine", params={"query": "影片"}, headers=header).status_code, 401)
 
     def test_requests_preserve_moviepilot_account_policy(self):
         from bot.dushengtv import requests_api
@@ -764,6 +787,19 @@ class DesktopTests(unittest.TestCase):
                 validate_cloud_settings({"schema": 1, "settings": {**settings, **extra}})
         for endpoint in ("http://127.0.0.1:8080/v1", "http://localhost/v1", "http://[::1]:8080/v1"):
             validate_cloud_settings({"schema": 1, "settings": {**settings, "subtitleTranslationEndpoint": endpoint}})
+
+    def test_advanced_playback_cloud_preferences_exclude_device_paths_and_tokens(self):
+        from bot.dushengtv.cloud_settings import validate_cloud_settings
+        settings = {"danmakuMergeDuplicates": True, "danmakuHeatmap": False,
+                    "videoUpscaler": "fsr1", "frameInterpolation": "rife", "glslPreset": "cas",
+                    "nvidiaTrueHdr": False, "autoHdr": True, "subtitleAutoAvoidance": True,
+                    "liveSubtitleModel": "tiny", "liveSubtitleLanguage": "auto",
+                    "liveSubtitleDevice": "vulkan", "liveSubtitleTranslate": True}
+        self.assertEqual(validate_cloud_settings({"schema": 1, "settings": settings}), settings)
+        for extra in ({"customGlslPath": "D:/personal/filter.glsl"}, {"assrtToken": "secret"},
+                      {"liveSubtitleModel": "arbitrary-download"}, {"frameInterpolation": "fake"}):
+            with self.assertRaises(ValueError):
+                validate_cloud_settings({"schema": 1, "settings": {**settings, **extra}})
 
 
 if __name__ == "__main__":

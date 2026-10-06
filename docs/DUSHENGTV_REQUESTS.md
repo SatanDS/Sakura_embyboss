@@ -36,13 +36,17 @@ MP 接受订阅后，由 MP 自己的订阅搜索、下载、整理计划执行�
 
 | 接口 | 返回／用途 |
 | --- | --- |
-| `GET /catalog?type=movie&page=1` | `items, page, hasMore, warnings, enabled`；`type` 为 `movie` 或 `tv` |
+| `GET /catalog?type=movie&page=1&query=影片名称` | `items, page, hasMore, warnings, enabled`；`type` 为 `movie` 或 `tv`；省略 `query` 返回热门推荐 |
 | `GET /detail?key=tmdb:movie:123` | `item, library, subscription, subscriptions, canSubscribe` |
 | `POST /subscribe` | 请求 `{key, season?}`；返回 `state, requestId, key, season, item, updatedAt, error, duplicate`；已入库返回 `state: "available"` 和 `library` |
-| `GET /mine?page=1` | 当前 TG 的 `items, page, hasMore`，每页 30 条；按当前 Emby 用户核对入库，已完整入库返回 `state: "complete"` |
+| `GET /mine?page=1&query=影片名称` | 当前 TG 的 `items, page, hasMore`，每页 30 条；可选 `query` 筛选标题或原名；已完整入库返回 `state: "complete"` |
 | `GET /image?url=...` | 受认证的 TMDB／豆瓣图片字节；拒绝任意主机、重定向、HTML 和超过 10 MiB 的图片 |
 
 规范媒体 key 为 `tmdb:movie:123`、`tmdb:tv:123`、`douban:movie:123`、`douban:tv:123`。
+
+搜索词最多 128 字，拒绝控制字符；连续空白合并，空搜索返回原来的推荐／订阅列表。电影和电视剧搜索调用 MoviePilot `/media/search` 的 `type=media` 元数据搜索，再按作品类型筛选；不会发起资源下载搜索或创建订阅。结果按类型、关键词和页码缓存五分钟。MoviePilot 混合返回电影与电视剧，筛选后某页可能为空，但 `hasMore` 为真时客户端会继续加载。
+
+“我的订阅”在数据库中按当前 Telegram 用户、标题或原名筛选后分页；`%`、`_` 当作普通文字。搜索不会改变订阅状态，也不能读取其他用户的请求。客户端支持输入防抖、回车、清除与切换分类保留关键词，并丢弃过时查询的响应。
 
 `item` 字段：`key, source, id, type, title, originalTitle, year, overview, poster, backdrop, rating, providerIds, seasons, genres`。`seasons` 项为 `{number, name, episodeCount}`。`poster/backdrop` 只允许 HTTPS 的 `image.tmdb.org` 和 `*.doubanio.com` 图片；未许可地址输出空字符串。客户端应以当前 TG／图片许可为范围转为自身的图片协议，不开放任意 URL 代理。
 

@@ -83,7 +83,7 @@ async def catalog(request: Request):
     kind = request.query_params.get("type", "movie")
     if kind not in {"movie", "tv"}:
         raise TVError("INVALID_REQUEST", "仅支持电影或电视剧", 400)
-    result = await service().catalog(kind, page_number(request.query_params.get("page", "1")))
+    result = await service().catalog(kind, page_number(request.query_params.get("page", "1")), request.query_params.get("query", ""))
     await recheck(bearer, identity)
     return result
 
@@ -120,6 +120,6 @@ async def subscribe(request: Request):
 async def mine(request: Request):
     bearer, identity = await authorized(request)
     limits.check((identity["telegramId"], "request-mine"), 30)
-    result = await service().mine(identity, page_number(request.query_params.get("page", "1")))
+    result = await service().mine(identity, page_number(request.query_params.get("page", "1")), request.query_params.get("query", ""))
     await recheck(bearer, identity)
     return result

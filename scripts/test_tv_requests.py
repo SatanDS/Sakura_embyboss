@@ -188,6 +188,88 @@ class RequestTests(unittest.IsolatedAsyncioTestCase):
         result = await self.service.catalog("movie", 2)
         self.assertEqual(result["warnings"][0]["source"], "douban")
 
+    async def test_search_catalog_prefers_tmdb_and_isolates_cache_dimensions(self):
+        alternative = self.media.normalize({"douban_id": 999, "title": self.movie["title"], "year": 2026, "type": "movie"}, "douban", "movie")
+        self.gateway.search = AsyncMock(return_value={"items": [alternative, self.movie, self.movie], "hasMore": True})
+        result = await self.service.catalog("movie", 1, "  The   Movie  ")
+        self.assertEqual([row["key"] for row in result["items"]], [self.movie["key"]])
+        self.assertTrue(result["hasMore"])
+        self.gateway.search.assert_awaited_once_with("movie", 1, "The Movie")
+        self.assertEqual(await self.service.catalog("movie", 1, "The Movie"), result)
+        self.gateway.search.assert_awaited_once()
+        for kind, page, query in (("tv", 1, "The Movie"), ("movie", 2, "The Movie"), ("movie", 1, "Other Movie")):
+            await self.service.catalog(kind, page, query)
+        self.assertEqual(self.gateway.search.await_count, 4)
+        self.gateway.recommend.assert_not_awaited()
+
+    async def test_empty_search_uses_recommendations_and_invalid_query_does_no_io(self):
+        self.gateway.search = AsyncMock()
+        await self.service.catalog("movie", 1, "   ")
+        self.gateway.search.assert_not_awaited()
+        self.assertEqual(self.gateway.recommend.await_count, 2)
+        self.gateway.recommend.reset_mock()
+        with patch.object(self.store, "mine") as mine:
+            for query in (None, [], 42, "x" * 129, "title\nmore", "title\x00more"):
+                with self.subTest(query=query):
+                    with self.assertRaises(self.mod.TVError) as caught:
+                        await self.service.catalog("movie", 1, query)
+                    self.assertEqual(caught.exception.code, "INVALID_REQUEST")
+                    with self.assertRaises(self.mod.TVError):
+                        await self.service.mine(self.identity, 1, query)
+            mine.assert_not_called()
+        self.gateway.search.assert_not_awaited()
+        self.gateway.recommend.assert_not_awaited()
+
+    async def test_metadata_search_get_filters_mixed_types_and_preserves_raw_pagination(self):
+        rows = [
+            {"tmdb_id": 100, "title": "Film", "type": "电影", "production_countries": 3, "production_companies": {}},
+            {"douban_id": 200, "title": "Douban", "media_type": "movie", "tmdb_id": "invalid"},
+            {"tmdb_id": 300, "title": "Series", "type": "电视剧"},
+            {"tmdb_id": 400, "title": "Missing type"},
+            {"tmdb_id": 500, "title": "Bad type", "type": ["movie"]},
+            {"tmdb_id": 600, "title": "Person", "type": "person"},
+            None,
+        ]
+        def respond(request):
+            self.assertEqual(request["method"], "GET")
+            self.assertEqual(request["url"].path, "/api/v1/media/search")
+            self.assertEqual(request["body"], b"")
+            self.assertEqual(parse_qs(request["url"].query), {"title": ["流浪地球"], "type": ["media"], "page": ["2"], "count": ["30"]})
+            return 200, rows
+        with fixture_server(respond) as (origin, calls):
+            gateway = self.gateway_mod.MoviePilotGateway(origin, "Bearer fixture")
+            movie = await gateway.search("movie", 2, "流浪地球")
+            self.assertEqual([item["key"] for item in movie["items"]], ["tmdb:movie:100", "douban:movie:200"])
+            self.assertEqual(movie["items"][0]["countries"], [])
+            self.assertFalse(movie["hasMore"])
+            tv = await gateway.search("tv", 2, "流浪地球")
+            self.assertEqual([item["key"] for item in tv["items"]], ["tmdb:tv:300"])
+            rows[:] = [{"tmdb_id": 1000 + index, "title": f"Series {index}", "type": "tv"} for index in range(30)]
+            empty = await gateway.search("movie", 2, "流浪地球")
+            self.assertEqual(empty, {"items": [], "hasMore": True})
+            self.assertEqual(len(calls), 3)
+
+    async def test_mine_search_is_literal_owner_scoped_and_paginates_stably(self):
+        self.store.daily_limit = 100
+        def item(number, title, original=""):
+            return self.media.normalize({"tmdb_id": number, "title": title, "original_title": original, "type": "movie"}, "tmdb", "movie")
+        for number, title, original in ((100, "百分之100%", "Original Title"), (101, "下划_线", "Other"), (102, "Normal", "Another")):
+            self.store.claim(10, item(number, title, original), None)
+        self.store.claim(20, item(103, "百分之100%", "Original Title"), None)
+        self.assertEqual([row["item"]["id"] for row in self.store.mine(10, 1, "%")["items"]], ["100"])
+        self.assertEqual([row["item"]["id"] for row in self.store.mine(10, 1, "_")["items"]], ["101"])
+        self.assertEqual([row["item"]["id"] for row in self.store.mine(10, 1, "ORIGINAL title")["items"]], ["100"])
+        self.assertEqual(self.store.mine(30, 1, "%")["items"], [])
+        for number in range(200, 235):
+            self.store.claim(10, item(number, f"分页 {number}"), None)
+        first = self.store.mine(10, 1, "分页")
+        second = self.store.mine(10, 2, "分页")
+        self.assertEqual((len(first["items"]), len(second["items"])), (30, 5))
+        self.assertTrue(first["hasMore"])
+        self.assertFalse(second["hasMore"])
+        self.assertEqual(first, self.store.mine(10, 1, "分页"))
+        self.assertEqual(len({row["requestId"] for row in first["items"] + second["items"]}), 35)
+
     async def test_singleflight_details_and_no_identity_fallback(self):
         await asyncio.gather(*(self.service.media(self.movie["key"]) for _ in range(5)))
         self.gateway.detail.assert_awaited_once()

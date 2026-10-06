@@ -42,6 +42,12 @@ def image_url(value, size="w780"):
     return ""
 
 
+def search_query(value):
+    if not isinstance(value, str) or len(value) > 128 or any(ord(char) < 32 for char in value):
+        raise TVError("INVALID_REQUEST", "搜索词应为 128 字以内的影片名称", 400)
+    return " ".join(value.split())
+
+
 def text(value, limit=256):
     return str(value or "").replace("\x00", "")[:limit]
 
@@ -70,7 +76,7 @@ def normalize(row, source, kind):
     if not media_id:
         return None
     raw_kind = row.get("type") or row.get("media_type")
-    if raw_kind and raw_kind not in ({"电影", "movie", "Movie"} if kind == "movie" else {"电视剧", "tv", "TV", "Series"}):
+    if raw_kind and (not isinstance(raw_kind, str) or raw_kind not in ({"电影", "movie", "Movie"} if kind == "movie" else {"电视剧", "tv", "TV", "Series"})):
         return None
     title = text(row.get("title") or row.get("name"))
     if not title:
@@ -93,6 +99,8 @@ def normalize(row, source, kind):
         return [{"name": text(person.get("name")), "role": text(person.get("character") or person.get("job")),
                  "photo": image_url(person.get("profile_path") or person.get("avatar"), "w185")}
                 for person in (row.get(field) if isinstance(row.get(field), list) else [])[:30] if isinstance(person, dict) and person.get("name")]
+    countries = row.get("origin_country") or row.get("production_countries")
+    studios = row.get("production_companies")
     return {"key": f"{source}:{kind}:{media_id}", "source": source, "id": media_id, "type": kind,
             "title": title, "originalTitle": text(row.get("original_title") or row.get("original_name")),
             "year": int(year) if re.fullmatch(r"(?:18|19|20|21)\d\d", year) else None,
@@ -102,8 +110,8 @@ def normalize(row, source, kind):
             "rating": rating, "providerIds": ids, "seasons": seasons,
             "tagline": text(row.get("tagline"), 512), "releaseDate": text(row.get("release_date") or row.get("first_air_date"), 40),
             "status": text(row.get("status"), 80), "language": text(row.get("original_language"), 40),
-            "countries": [text(value.get("name") if isinstance(value, dict) else value, 80) for value in (row.get("origin_country") or row.get("production_countries") or [])[:20]],
-            "studios": [text(value.get("name") if isinstance(value, dict) else value, 120) for value in (row.get("production_companies") or [])[:20]],
+            "countries": [text(value.get("name") if isinstance(value, dict) else value, 80) for value in (countries if isinstance(countries, list) else [])[:20]],
+            "studios": [text(value.get("name") if isinstance(value, dict) else value, 120) for value in (studios if isinstance(studios, list) else [])[:20]],
             "cast": people("actors"), "directors": people("directors"),
             "genres": [text(v.get("name") if isinstance(v, dict) else v, 60) for v in (row.get("genres") if isinstance(row.get("genres"), list) else [])[:20]]}
 

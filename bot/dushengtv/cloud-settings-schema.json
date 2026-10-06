@@ -5,7 +5,10 @@
   "properties": {
     "subtitleTranslationProvider": {
       "type": "string",
-      "enum": ["google", "openai"],
+      "enum": [
+        "google",
+        "openai"
+      ],
       "maxLength": 2048,
       "pattern": "^[^\\r\\n\\u0000]*$"
     },
@@ -21,13 +24,22 @@
     },
     "subtitleTranslationLanguage": {
       "type": "string",
-      "enum": ["zh-CN", "zh-TW", "en", "ja", "ko"],
+      "enum": [
+        "zh-CN",
+        "zh-TW",
+        "en",
+        "ja",
+        "ko"
+      ],
       "maxLength": 2048,
       "pattern": "^[^\\r\\n\\u0000]*$"
     },
     "subtitleTranslationMode": {
       "type": "string",
-      "enum": ["bilingual", "translation"],
+      "enum": [
+        "bilingual",
+        "translation"
+      ],
       "maxLength": 2048,
       "pattern": "^[^\\r\\n\\u0000]*$"
     },
@@ -325,6 +337,98 @@
     },
     "syncEmbyProgress": {
       "type": "boolean"
+    },
+    "danmakuMergeDuplicates": {
+      "type": "boolean"
+    },
+    "danmakuHeatmap": {
+      "type": "boolean"
+    },
+    "nvidiaTrueHdr": {
+      "type": "boolean"
+    },
+    "autoHdr": {
+      "type": "boolean"
+    },
+    "subtitleAutoAvoidance": {
+      "type": "boolean"
+    },
+    "liveSubtitleTranslate": {
+      "type": "boolean"
+    },
+    "videoUpscaler": {
+      "type": "string",
+      "enum": [
+        "off",
+        "fsr1",
+        "rtx",
+        "anime4k"
+      ],
+      "maxLength": 2048,
+      "pattern": "^[^\\r\\n\\u0000]*$"
+    },
+    "frameInterpolation": {
+      "type": "string",
+      "enum": [
+        "off",
+        "rife",
+        "amf"
+      ],
+      "maxLength": 2048,
+      "pattern": "^[^\\r\\n\\u0000]*$"
+    },
+    "glslPreset": {
+      "type": "string",
+      "enum": [
+        "off",
+        "cas"
+      ],
+      "maxLength": 2048,
+      "pattern": "^[^\\r\\n\\u0000]*$"
+    },
+    "liveSubtitleModel": {
+      "type": "string",
+      "enum": [
+        "tiny",
+        "base"
+      ],
+      "maxLength": 2048,
+      "pattern": "^[^\\r\\n\\u0000]*$"
+    },
+    "liveSubtitleLanguage": {
+      "type": "string",
+      "enum": [
+        "auto",
+        "zh",
+        "en",
+        "ja",
+        "ko"
+      ],
+      "maxLength": 2048,
+      "pattern": "^[^\\r\\n\\u0000]*$"
+    },
+    "liveSubtitleDevice": {
+      "type": "string",
+      "enum": [
+        "auto",
+        "vulkan",
+        "cpu"
+      ],
+      "maxLength": 2048,
+      "pattern": "^[^\\r\\n\\u0000]*$"
+    },
+    "anime4kPreset": {
+      "type": "string",
+      "enum": [
+        "a",
+        "b",
+        "c",
+        "aa",
+        "bb",
+        "ca"
+      ],
+      "maxLength": 2048,
+      "pattern": "^[^\\r\\n\\u0000]*$"
     }
   }
 }

@@ -116,6 +116,26 @@ class MoviePilotGateway:
             item["seasons"] = (normalize({**data, "seasons": rows if isinstance(rows, list) else []}, source, kind) or item)["seasons"]
         return item
 
+    async def search(self, kind, page, query):
+        # MoviePilot's media search is metadata-only: it does not start an
+        # indexer/download search or create a subscription.
+        rows = await self.request("GET", "/media/search", params={"title": query, "type": "media", "page": page, "count": 30})
+        if not isinstance(rows, list):
+            raise TVError("MOVIEPILOT_INVALID_RESPONSE", "MoviePilot 搜索响应无效", 502)
+        items = []
+        for row in rows[:100]:
+            if not isinstance(row, dict):
+                continue
+            # The endpoint returns movies and TV together. A row without an
+            # explicit recognized type cannot safely inherit the active tab.
+            raw_kind = row.get("type") or row.get("media_type")
+            if not isinstance(raw_kind, str) or raw_kind not in {"电影", "movie", "Movie", "电视剧", "tv", "TV", "Series"}:
+                continue
+            item = normalize(row, "tmdb", kind) or normalize(row, "douban", kind)
+            if item:
+                items.append(item)
+        return {"items": items, "hasMore": len(rows) >= 30}
+
     async def find_subscription(self, item, season):
         # Do not send title/year: some versions fall back to approximate identity.
         seen_pages = set()
