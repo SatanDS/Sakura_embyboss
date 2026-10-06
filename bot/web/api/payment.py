@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field, StrictBool, StrictInt
 
 from bot import bot, config
 from bot import LOGGER
+from bot.func_helper.non_telegram_channel import public_channel
 owner = getattr(__import__('bot'), 'owner', 0)
 admins = getattr(__import__('bot'), 'admins', [])
 bot_name = getattr(__import__('bot'), 'bot_name', 'bot')
@@ -431,7 +432,16 @@ async def payment_products():
 
 @router.get("/shop", response_class=HTMLResponse)
 async def payment_shop():
-    return HTMLResponse(render_page("shop"))
+    return HTMLResponse(render_page("shop", {"manual_channel": public_channel(config)}))
+
+
+@router.get("/manual", response_class=HTMLResponse)
+async def manual_registration_page():
+    channel = public_channel(config)
+    if not channel["enabled"]:
+        raise HTTPException(status_code=404, detail="not_found")
+    # This public contact page needs neither payment credentials nor a login.
+    return HTMLResponse(render_page("manual", {"manual_channel": channel}))
 
 
 @router.get("/shop/orders/{order_id}", response_class=HTMLResponse)

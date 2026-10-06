@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>{{ page_title }} · {{ brand_name }}</title>
+  <link rel="icon" type="image/png" href="/payments/static/brand.png">
+  <link rel="stylesheet" href="/payments/static/payments.css">
+  <script src="/payments/static/theme.js"></script>
+</head>
+<body class="manual-page">
+  <a class="skip-link" href="#main">跳到主要内容</a>
+  <header class="manual-header">
+    <a class="brand" href="/payments/shop"><img src="/payments/static/brand.png" width="44" height="44" alt=""><span>{{ brand_name }}<small>会员中心</small></span></a>
+  </header>
+  <main id="main" class="manual-content" tabindex="-1">
+    <p class="eyebrow">{{ brand_name }} 会员服务</p>
+    <h1>{{ page_title }}</h1>
+    <p class="subtle">无需 Telegram 登录，请联系服主人工办理。</p>
+    <p class="manual-channel-copy">{{ manual_channel.notice }}</p>
+    <a id="manual-contact" class="button primary" href="{{ manual_channel.url }}" target="_blank" rel="noopener noreferrer">联系服主</a>
+    <p class="manual-back"><a href="/payments/shop">返回购买页面</a></p>
+  </main>
+</body>
+</html>

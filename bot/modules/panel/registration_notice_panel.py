@@ -7,18 +7,12 @@ from pyromod.helpers import ikb
 
 from bot import bot, config, save_config, LOGGER
 from bot.func_helper.filters import admins_on_filter
-from bot.func_helper.fix_bottons import registration_notice_buttons, registration_notice_ikb
+from bot.func_helper.fix_bottons import registration_notice_buttons
 from bot.func_helper.msg_utils import callAnswer, editMessage, sendMessage
 from bot.func_helper.registration_notice import get_registration_notice, validate_registration_notice
 
 
 _notice_editors = set()
-
-
-def _notice_buttons():
-    """Keep lightweight test fixtures and older imports compatible."""
-    builder = globals().get("registration_notice_buttons")
-    return builder() if callable(builder) else registration_notice_ikb
 
 
 def _can_edit_notice(call):
@@ -84,7 +78,7 @@ async def _edit_notice(call):
 
         # Preview as a text message: the configuration panel is a photo caption
         # and cannot display a full-length Telegram message.
-        preview = await sendMessage(call, value, buttons=_notice_buttons())
+        preview = await sendMessage(call, value, buttons=registration_notice_buttons())
         if preview is not True:
             return await editMessage(call, "预览发送失败，尚未保存。请检查文字格式后重试。",
                                      buttons=_notice_keyboard())
@@ -112,7 +106,7 @@ async def registration_notice_settings(_, call):
     if action == "edit":
         return await _edit_notice(call)
     if action == "preview":
-        return await sendMessage(call, get_registration_notice(config), buttons=_notice_buttons())
+        return await sendMessage(call, get_registration_notice(config), buttons=registration_notice_buttons())
     if action == "reset":
         return await editMessage(call, "确认将注册须知恢复为默认内容？", buttons=ikb([
             [("确认恢复", "registration_notice_reset_confirm"), ("取消", "registration_notice_panel")],

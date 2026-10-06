@@ -1,13 +1,13 @@
 """Owner/admin editor for the optional manual channel for non-Telegram users."""
 
 from pyrogram import enums, filters
+from pyrogram.types import ForceReply
 from pyromod.exceptions import ListenerTimeout
 from pyromod.helpers import ikb
 
 from bot import bot, config, save_config, LOGGER
 from bot.func_helper.filters import admins_on_filter
-from bot.func_helper.fix_bottons import back_config_p_ikb
-from bot.func_helper.msg_utils import callAnswer, callListen, editMessage
+from bot.func_helper.msg_utils import callAnswer, editMessage
 from bot.func_helper.non_telegram_channel import (
     DEFAULT_NOTICE,
     channel_enabled,
@@ -19,6 +19,19 @@ from bot.func_helper.non_telegram_channel import (
 
 
 _editors = set()
+
+
+def _can_edit_channel(call):
+    user = getattr(call, "from_user", None)
+    chat = getattr(getattr(call, "message", None), "chat", None)
+    return bool(user and chat and chat.id == user.id
+                and (user.id == config.owner or user.id in config.admins))
+
+
+def _shorten(text, units):
+    if len(text.encode("utf-16-le")) // 2 <= units:
+        return text
+    return text.encode("utf-16-le")[:(units - 1) * 2].decode("utf-16-le", errors="ignore") + "…"
 
 
 def _channel():
@@ -38,6 +51,7 @@ def _keyboard():
     return ikb([
         [(f"{state} 非 TG 用户通道", "non_tg_toggle")],
         [("修改通道链接", "non_tg_edit_url"), ("修改通道说明", "non_tg_edit_notice")],
+        [("查看完整说明", "non_tg_preview")],
         [("恢复默认说明", "non_tg_reset_notice")],
         [("🔙 返回设置", "back_config")],
     ])
@@ -49,10 +63,9 @@ def _text():
     return (
         "🆘 非 TG 用户通道\n\n"
         f"状态：{status}\n"
-        f"链接：{channel_url(config) or '未设置'}\n\n"
-        f"说明：{channel_notice(config)}\n\n"
-        "此通道只用于人工办理账号或续期。它不会把 Emby 密码转换成 Telegram 身份，"
-        "也不会开放 Bot 群组、积分和管理员功能。"
+        f"链接：{_shorten(channel_url(config) or '未设置', 200)}\n\n"
+        f"说明：{_shorten(channel_notice(config), 500)}\n\n"
+        "此通道用于联系服主人工办理账号或续期。点击「查看完整说明」可预览全文。"
     )
 
 
@@ -74,24 +87,40 @@ async def _edit_value(call, field):
         return await editMessage(call, "已有编辑请求，请回复之前的提示，或发送 /cancel 取消。", buttons=_keyboard())
     _editors.add(actor_id)
     try:
-        prompt = "请输入 HTTPS 通道链接（例如 https://t.me/xxx），输入 /cancel 取消。" if field == "url" else (
+        previous = _channel().model_copy(deep=True)
+        prompt = ("请输入 HTTPS 通道链接（例如 https://support.example.com/emby）。"
+                  "请使用无需 Telegram 也能联系到你的页面，输入 /cancel 取消。") if field == "url" else (
             "请输入给非 TG 用户看的通道说明，输入 /cancel 取消。")
-        await editMessage(call, prompt, buttons=_keyboard())
-        message = await callListen(call, 120, buttons=_keyboard())
-        if message is False:
-            return
+        prompt_message = await call.message.reply(
+            prompt, quote=False, reply_markup=ForceReply(selective=True),
+            parse_mode=enums.ParseMode.DISABLED,
+        )
+
+        async def matches_reply(_, __, message):
+            return bool(message.text and (
+                message.text.strip() == "/cancel"
+                or getattr(message, "reply_to_message_id", None) == prompt_message.id))
+
+        message = await call.message.chat.listen(
+            filters=filters.create(matches_reply), user_id=actor_id,
+            timeout=120, unallowed_click_alert=False,
+        )
+        if not _can_edit_channel(call) or getattr(getattr(message, "from_user", None), "id", None) != actor_id:
+            return await call.message.reply("管理权限已变更，当前配置未改变。", parse_mode=enums.ParseMode.DISABLED)
         value = (message.text or "").strip()
-        await message.delete()
         if value == "/cancel":
             return await editMessage(call, "已取消修改。", buttons=_keyboard())
         try:
             value = validate_channel_url(value) if field == "url" else validate_channel_notice(value)
         except ValueError as exc:
             return await editMessage(call, str(exc), buttons=_keyboard())
-        channel = _channel().model_copy(deep=True)
+        if _channel() != previous:
+            return await editMessage(call, "通道已被其他操作修改，请查看最新设置后重新编辑。", buttons=_keyboard())
+        channel = previous.model_copy(deep=True)
         setattr(channel, field, value)
         if _save(channel, actor_id):
-            return await editMessage(call, "✅ 已保存，修改立即生效。\n\n" + _text(), buttons=_keyboard())
+            return await editMessage(call, "✅ 已保存，修改立即生效。\n\n" + _text(), buttons=_keyboard(),
+                                     parse_mode=enums.ParseMode.DISABLED)
         return await editMessage(call, "保存失败，当前配置未改变。", buttons=_keyboard())
     except ListenerTimeout:
         return await editMessage(call, "编辑已超时，当前配置未改变。", buttons=_keyboard())
@@ -101,14 +130,22 @@ async def _edit_value(call, field):
 
 @bot.on_callback_query(filters.regex(r"^non_telegram_channel_panel$") & admins_on_filter)
 async def non_telegram_channel_panel(_, call):
+    if not _can_edit_channel(call):
+        return await callAnswer(call, "请由管理员在 Bot 私聊中配置此通道。", True)
     await callAnswer(call, "非 TG 用户通道")
     return await editMessage(call, _text(), buttons=_keyboard(), parse_mode=enums.ParseMode.DISABLED)
 
 
-@bot.on_callback_query(filters.regex(r"^non_tg_(toggle|edit_url|edit_notice|reset_notice)$") & admins_on_filter)
+@bot.on_callback_query(filters.regex(r"^non_tg_(toggle|edit_url|edit_notice|reset_notice|preview)$") & admins_on_filter)
 async def non_telegram_channel_action(_, call):
+    if not _can_edit_channel(call):
+        return await callAnswer(call, "请由管理员在 Bot 私聊中配置此通道。", True)
     action = call.data.removeprefix("non_tg_")
     await callAnswer(call, "非 TG 用户通道")
+    if action == "preview":
+        return await call.message.reply(channel_notice(config), quote=False,
+                                        parse_mode=enums.ParseMode.DISABLED,
+                                        disable_web_page_preview=True)
     if action == "edit_url":
         return await _edit_value(call, "url")
     if action == "edit_notice":

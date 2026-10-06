@@ -123,7 +123,8 @@ class PaymentHTTPTests(unittest.IsolatedAsyncioTestCase):
         sys.modules["bot"].admins = [1002]
         sys.modules["bot"].bot_name = "test_login_bot"
         sys.modules["bot.sql_helper"].Session = self.sessions
-        for name, path in (("bot.web", "bot/web"), ("bot.web.api", "bot/web/api")):
+        for name, path in (("bot.web", "bot/web"), ("bot.web.api", "bot/web/api"),
+                           ("bot.func_helper", "bot/func_helper")):
             package = types.ModuleType(name)
             package.__path__ = [str(ROOT / path)]
             sys.modules[name] = package
@@ -252,7 +253,9 @@ class PaymentHTTPTests(unittest.IsolatedAsyncioTestCase):
                     else:
                         self.cookies.pop(name, None)
         payload = b"".join(message.get("body", b"") for message in sent if message["type"] == "http.response.body")
-        return start["status"], json.loads(payload), start["headers"]
+        content_type = dict(start["headers"]).get(b"content-type", b"")
+        data = json.loads(payload) if b"application/json" in content_type else payload.decode()
+        return start["status"], data, start["headers"]
 
     async def login(self, user=1001):
         challenge = await self.begin_bot_login(user)
@@ -267,6 +270,49 @@ class PaymentHTTPTests(unittest.IsolatedAsyncioTestCase):
         status, identity, _ = await self.request("/payments/me")
         self.assertEqual(status, 200)
         return identity["csrf_token"]
+
+    async def test_manual_channel_is_public_without_payment_or_database_dependencies(self):
+        self.api.config.non_telegram_channel = types.SimpleNamespace(
+            enabled=True, url="https://support.test/contact?kind=emby&source=manual",
+            notice='联系服主\n<script>alert("unsafe")</script>',
+        )
+        with patch.object(self.api, "_service", side_effect=AssertionError("No database needed")), \
+             patch.object(self.api, "_settings", side_effect=AssertionError("No payment config needed")), \
+             patch.object(self.api, "_auth", side_effect=AssertionError("No login needed")):
+            status, page, headers = await self.request("/payments/manual", cookies={})
+            self.assertEqual(status, 200)
+            self.assertIn("人工注册与续期", page)
+            self.assertIn("&lt;script&gt;", page)
+            self.assertNotIn('<script>alert(', page)
+            self.assertIn('href="https://support.test/contact?kind=emby&amp;source=manual"', page)
+            self.assertNotIn("/payments/static/payments.js", page)
+            self.assertNotIn('id="login-button"', page)
+            self.assertIn((b"cache-control", b"no-store"), headers)
+            self.assertIn((b"x-content-type-options", b"nosniff"), headers)
+            self.assertFalse(any(key == b"set-cookie" for key, _ in headers))
+            status, shop, _ = await self.request("/payments/shop", cookies={})
+            self.assertEqual(status, 200)
+            self.assertIn('href="/payments/manual"', shop)
+            self.assertLess(shop.index('id="manual-channel"'), shop.index('id="shop-view"'))
+        self.api.bot.get_users.assert_not_called()
+
+    async def test_manual_channel_enable_disable_and_invalid_url_are_immediate(self):
+        status, _, _ = await self.request("/payments/manual")
+        self.assertEqual(status, 404)
+        channel = types.SimpleNamespace(enabled=True, url="https://support.test/contact", notice="客服说明")
+        self.api.config.non_telegram_channel = channel
+        self.assertEqual((await self.request("/payments/manual"))[0], 200)
+        channel.enabled = False
+        status, data, _ = await self.request("/payments/manual")
+        self.assertEqual((status, data), (404, {"detail": "not_found"}))
+        status, page, _ = await self.request("/payments/shop")
+        self.assertEqual(status, 200)
+        self.assertNotIn('id="manual-channel"', page)
+        self.assertNotIn("support.test/contact", page)
+        channel.enabled = True
+        for value in ("javascript:alert(1)", "https://support.test:99999", "https://support.test\\@evil.test"):
+            channel.url = value
+            self.assertEqual((await self.request("/payments/manual"))[0], 404)
 
     async def test_bot_preserves_urlsafe_token_characters(self):
         for edge in ("_", "-"):

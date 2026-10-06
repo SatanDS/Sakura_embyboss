@@ -59,6 +59,16 @@ class PaymentUITests(unittest.TestCase):
         self.assertIn('当前暂停新订单', self.javascript)
         self.assertIn('可以联系服主手动发码', self.javascript)
 
+    def test_manual_contact_page_works_without_javascript_or_telegram_login(self):
+        page = self.pages.render_page("manual", {"manual_channel": {
+            "enabled": True, "url": "https://support.test/contact", "notice": "请联系服主\n人工办理。",
+        }})
+        self.assertIn("请联系服主\n人工办理。", page)
+        self.assertIn('href="https://support.test/contact"', page)
+        self.assertNotIn("payments.js", page)
+        self.assertNotIn("login-dialog", page)
+        self.assertNotIn("noscript", page)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
