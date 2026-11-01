@@ -160,6 +160,7 @@ class AccountLifecycleTests(unittest.IsolatedAsyncioTestCase):
                          FloodWait=type('FloodWait', (Exception,), {}), sleep=asyncio.sleep,
                          get_all_emby2=lambda condition: [], sql_update_emby2=Mock(),
                          _managed_or_none=lambda tg: None,
+                         remind_expiring_accounts=AsyncMock(),
                          cleanup_expired_douban_binding=AsyncMock(return_value=True),
                          Emby2=self.emby_model)
         # The final non-Telegram query uses expired; its empty result is stubbed.

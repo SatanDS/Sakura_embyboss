@@ -23,6 +23,7 @@ class Emby(Base):
     lv = Column(String(1), default='d')
     cr = Column(DateTime, nullable=True)
     ex = Column(DateTime, nullable=True)
+    expiry_reminded_for = Column(DateTime, nullable=True)
     disabled_at = Column(DateTime, nullable=True)
     us = Column(Integer, default=0)
     iv = Column(Integer, default=0)

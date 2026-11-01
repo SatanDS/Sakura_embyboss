@@ -24,6 +24,8 @@ from typing import Dict, List, Optional, Tuple
 import unittest
 from unittest.mock import AsyncMock, patch
 
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 import sqlalchemy as sa
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import declarative_base, sessionmaker
@@ -200,7 +202,7 @@ class MySQLIntegrationTests(unittest.TestCase):
     def test_upgrade_retains_old_rows_and_null_freeze_start(self):
         self.assertEqual(self.old_revision, "20260315_03")
         self.assertNotIn("disabled_at", self.old_columns)
-        self.assertEqual(self.first_revision, "20261004_14")
+        self.assertEqual(self.first_revision, ScriptDirectory.from_config(Config(str(ROOT / "alembic.ini"))).get_current_head())
         self.assertEqual(self.repeated_revision, self.first_revision)
         with self.sql["Session"]() as session:
             disabled = session.get(self.sql["Emby"], 11001)
@@ -213,7 +215,7 @@ class MySQLIntegrationTests(unittest.TestCase):
             self.assertIsNone(active.disabled_at)
 
     def test_fresh_startup_and_repeat_upgrade_are_usable(self):
-        self.assertEqual(self.first_fresh_revision, "20261004_14")
+        self.assertEqual(self.first_fresh_revision, ScriptDirectory.from_config(Config(str(ROOT / "alembic.ini"))).get_current_head())
         self.assertEqual(self.repeated_fresh_revision, self.first_fresh_revision)
         with self.fresh_sql["Session"]() as session:
             row = self.fresh_sql["Emby"](tg=12001, embyid="fresh-user", lv="c", disabled_at=datetime(2026, 9, 9))

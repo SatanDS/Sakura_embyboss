@@ -13,6 +13,7 @@ from bot.func_helper.utils import tem_deluser
 from bot.sql_helper.sql_emby import Emby, get_all_emby, sql_update_emby, sql_managed_entitlement
 from bot.sql_helper.sql_emby2 import get_all_emby2, Emby2, sql_update_emby2
 from bot.func_helper.moviepilot import cleanup_expired_douban_binding
+from bot.scheduler.expiry_reminder import remind_expiring_accounts
 
 
 def _managed_or_none(tg):
@@ -82,6 +83,7 @@ async def reconcile_managed_accounts():
 
 
 async def check_expired():
+    await remind_expiring_accounts()
     # Older isolated runners load this function without helper definitions.
     if 'reconcile_managed_accounts' in globals():
         await reconcile_managed_accounts()
