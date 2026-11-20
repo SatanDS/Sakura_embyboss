@@ -454,6 +454,210 @@ class DesktopTests(unittest.TestCase):
             db.get(ent.AccountEntitlement, 42).blocked_reason = "admin"
         self.error("ACCOUNT_DISABLED", self.auth.session, tokens["accessToken"])
 
+    def test_watch_websocket_validates_device_and_revocation_and_uses_private_ids(self):
+        with self.client:
+            self.assert_watch_socket_lifecycle()
+
+    def assert_watch_socket_lifecycle(self):
+        path = "/api/dushengtv/v1/watch/rooms"
+        media = {"itemId": "23", "mediaSourceId": "source-2"}
+        self.assertEqual(self.client.post(path, json={"media": media}).status_code, 401)
+        host = self.login()
+        guest = self.login(43, "another-installation-1234")
+        h = {"Authorization": "Bearer " + host["accessToken"]}
+        g = {"Authorization": "Bearer " + guest["accessToken"]}
+        self.assertTrue(self.client.get(self.m.service.PREFIX + "/session", headers=h).json()["watchRooms"])
+        room = self.client.post(path, headers=h, json={"media": media, "position": 25}).json()
+        self.assertRegex(room["code"], r"^[A-Z2-9]{8}$")
+        base = f"{path}/{room['code']}"
+        with self.client.websocket_connect(base + "/socket", headers=g) as stranger:
+            self.assertEqual(stranger.receive_json()["type"], "closed")
+        self.assertEqual(self.client.post(base + "/join", headers=g, json={}).status_code, 200)
+        with self.client.websocket_connect(base + "/socket", headers=h) as host_ws:
+            snapshot = host_ws.receive_json()["room"]
+            self.assertEqual(snapshot["selfId"], room["selfId"])
+            self.assertEqual(snapshot["members"][0]["name"], "Viewer")
+            self.assertNotIn("telegramId", str(snapshot))
+            host_ws.send_json({"type": "ping", "sentAt": 123})
+            self.assertEqual(host_ws.receive_json()["sentAt"], 123)
+            host_ws.send_json({"type": "status", "status": "ready", "media": media})
+            revision = host_ws.receive_json()["room"]["revision"]
+            with self.client.websocket_connect(base + "/socket", headers=g) as guest_ws:
+                guest_ws.receive_json()
+                host_ws.receive_json()
+                guest_ws.send_json({"type": "status", "media": media, "status": "ready"})
+                guest_ws.receive_json()
+                host_ws.receive_json()
+                host = self.auth.refresh({"refreshToken": host["refreshToken"], "installationId": self.installation})
+                host_ws.send_json({"type": "intent", "action": "play", "revision": revision})
+                playing = host_ws.receive_json()["room"]
+                self.assertEqual(playing["state"], "playing")
+                self.assertEqual(playing["revision"], guest_ws.receive_json()["room"]["revision"])
+                self.auth.logout(host["accessToken"])
+                host_ws.send_json({"type": "intent", "action": "pause", "revision": playing["revision"]})
+                self.assertEqual(host_ws.receive_json()["type"], "closed")
+                self.assertEqual(guest_ws.receive_json()["type"], "closed")
+        self.assertEqual(self.client.post(base + "/join", headers=g, json={}).status_code, 404)
+
+    def test_watch_room_buffering_permissions_switch_and_reconnect(self):
+        from bot.dushengtv.watch import WatchRooms, TVError
+
+        now = [100_000]
+        manager = WatchRooms(lambda: now[0])
+        media = {"itemId": "123", "mediaSourceId": "m1"}
+        first = {"device": "a", "name": "Host"}
+        second = {"device": "b", "name": "Guest"}
+        code = manager.create(first, {"media": media, "position": 100})["code"]
+        room = manager.room(code)
+        manager.join(code, second)
+        host, guest = room.members.values()
+        manager.connect(room, host)
+        manager.connect(room, guest)
+
+        def intent(actor, action, **values):
+            room.intent(actor, {"revision": room.revision, "action": action, **values}, now[0])
+
+        def status(actor, value):
+            room.status(actor, {"media": room.media, "status": value}, now[0])
+
+        status(host, "ready")
+        with self.assertRaises(TVError):
+            intent(host, "play")
+        status(guest, "ready")
+        with self.assertRaises(TVError):
+            intent(guest, "play")
+        intent(host, "play")
+        self.assertEqual(room.at, now[0] + 500)
+        status(guest, "buffering")
+        now[0] += 2999
+        manager.tick()
+        self.assertEqual(room.state, "playing")
+        now[0] += 1
+        manager.tick()
+        self.assertEqual(room.state, "waiting")
+        self.assertEqual(room.position, 102.5)
+        intent(guest, "pause")
+        status(guest, "ready")
+        self.assertEqual(room.state, "paused")
+        with self.assertRaises(TVError):
+            intent(guest, "seek", position=200)
+        intent(host, "seek", position=200)
+        self.assertEqual(room.paused_by, guest.id)
+        intent(guest, "play")
+        status(guest, "buffering")
+        now[0] += 3000
+        manager.tick()
+        intent(host, "continue")
+        manager.tick()
+        self.assertEqual(room.state, "playing")
+        self.assertEqual(guest.presence(True)["status"], "catchingUp")
+        intent(host, "switch", media={"itemId": "234", "mediaSourceId": "m2"})
+        status(host, "ready")
+        room.status(guest, {"media": media, "status": "ready"}, now[0])
+        self.assertEqual(room.state, "waiting")
+        status(guest, "ready")
+        self.assertEqual(room.state, "playing")
+        old_queue = host.queue
+        manager.disconnect(room, host, old_queue)
+        self.assertEqual(room.state, "waiting")
+        now[0] += 59999
+        manager.tick()
+        manager.connect(room, host)
+        manager.disconnect(room, host, old_queue)
+        status(host, "ready")
+        self.assertEqual(room.state, "playing")
+        manager.disconnect(room, host, host.queue)
+        now[0] += 60000
+        manager.tick()
+        self.assertFalse(manager.rooms)
+        self.assertFalse(manager.devices)
+
+    def test_watch_staggered_buffering_updates_all_connections_once(self):
+        from bot.dushengtv.watch import WatchRooms
+
+        now = [10000]
+        rooms = WatchRooms(lambda: now[0])
+        media = {"itemId": "movie", "mediaSourceId": "version"}
+        host = {"device": "host", "name": "Host"}
+        room = rooms.room(rooms.create(host, {"media": media})["code"])
+        for name in ("A", "B"):
+            rooms.join(room.code, {"device": name, "name": name})
+        host, a, b = room.members.values()
+        for member in (host, a, b):
+            rooms.connect(room, member)
+            room.status(member, {"media": media, "status": "ready"}, now[0])
+        room.intent(host, {"action": "play", "revision": room.revision}, now[0])
+        room.status(a, {"media": media, "status": "buffering"}, now[0])
+        now[0] += 3000
+        rooms.tick()
+        self.assertEqual(room.state, "waiting")
+        revision = room.revision
+        now[0] += 2000
+        room.status(b, {"media": media, "status": "buffering"}, now[0])
+        for member in (host, a, b):
+            while not member.queue.empty():
+                snapshot = member.queue.get_nowait()["room"]
+            self.assertEqual(snapshot["waitingFor"], [a.id])
+        now[0] += 2999
+        rooms.tick()
+        self.assertTrue(all(m.queue.empty() for m in (host, a, b)))
+        now[0] += 1
+        rooms.tick()
+        rooms.tick()
+        for member in (host, a, b):
+            self.assertEqual(member.queue.qsize(), 1)
+            snapshot = member.queue.get_nowait()["room"]
+            self.assertEqual(snapshot["waitingFor"], [a.id, b.id])
+            self.assertEqual(snapshot["revision"], revision)
+            self.assertEqual(snapshot["state"], "waiting")
+            self.assertEqual([m["status"] for m in snapshot["members"]], ["ready", "buffering", "buffering"])
+
+    def test_watch_late_join_capacity_and_stale_revisions(self):
+        from bot.dushengtv.watch import WatchRooms, TVError
+
+        manager = WatchRooms(lambda: 10000)
+        media = {"itemId": "movie", "mediaSourceId": "version"}
+        host = {"device": "host", "name": "Host"}
+        with self.assertRaises(TVError):
+            manager.create(host, {"media": {**media, "url": "private"}})
+        room = manager.room(manager.create(host, {"media": media})["code"])
+        member = manager.member(room, host)
+        manager.connect(room, member)
+        room.status(member, {"media": media, "status": "ready"}, 10000)
+        initial = room.revision
+        room.intent(member, {"action": "play", "revision": initial}, 10000)
+        with self.assertRaises(TVError):
+            room.intent(member, {"action": "seek", "position": 200, "revision": initial}, 10000)
+        for i in range(7):
+            identity = {"device": str(i), "name": "Peer"}
+            manager.join(room.code, identity)
+            peer = manager.member(room, identity)
+            manager.connect(room, peer)
+        manager.tick()
+        self.assertEqual(room.state, "playing")
+        self.assertEqual(room.waiting(10000), [])
+        self.assertEqual(peer.presence(True)["status"], "catchingUp")
+        with self.assertRaises(TVError):
+            manager.join(room.code, {"device": "extra", "name": "Extra"})
+        with self.assertRaises(TVError):
+            manager.create(host, {"media": media})
+
+    def test_watch_idle_socket_detects_device_revocation(self):
+        from bot.dushengtv import watch_api
+
+        path = self.m.service.PREFIX + "/watch/rooms"
+        auth = self.login()["accessToken"]
+        headers = {"Authorization": "Bearer " + auth}
+        media = {"itemId": "16", "mediaSourceId": "v1"}
+        with self.client, patch.object(watch_api, "SESSION_CHECK_SECONDS", 0.05):
+            code = self.client.post(path, json={"media": media}, headers=headers).json()["code"]
+            with self.client.websocket_connect(path + f"/{code}/socket", headers=headers) as ws:
+                self.assertEqual(ws.receive_json()["type"], "snapshot")
+                device = self.auth.devices(auth)["devices"][0]["id"]
+                self.auth.revoke(auth, device)
+                self.assertEqual(ws.receive_json()["type"], "closed")
+            self.assertFalse(self.client.app.state.watch.rooms)
+
     def test_bound_user_change_invalidates_existing_session(self):
         token = self.login()["accessToken"]
         with self.sessions.begin() as db:

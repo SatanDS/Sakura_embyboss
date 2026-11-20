@@ -4,12 +4,17 @@ from fastapi import FastAPI
 
 from .api import router
 from .requests_api import router as requests_router
+from .watch import WatchRooms
+from .watch_api import router as watch_router
 
 
 def create_app():
     app = FastAPI(title="DuShengTV API", docs_url=None, redoc_url=None, openapi_url=None)
     app.include_router(router)
     app.include_router(requests_router)
+    app.state.watch = WatchRooms()
+    app.include_router(watch_router)
+
     return app
 
 
@@ -33,7 +38,8 @@ async def start():
         from .runtime import settings
         settings()
         server = TVServer(uvicorn.Config(create_app(), host=cfg.http_host, port=cfg.http_port,
-                                               proxy_headers=False, access_log=False, log_level="warning"))
+                                               proxy_headers=False, access_log=False, log_level="warning",
+                                               ws="websockets", ws_max_size=2048, ws_ping_interval=10, ws_ping_timeout=10))
         # Pyrogram owns process signal handling and the event loop.
         server.install_signal_handlers = lambda: None
         LOGGER.info(f"DuShengTV 独立 API 启动：{cfg.http_host}:{cfg.http_port}")

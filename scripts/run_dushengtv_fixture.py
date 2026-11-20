@@ -1,8 +1,11 @@
 """Loopback-only fixture for the Electron/Node client integration test."""
 
 import json
+import os
+import re
 import socket
 from datetime import datetime
+from urllib.parse import parse_qs, urlsplit
 
 import uvicorn
 from fastapi import Request
@@ -24,6 +27,26 @@ def main():
     fixture.patches[1] = patch.object(fixture.m.api.runtime, "settings", return_value=(fixture.settings, base, "example_bot"))
     fixture.patches[1].start()
     fixture.m.api.emby_identity = __import__("unittest.mock", fromlist=["AsyncMock"]).AsyncMock(return_value="emby-42")
+    media_url = os.environ.get("DUSHENGTV_FIXTURE_EMBY")
+    if media_url:
+        if not re.fullmatch(r"http://127\.0\.0\.1:[0-9]+", media_url):
+            raise ValueError("Expected loopback media fixture")
+        fixture.settings.server_urls = [media_url, media_url + "/alternate"]
+        viewers = iter([42, 43])
+        start = fixture.auth.start
+
+        def confirm_test_viewer(*args, **kwargs):
+            challenge = start(*args, **kwargs)
+            viewer = next(viewers)
+            link = parse_qs(urlsplit(challenge["authorizationUrl"]).query)["request"][0]
+            fixture.auth.prepare(link, viewer, f"Fixture viewer {viewer}", f"fixture{viewer}")
+            fixture.auth.decide(challenge["challengeId"], viewer, True)
+            return challenge
+
+        fixture.auth.start = confirm_test_viewer
+        async def fixture_identity(origin, token):
+            return {"fixture-42": "emby-42", "fixture-43": "emby-43"}.get(token)
+        fixture.m.api.emby_identity = fixture_identity
     app = fixture.m.server.create_app()
 
     @app.post("/_fixture/decision")
@@ -32,9 +55,10 @@ def main():
         if data.get("unbound"):
             with fixture.sessions.begin() as db:
                 db.get(fixture.m.User, 42).embyid = None
-        prepared = fixture.auth.prepare(data["link"], 42, "Fixture viewer", "fixture")
+        tg = 43 if data.get("viewer") == 43 else 42
+        prepared = fixture.auth.prepare(data["link"], tg, f"Fixture viewer {tg}", f"fixture{tg}")
         if not data.get("prepareOnly"):
-            fixture.auth.decide(prepared["id"], 42, data.get("approve", True))
+            fixture.auth.decide(prepared["id"], tg, data.get("approve", True))
         return {"ok": True}
 
     @app.on_event("startup")

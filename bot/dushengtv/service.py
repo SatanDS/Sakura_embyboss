@@ -189,7 +189,7 @@ class DesktopAuth:
     def session(self, token):
         with self.sessions.begin() as db:
             session, device = self._identity(db, token, require_device=False)
-            return {"authProvider": "telegram", "bound": True, "allowed": True,
+            return {"authProvider": "telegram", "bound": True, "allowed": True, "watchRooms": device is not None,
                     "user": {"telegramId": str(session.tg), "displayName": session.display_name, "username": session.username},
                     "device": {"installationId": session.installation_id, "allowed": device is not None},
                     "maxDevices": self.max_devices}
@@ -383,3 +383,19 @@ class DesktopAuth:
         with self.sessions.begin() as db:
             session, _ = self._identity(db, token)
             return {"telegramId": str(session.tg), "embyUserId": session.emby_user_id}
+
+    def watch_identity(self, token):
+        with self.sessions.begin() as db:
+            session, device = self._identity(db, token)
+            return {"session": session.id, "device": device.id, "account": str(session.tg),
+                    "name": session.display_name[:64]}
+
+    def check_watch_session(self, session_id):
+        # A connected socket survives access-token rotation but not logout or revocation.
+        with self.sessions.begin() as db:
+            session = db.get(DesktopSession, session_id)
+            if session is not None:
+                self.account_lookup(db, session.tg)
+                session = (db.query(DesktopSession).filter_by(id=session_id)
+                           .populate_existing().with_for_update().one_or_none())
+            self._live(db, session)

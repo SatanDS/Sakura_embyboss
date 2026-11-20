@@ -129,10 +129,21 @@ TV 登出／撤销时立即清理画面中的服务器、媒体卡片、详情�
 | GET / DELETE | `/devices` / `/devices/{id}` | 查看／撤销当前用户设备 |
 | GET / POST | `/settings/cloud` | 读取／保存当前 TG 账号的可迁移设置备份 |
 | POST | `/servers/authorize` | 白名单地址、Emby 用户 ID 与用户 token 对应校验 |
+| POST | `/watch/rooms` | 以当前影片、版本和位置创建一起看房间 |
+| POST | `/watch/rooms/{code}/join`、`/watch/rooms/{code}/leave` | 加入、退出或由房主解散 |
+| WebSocket | `/watch/rooms/{code}/socket` | 用 TV Bearer 连接，收发状态快照、成员就绪状态、播放操作和时钟消息 |
 
 `authProvider: telegram` 表示身份来自受信任的 Telegram Bot 更新，不是客户端自报的 Telegram ID，也不声称使用 Telegram OIDC。身份确认与支付网页登录各用自己的协议和数据表。
 
 账号云端设置的更新步骤与恢复行为见 [DUSHENGTV_CLOUD_SETTINGS.md](DUSHENGTV_CLOUD_SETTINGS.md)。
+
+### 部署一起看
+
+更新 Bot 和 `requirements.txt` 的依赖后重启现有 DuShengTV 独立监听器。房间保存在进程内，使用单个 TV 进程，无需数据库迁移。重启后正在观看的房间失效，房主可重新建房。客户端仅在本机使用各自的 Emby 凭据和线路取流。房间服务接收影片和版本 ID、播放位置和成员状态。
+
+公网部署在既有 TV HTTPS 域名上使用同源 WSS。使用 Nginx 时，将 [TV 站点配置](../nginx/dushengtv.conf) 的 `map` 放在 `http` 上下文，并在 TV 接口 location 转发 WebSocket Upgrade，执行 `nginx -t` 后重载。既有 [Caddy 配置](../caddy/dushengtv.caddyfile) 的 `reverse_proxy` 支持 WebSocket。如有 CDN，启用 WebSocket 转发，并确保链路允许 `Authorization` 请求头、禁用房间路径缓存和访问日志。
+
+部署后用两个已登记的 DuShengTV 账号连接同一服同一影片。房主建房，另一人输入八位房间码，验证两端成员就绪、房主开播、客人暂停与恢复，然后房主解散，双方应收到结束事件。断开房主连接会暂停房间，60 秒内可以重连，超时房间自动解散。
 
 ```sh
 python -m pip install -r requirements-test.txt
