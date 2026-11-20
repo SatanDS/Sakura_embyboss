@@ -633,6 +633,13 @@ docker compose exec -T embyboss python3 -B - < scripts/audit_unban_state.py
 
 腳本不匯入 Bot、不啟動資料庫遷移、不改帳戶，只查資料庫及讀取 Emby 使用者。報告列出待核對帳戶、兩邊狀態、權益期間與最近舊碼兌換記錄，不輸出密碼或完整碼。結合當次解封名單、已兌換紀錄和操作前備份逐一恢復；只讀報告不能證明原封禁原因，也無法還原沒有快照的個別 Emby 策略。
 
+核對完成後可用 `scripts/recover_unban.py` 執行定向恢復，從標準輸入讀取已核准的 JSON 計畫；計畫以精確 Emby ID 限定恢復續期、重新停用的到期帳戶及人工確認需停用的未登記帳戶。不要直接把所有待核查項目列為停用目標。預設只預覽，增加 `--apply` 才會寫入；執行前會在設定的 `db_backup_dir` 保存權限為 600 的現狀備份，備份失敗即中止。修復已兌換續期時會重查原始已用碼，以原兌換時間和天數補回期間，重跑不會再加一次天數；若已新增續期、出現其他封禁或身分不一致，則跳過或拒絕該項。Emby 部分只切換最新策略中的 `IsDisabled`，不套用預設播放策略。這份備份保留的是恢復操作前的當前策略，無法取代誤操作前的歷史策略備份。
+
+~~~bash
+python3 scripts/recover_unban.py < recovery-plan.json
+python3 scripts/recover_unban.py --apply < recovery-plan.json
+~~~
+
 ## 13. MoviePilot v2 豆瓣想看
 
 Bot 現在支援讓已註冊的 Emby 使用者從 Telegram 提交豆瓣使用者 ID，並自動寫入 MoviePilot v2 的 `DoubanSync` 插件使用者列表。
