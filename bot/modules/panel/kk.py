@@ -86,7 +86,7 @@ async def kk_user_ban(_, call):
                 LOGGER.error(text)
         elif e.lv == "c":
             if await emby.emby_change_policy(emby_id=e.embyid):
-                if sql_update_emby(Emby.tg == b, lv='b'):
+                if sql_update_emby(Emby.tg == b, lv='b', entitlement_unblock=True):
                     text += '解禁完成'
                     LOGGER.info(text)
                 else:

@@ -184,7 +184,7 @@ async def uinfo_enable_cb(_, call):
         if stats:
             sql_update_emby2(Emby2.embyid == embyid, lv='b')
         else:
-            sql_update_emby(Emby.embyid == embyid, lv='b')
+            sql_update_emby(Emby.embyid == embyid, lv='b', entitlement_unblock=True)
         await call.message.edit_reply_markup(reply_markup=uinfo_ikb(embyid, 'b'))
         await callAnswer(call, f"✅ 账户 {e.name} 已启用", show_alert=True)
         LOGGER.info(f"【uinfo】管理员通过 uinfo 启用了账户 {e.name}[{embyid}]")

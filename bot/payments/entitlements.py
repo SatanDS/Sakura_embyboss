@@ -393,6 +393,12 @@ def append_days(session, user, days, source_key, now=None, tier=None):
     tail = _tail(session, user, now)
     starts = tail.ends_at if tail else now
     chosen_tier = tier or (tail.tier if tail else ("vip" if user.lv == "a" else "normal"))
+    if tier is None and tail is None and state.blocked_reason == "expiry":
+        expired = [p for p in _periods(session, user.tg)
+                   if p.kind != "adjustment" and p.starts_at < p.ends_at <= now]
+        if expired:
+            # Expiry replaces lv with c; retain the tier of the last paid period.
+            chosen_tier = max(expired, key=lambda p: (p.ends_at, p.id)).tier
     period = AccountPeriod(tg=user.tg, starts_at=starts, ends_at=starts + timedelta(days=days),
                            tier=chosen_tier, source_key=source_key, kind="legacy", adjustment_days=days)
     session.add(period)
