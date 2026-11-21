@@ -480,6 +480,11 @@ class DesktopTests(unittest.TestCase):
             self.assertNotIn("telegramId", str(snapshot))
             host_ws.send_json({"type": "ping", "sentAt": 123})
             self.assertEqual(host_ws.receive_json()["sentAt"], 123)
+            host_ws.send_json({"type": "chat.send", "clientMessageId": "hello-1", "text": "hello"})
+            chat = host_ws.receive_json()
+            self.assertEqual(chat["type"], "chat.message")
+            self.assertEqual(chat["message"]["text"], "hello")
+            self.assertEqual(self.client.get(base + "/chat", headers=h).json()["messages"][0]["text"], "hello")
             host_ws.send_json({"type": "status", "status": "ready", "media": media})
             revision = host_ws.receive_json()["room"]["revision"]
             with self.client.websocket_connect(base + "/socket", headers=g) as guest_ws:
@@ -571,6 +576,38 @@ class DesktopTests(unittest.TestCase):
         manager.tick()
         self.assertFalse(manager.rooms)
         self.assertFalse(manager.devices)
+
+    def test_watch_room_chat_is_bounded_deduplicated_and_private(self):
+        from bot.dushengtv.watch import WatchRooms, TVError
+
+        rooms = WatchRooms(lambda: 10000)
+        media = {"itemId": "movie", "mediaSourceId": "version"}
+        host = {"device": "host", "name": "Host"}
+        guest = {"device": "guest", "name": "Guest"}
+        code = rooms.create(host, {"media": media})["code"]
+        rooms.join(code, guest)
+        room = rooms.room(code)
+        host_member, guest_member = room.members.values()
+        rooms.connect(room, host_member)
+        rooms.connect(room, guest_member)
+        for member in (host_member, guest_member):
+            while not member.queue.empty():
+                member.queue.get_nowait()
+        room.chat(host_member, {"type": "chat.send", "clientMessageId": "one", "text": "hello"}, 10000)
+        first = host_member.queue.get_nowait()
+        self.assertEqual(first["type"], "chat.message")
+        self.assertEqual(first["message"]["senderId"], host_member.id)
+        self.assertNotIn("telegramId", str(first))
+        self.assertEqual(room.chat(host_member, {"type": "chat.send", "clientMessageId": "one", "text": "hello"}, 10001), first["message"])
+        self.assertEqual(guest_member.queue.get_nowait()["type"], "chat.message")
+        self.assertEqual(room.chat_history(0), [first["message"]])
+        with self.assertRaises(TVError):
+            room.chat(host_member, {"type": "chat.send", "clientMessageId": "two", "text": "x" * 501}, 10002)
+        for index in range(2, 105):
+            room.chat(host_member, {"type": "chat.send", "clientMessageId": f"m{index}", "text": str(index)}, 10003)
+        self.assertEqual(len(room.chat_history(0)), 100)
+        self.assertEqual(room.chat_history(0)[0]["text"], "5")
+        self.assertEqual(room.chat_history(103)[0]["text"], "104")
 
     def test_watch_staggered_buffering_updates_all_connections_once(self):
         from bot.dushengtv.watch import WatchRooms

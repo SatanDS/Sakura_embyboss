@@ -9,3 +9,10 @@ tv-api.dusheng.lol {
         respond "Not Found" 404
     }
 }
+
+# LiveKit signaling uses this HTTPS/WSS endpoint. WebRTC media and TURN ports
+# connect directly to the LiveKit host and must not be placed behind a normal
+# HTTP-only CDN proxy.
+voice-api.dusheng.lol {
+    reverse_proxy 127.0.0.1:7880
+}

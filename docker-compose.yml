@@ -35,6 +35,9 @@ services:
       TGBOT_BINANCE_API_SECRET: ${TGBOT_BINANCE_API_SECRET:-}
       TGBOT_DANMU_API_URL: ${TGBOT_DANMU_API_URL:-}
       TGBOT_DANMU_API_TOKEN: ${TGBOT_DANMU_API_TOKEN:-}
+      TGBOT_LIVEKIT_URL: ${TGBOT_LIVEKIT_URL:-}
+      TGBOT_LIVEKIT_API_KEY: ${TGBOT_LIVEKIT_API_KEY:-}
+      TGBOT_LIVEKIT_API_SECRET: ${TGBOT_LIVEKIT_API_SECRET:-}
     volumes:
       - ./config.json:/app/config.json
       - ./log:/app/log
@@ -43,3 +46,16 @@ services:
       # that contains Emby's data/authentication.db, then set
       # emby_auth_db_path in config.json to the matching /emby-auth path.
       # - /host/path/to/emby-config:/emby-auth:ro
+
+  # Optional room voice SFU. Enable with `docker compose --profile voice up -d livekit`.
+  livekit:
+    profiles:
+      - voice
+    image: ${LIVEKIT_IMAGE:-livekit/livekit-server:v1.13.11}
+    container_name: livekit
+    restart: unless-stopped
+    network_mode: host
+    command: --config /etc/livekit.yaml
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+      - ${LIVEKIT_TURN_CERT_DIR:-/etc/letsencrypt/live/turn-voice-api.dusheng.lol}:/etc/livekit/certs:ro

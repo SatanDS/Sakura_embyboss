@@ -4,11 +4,13 @@ import asyncio
 import json
 import time
 from contextlib import asynccontextmanager
+from datetime import timedelta
 
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 
 from .api import TVRoute, body, invoke, limits, token
 from .service import PREFIX, TVError
+from . import runtime
 from .watch import invalid
 
 SESSION_CHECK_SECONDS = 10
@@ -47,6 +49,49 @@ async def leave(code: str, request: Request):
     room = rooms.room(code)
     rooms.leave(room, rooms.member(room, identity))
     return {"left": True}
+
+
+@router.get("/{code}/chat")
+async def chat_history(code: str, request: Request):
+    identity = await invoke("watch_identity", token(request))
+    limits.check((identity["account"], "watch-chat-history"), 60)
+    rooms = request.app.state.watch
+    room = rooms.room(code)
+    rooms.member(room, identity)
+    try:
+        after = int(request.query_params.get("after", "0"))
+    except ValueError:
+        raise TVError("WATCH_INVALID", "聊天游标无效", 400) from None
+    if after < 0 or after > 2 ** 53:
+        raise TVError("WATCH_INVALID", "聊天游标无效", 400)
+    return {"messages": room.chat_history(after)}
+
+
+@router.post("/{code}/voice/token")
+async def voice_token(code: str, request: Request):
+    identity = await invoke("watch_identity", token(request))
+    limits.check((identity["account"], "watch-voice-token"), 30)
+    rooms = request.app.state.watch
+    room = rooms.room(code)
+    member = rooms.member(room, identity)
+    config = runtime.livekit()
+    if not config:
+        raise TVError("VOICE_NOT_CONFIGURED", "房间语音服务尚未配置", 503)
+    try:
+        from livekit import api
+        access = (api.AccessToken(config["key"], config["secret"])
+                  .with_identity(member.id)
+                  .with_name(member.name)
+                  .with_ttl(timedelta(minutes=10))
+                  .with_grants(api.VideoGrants(room_join=True, room=f"dushengtv-{code}",
+                                               can_publish=True, can_subscribe=True,
+                                               can_publish_data=False,
+                                               can_publish_sources=["microphone"])))
+        signed = access.to_jwt()
+    except ImportError:
+        raise TVError("VOICE_NOT_CONFIGURED", "房间语音服务尚未安装", 503) from None
+    return {"url": config["url"], "room": f"dushengtv-{code}", "token": signed,
+            "expiresAt": int(time.time()) + 600}
 
 
 @router.websocket("/{code}/socket")
@@ -89,7 +134,7 @@ async def socket(ws: WebSocket, code: str):
             data = None
             if frame is not None:
                 text = frame.get("text")
-                if not isinstance(text, str) or len(text.encode("utf-8")) > 2048:
+                if not isinstance(text, str) or len(text.encode("utf-8")) > 4096:
                     raise invalid()
                 data = json.loads(text)
                 if not isinstance(data, dict):
@@ -117,10 +162,14 @@ async def socket(ws: WebSocket, code: str):
                     room.status(member, data, now_ms)
                 elif data.get("type") == "intent":
                     room.intent(member, data, now_ms)
+                elif data.get("type") == "chat.send":
+                    limits.check((member.id, "watch-chat"), 30)
+                    room.chat(member, data, now_ms)
                 else:
                     raise invalid()
             except TVError as err:
-                queue.put_nowait({"type": "error", "message": err.message, "code": err.code})
+                queue.put_nowait({"type": "chat.error" if data and data.get("type") == "chat.send" else "error",
+                                  "message": err.message, "code": err.code})
 
     sender, receiver = asyncio.create_task(send()), asyncio.create_task(receive())
     try:

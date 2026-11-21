@@ -160,6 +160,9 @@ class DuShengTV(BaseModel):
     # Zero (or an omitted setting) means no device-count limit.
     max_devices: int = Field(default=0, ge=0, le=100)
     privacy_version: str = "2026-10-03"
+    livekit_url: str = ""
+    livekit_api_key: str = ""
+    livekit_api_secret: str = ""
     # Explicit aliases of the primary Emby server; never arbitrary client URLs.
     server_urls: List[str] = Field(default_factory=lambda: ["https://www.dusheng.xyz", "https://www.dusheng.lol"])
 

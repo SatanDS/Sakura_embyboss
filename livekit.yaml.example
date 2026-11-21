@@ -1,0 +1,21 @@
+# Copy this file to livekit.yaml before enabling the Compose voice profile.
+# Keep the API key and secret private. The certificate paths are mounted by
+# docker-compose.yml from LIVEKIT_TURN_CERT_DIR.
+port: 7880
+log_level: info
+
+rtc:
+  tcp_port: 7881
+  port_range_start: 50000
+  port_range_end: 50100
+  use_external_ip: true
+
+keys:
+  replace-with-livekit-api-key: replace-with-livekit-api-secret
+
+turn:
+  enabled: true
+  domain: turn-voice-api.dusheng.lol
+  tls_port: 5349
+  cert_file: /etc/livekit/certs/fullchain.pem
+  key_file: /etc/livekit/certs/privkey.pem

@@ -4,11 +4,16 @@ import asyncio
 import re
 import secrets
 import time
+import unicodedata
+from collections import deque
 from dataclasses import dataclass
 
 from .service import TVError
 
 CODE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+CHAT_HISTORY_LIMIT = 100
+CHAT_TEXT_LIMIT = 500
+CHAT_BYTES_LIMIT = 2000
 
 
 def invalid(message="房间请求无效"):
@@ -60,6 +65,8 @@ class Room:
         self.media, self.position, self.at = media, start, now
         self.state, self.paused_by, self.revision = "lobby", None, 1
         self.broadcast_waiting = []
+        self.chat_messages = deque(maxlen=CHAT_HISTORY_LIMIT)
+        self.chat_next_id = 1
 
     def anchor(self, state, now, target=None):
         if target is None:
@@ -107,6 +114,39 @@ class Room:
                     finish(member.queue, "连接过慢，请重新加入")
                 else:
                     member.queue.put_nowait({"type": "snapshot", "room": {**snapshot, "selfId": member.id}})
+
+    def chat(self, member, data, now):
+        client_id = data.get("clientMessageId")
+        text = data.get("text")
+        if not isinstance(client_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", client_id):
+            raise invalid("聊天消息标识无效")
+        for previous in reversed(self.chat_messages):
+            if previous["senderId"] == member.id and previous["clientMessageId"] == client_id:
+                return previous
+        if not isinstance(text, str) or not text.strip() or len(text) > CHAT_TEXT_LIMIT:
+            raise invalid("聊天消息长度无效")
+        if len(text.encode("utf-8")) > CHAT_BYTES_LIMIT:
+            raise invalid("聊天消息长度无效")
+        if any(unicodedata.category(char) == "Cc" and char not in "\r\n\t" for char in text):
+            raise invalid("聊天消息包含无效字符")
+        message = {"id": self.chat_next_id, "clientMessageId": client_id,
+                   "senderId": member.id, "senderName": member.name,
+                   "text": text.strip(), "sentAt": now}
+        self.chat_next_id += 1
+        self.chat_messages.append(message)
+        event = {"type": "chat.message", "message": message}
+        for peer in self.members.values():
+            if peer.queue is None:
+                continue
+            try:
+                peer.queue.put_nowait(event)
+            except asyncio.QueueFull:
+                # A reconnecting client can recover chat from the HTTP history endpoint.
+                continue
+        return message
+
+    def chat_history(self, after=0):
+        return [message for message in self.chat_messages if message["id"] > after]
 
     def status(self, member, data, now):
         if media_ref(data.get("media")) != self.media:

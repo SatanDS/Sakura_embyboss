@@ -1,5 +1,7 @@
 """Connect desktop authorization to the existing Bot account database."""
 
+import os
+
 from .service import DesktopAuth, TVError, canonical_url, valid
 
 
@@ -52,3 +54,22 @@ def emby_auth_db_path():
     from bot.func_helper.emby_identity import configured_auth_db_path
 
     return configured_auth_db_path(config)
+
+
+def livekit():
+    """Return public LiveKit settings without exposing signing credentials."""
+    from bot import config
+
+    cfg = config.dushengtv
+    url = (getattr(cfg, "livekit_url", "") or os.getenv("TGBOT_LIVEKIT_URL", "")).strip()
+    key = (getattr(cfg, "livekit_api_key", "") or os.getenv("TGBOT_LIVEKIT_API_KEY", "")).strip()
+    secret = (getattr(cfg, "livekit_api_secret", "") or os.getenv("TGBOT_LIVEKIT_API_SECRET", "")).strip()
+    if not url or not key or not secret:
+        return None
+    if url.startswith("https://"):
+        url = "wss://" + url[8:]
+    elif url.startswith("http://"):
+        url = "ws://" + url[7:]
+    if not url.startswith(("ws://", "wss://")):
+        return None
+    return {"url": url, "key": key, "secret": secret}

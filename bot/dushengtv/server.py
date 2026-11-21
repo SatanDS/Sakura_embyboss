@@ -39,7 +39,7 @@ async def start():
         settings()
         server = TVServer(uvicorn.Config(create_app(), host=cfg.http_host, port=cfg.http_port,
                                                proxy_headers=False, access_log=False, log_level="warning",
-                                               ws="websockets", ws_max_size=2048, ws_ping_interval=10, ws_ping_timeout=10))
+                                               ws="websockets", ws_max_size=8192, ws_ping_interval=10, ws_ping_timeout=10))
         # Pyrogram owns process signal handling and the event loop.
         server.install_signal_handlers = lambda: None
         LOGGER.info(f"DuShengTV 独立 API 启动：{cfg.http_host}:{cfg.http_port}")

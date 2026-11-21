@@ -104,7 +104,8 @@ async def invoke(method, *args):
 @router.get("/config")
 async def public_config():
     cfg, _, username = runtime.settings()
-    return {"botUsername": username, "privacyVersion": cfg.privacy_version, "apiVersion": "v1"}
+    return {"botUsername": username, "privacyVersion": cfg.privacy_version, "apiVersion": "v1",
+            "features": {"watchChat": True, "voiceChat": runtime.livekit() is not None}}
 
 
 @router.post("/auth/telegram/start")
