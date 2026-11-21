@@ -20,6 +20,7 @@ cn2an~=0.5.22
 fastapi~=0.112.2
 starlette~=0.38.2
 uvicorn==0.30.6
+websockets~=12.0
 python-multipart==0.0.17
 aiohttp==3.11.11
 cryptography==44.0.0
