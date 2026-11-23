@@ -77,7 +77,8 @@ class ExpiryReminderMigrationTests(unittest.TestCase):
         config.set_main_option("script_location", str(ROOT / "bot/sql_helper/alembic"))
         scripts = ScriptDirectory.from_config(config)
 
-        self.assertEqual(scripts.get_heads(), ["20261101_17"])
+        self.assertEqual(scripts.get_heads(), ["20261122_18"])
+        self.assertEqual(scripts.get_revision("head").down_revision, self.migration["revision"])
         self.assertEqual(self.migration["down_revision"], "20261006_16")
 
 

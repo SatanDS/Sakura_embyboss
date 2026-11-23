@@ -5,6 +5,13 @@ from sqlalchemy import BigInteger, Column, DateTime, Integer, JSON, String, Text
 from bot.sql_helper import Base
 
 
+class EmbyOwner(Base):
+    __tablename__ = "tv_emby_owners"
+    # Its negative is the owner in the existing signed BIGINT columns.
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    emby_user_id = Column(String(255), nullable=False, unique=True)
+
+
 class CloudSettings(Base):
     __tablename__ = "tv_cloud_settings"
     tg = Column(BigInteger, primary_key=True, autoincrement=False)
@@ -53,6 +60,8 @@ class DesktopSession(Base):
     emby_user_id = Column(String(255), nullable=False)
     display_name = Column(String(128), nullable=False)
     username = Column(String(64), nullable=False)
+    # This records which client-facing login method established the session.
+    auth_provider = Column(String(16), nullable=False, default="telegram", server_default="telegram")
     device_id = Column(String(32), nullable=True, index=True)
     access_hash = Column(String(64), nullable=False, unique=True)
     access_expires_at = Column(DateTime, nullable=False)

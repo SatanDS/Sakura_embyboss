@@ -3,6 +3,7 @@
 import os
 import sqlite3
 import uuid
+from contextlib import closing
 from typing import Any, List, Tuple
 from urllib.parse import quote
 
@@ -60,7 +61,7 @@ def _map_auth_db_user_ids(raw_user_ids: List[Any], auth_db_path: str) -> set[str
     resolved_internal_ids: set[int] = set()
     try:
         uri = f"file:{quote(os.path.abspath(users_db_path), safe='/')}?mode=ro"
-        with sqlite3.connect(uri, uri=True, timeout=1.0) as users_connection:
+        with closing(sqlite3.connect(uri, uri=True, timeout=1.0)) as users_connection:
             users_connection.execute("PRAGMA query_only=ON")
             table_names = {
                 row[0]
@@ -115,7 +116,7 @@ def lookup_user_from_auth_db(token: str, db_path: str) -> Tuple[str, str]:
 
     try:
         uri = f"file:{quote(os.path.abspath(db_path), safe='/')}?mode=ro"
-        with sqlite3.connect(uri, uri=True, timeout=1.0) as connection:
+        with closing(sqlite3.connect(uri, uri=True, timeout=1.0)) as connection:
             connection.execute("PRAGMA query_only=ON")
             table_names = {
                 row[0]

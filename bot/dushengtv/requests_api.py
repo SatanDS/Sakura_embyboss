@@ -18,12 +18,16 @@ def permission(identity):
     from bot import config
     from bot.sql_helper import Session
     from bot.sql_helper.sql_emby import Emby
+    from bot.sql_helper.sql_emby2 import Emby2
     cfg = config.moviepilot
     if not getattr(config.dushengtv, "requests_enabled", True) or not (cfg.status or cfg.douban_status) or not cfg.url:
         raise TVError("REQUESTS_NOT_CONFIGURED", "管理员尚未启用求片服务", 503)
     tg = int(identity["telegramId"])
     with Session() as db:
-        user = db.query(Emby).filter_by(tg=tg).one_or_none()
+        if identity.get("authProvider") == "emby" and tg < 0:
+            user = db.query(Emby2).filter_by(embyid=str(identity["embyUserId"])).one_or_none()
+        else:
+            user = db.query(Emby).filter_by(tg=tg).one_or_none()
         admins = [int(value) for value in getattr(config, "admins", [])]
         is_admin = tg == config.owner or tg in admins
         if not user or (cfg.lv == "a" and user.lv != "a" and not is_admin):

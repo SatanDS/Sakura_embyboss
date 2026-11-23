@@ -41,7 +41,7 @@ DNS A / AAAA 记录指向 Bot 服务器 IP，DNS 不指定端口。公网使用 
 
 `enabled` 默认关闭，独立于 `api.status` 和 `payments.enabled`。`http_port` 不可与 `api.http_port` 相同。`bot_username` 留空时，服务使用已启动 Bot 的官方用户名。
 
-更新时先备份数据库和配置。Bot 启动自动运行 Alembic `20261004_14`，新增 `tv_login_challenges`、`tv_devices`、`tv_sessions`、`tv_refresh_tokens`。它接续已发布的 `20260929_13`，不依赖本机未发布的支付修改。
+更新时先备份数据库和配置。Bot 启动自动运行 Alembic。`20261004_14` 新增 `tv_login_challenges`、`tv_devices`、`tv_sessions`、`tv_refresh_tokens`，`20261122_18` 为 `tv_sessions` 增加登录方式字段，并用 `tv_emby_owners` 永久保存独立 Emby 账号的内部编号。
 
 Docker Compose 使用项目现有 host network：
 
@@ -98,6 +98,19 @@ services:
 
 ## 登录和设备管理
 
+### Emby 用户名密码登录
+
+DuShengTV 也支持 `POST /api/dushengtv/v1/auth/emby/login`，请求体包含
+`username`、`password` 和 `installationId`。网关会向配置的 Emby 服务验证凭据，
+不会保存或记录密码。账号必须存在于 Bot 的 `emby` 表或无 Telegram 账号使用的
+`emby2` 表，并且仍有有效权益。Telegram 绑定账号沿用原有账号键；`emby2` 账号
+使用稳定的负数内部键，因此设备、云端设置、一起看、求片和媒体归属仍沿用现有
+TV 会话协议。登录返回正常的访问令牌和刷新令牌，`/session` 返回
+`authProvider: "emby"`，同时保留数字格式的 `user.telegramId` 兼容字段。
+
+该接口按来源地址和用户名限流。客户端只能通过配置的 HTTPS 网关发送凭据，并应在
+请求结束后立即丢弃密码。
+
 1. TV 用户同意设备信息用途后发起授权，客户端生成 state 与 PKCE S256。
 2. 系统浏览器打开独立 TV 授权页，展示与客户端一致的六位确认码。
 3. 授权页提供 Telegram 应用直开链接和网页链接。进入 `@emby_dusheng_bot` 后，若出现「开始 / Start」需点击发送新的登录请求；如果只打开聊天而没有确认卡，使用授权页的「复制本次登录指令」，将完整指令粘贴至 Bot 私聊并发送。退出后重登必须使用新授权页的指令。`/start tvlogin_…` 只准备请求，用户核对确认码并点击「确认登录」后才批准。不会要求 Telegram 密码或短信验证码，也无需 BotFather 的网页 Login Widget 域名。
@@ -117,6 +130,7 @@ TV 登出／撤销时立即清理画面中的服务器、媒体卡片、详情�
 | --- | --- | --- |
 | GET | `/config` | 公开 Bot 用户名、隐私版本 |
 | POST | `/auth/telegram/start` | state、PKCE、installationId → 请求 ID、确认码、授权页 |
+| POST | `/auth/emby/login` | Emby username、password、installationId → TV 访问／刷新令牌 |
 | GET | `/auth/telegram/authorize?request=…` | 短期授权页，仅跳转 Bot |
 | POST | `/auth/telegram/poll` | challengeId、state、codeVerifier → pending / denied / unbound / authorized |
 | POST | `/auth/telegram/cancel` | 同上，撤销尚未消费的请求 |
@@ -133,7 +147,9 @@ TV 登出／撤销时立即清理画面中的服务器、媒体卡片、详情�
 | POST | `/watch/rooms/{code}/join`、`/watch/rooms/{code}/leave` | 加入、退出或由房主解散 |
 | WebSocket | `/watch/rooms/{code}/socket` | 用 TV Bearer 连接，收发状态快照、成员就绪状态、播放操作和时钟消息 |
 
-`authProvider: telegram` 表示身份来自受信任的 Telegram Bot 更新，不是客户端自报的 Telegram ID，也不声称使用 Telegram OIDC。身份确认与支付网页登录各用自己的协议和数据表。
+`authProvider: telegram` 表示身份来自受信任的 Telegram Bot 更新，`authProvider: emby`
+表示身份来自 Emby 用户名密码验证。两者都由服务端按绑定和权益校验，客户端不能自报
+Telegram ID，也不声称使用 Telegram OIDC。身份确认与支付网页登录各用自己的协议和数据表。
 
 账号云端设置的更新步骤与恢复行为见 [DUSHENGTV_CLOUD_SETTINGS.md](DUSHENGTV_CLOUD_SETTINGS.md)。
 

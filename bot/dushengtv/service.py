@@ -55,8 +55,10 @@ def canonical_url(value, *, https_only=False):
 
 
 class DesktopAuth:
-    def __init__(self, sessions, account_lookup, *, max_devices=0, consent_version="2026-10-03", now=None):
+    def __init__(self, sessions, account_lookup, *, account_lookup_by_emby=None,
+                 max_devices=0, consent_version="2026-10-03", now=None):
         self.sessions, self.account_lookup = sessions, account_lookup
+        self.account_lookup_by_emby = account_lookup_by_emby
         self.max_devices, self.consent_version = max_devices, consent_version
         self.now = now or datetime.utcnow
 
@@ -150,6 +152,34 @@ class DesktopAuth:
             row.status = "consumed"
             return {**result, "status": "authorized", "bound": True, "state": data["state"]}
 
+    def emby_login(self, emby_id, username, installation_id):
+        """Create a TV session after the gateway authenticates Emby credentials."""
+        if not self.account_lookup_by_emby:
+            raise TVError("NOT_CONFIGURED", "Emby 登录服务尚未配置", 503)
+        emby_id = valid(emby_id, r"[^\x00-\x1f]{1,255}", "Emby 用户标识无效")
+        username = valid(username, r"[^\x00-\x1f]{1,128}", "用户名格式无效")
+        installation_id = valid(installation_id, r"[A-Za-z0-9_-]{16,64}", "设备安装标识无效")
+        with self.sessions.begin() as db:
+            account = self.account_lookup_by_emby(db, emby_id)
+            session = DesktopSession(id=uuid4().hex, tg=account["tg"], installation_id=installation_id,
+                                     emby_user_id=account["embyUserId"],
+                                     display_name=str(account.get("displayName") or username)[:128],
+                                     username=username[:64], auth_provider="emby",
+                                     expires_at=self.now() + timedelta(seconds=SESSION_SECONDS))
+            db.add(session)
+            result = self._tokens(db, session)
+            return {**result, "status": "authorized", "bound": True, "state": "", "provider": "emby"}
+
+    def _session_account(self, db, session):
+        if session.auth_provider == "emby":
+            if not self.account_lookup_by_emby:
+                raise TVError("BOT_UNBOUND", "Emby 账号绑定已改变，请重新登录")
+            account = self.account_lookup_by_emby(db, session.emby_user_id)
+            if account["tg"] != session.tg:
+                raise TVError("BOT_UNBOUND", "Emby 账号绑定已改变，请重新登录")
+            return account
+        return self.account_lookup(db, session.tg)
+
     def _tokens(self, db, session):
         access, refresh = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
         session.access_hash = digest(access)
@@ -160,7 +190,7 @@ class DesktopAuth:
     def _live(self, db, session, *, require_device=True):
         if session is None or session.revoked_at or session.expires_at <= self.now():
             raise TVError("TOKEN_EXPIRED", "登录已过期，请重新登录", 401)
-        account = self.account_lookup(db, session.tg)
+        account = self._session_account(db, session)
         if account["embyUserId"] != session.emby_user_id:
             raise TVError("BOT_UNBOUND", "Emby 绑定已改变，请重新登录")
         device = None
@@ -179,7 +209,7 @@ class DesktopAuth:
         if session is None:
             raise TVError("TOKEN_EXPIRED", "登录已过期，请重新登录", 401)
         # Every device mutation locks the account, session, then device, in that order.
-        self.account_lookup(db, session.tg)
+        self._session_account(db, session)
         session = db.query(DesktopSession).filter_by(access_hash=digest(token)).populate_existing().with_for_update().one_or_none()
         device = self._live(db, session, require_device=require_device)
         if session.access_expires_at <= self.now():
@@ -189,7 +219,7 @@ class DesktopAuth:
     def session(self, token):
         with self.sessions.begin() as db:
             session, device = self._identity(db, token, require_device=False)
-            return {"authProvider": "telegram", "bound": True, "allowed": True, "watchRooms": device is not None,
+            return {"authProvider": session.auth_provider, "bound": True, "allowed": True, "watchRooms": device is not None,
                     "user": {"telegramId": str(session.tg), "displayName": session.display_name, "username": session.username},
                     "device": {"installationId": session.installation_id, "allowed": device is not None},
                     "maxDevices": self.max_devices}
@@ -246,7 +276,7 @@ class DesktopAuth:
             session = db.get(DesktopSession, saved.session_id)
             if session is None:
                 raise TVError("TOKEN_EXPIRED", "登录已过期，请重新登录", 401)
-            self.account_lookup(db, session.tg)
+            self._session_account(db, session)
             session = db.query(DesktopSession).filter_by(id=saved.session_id).populate_existing().with_for_update().one_or_none()
             saved = db.query(RefreshToken).filter_by(token_hash=digest(token)).populate_existing().with_for_update().one()
             if session is None or session.installation_id != data.get("installationId"):
@@ -368,11 +398,9 @@ class DesktopAuth:
         return {"revoked": True, "installationId": device.installation_id}
 
     def revoke(self, token, device_id):
-        # Identity transaction ends before device/session revocation, avoiding lock inversion.
         with self.sessions.begin() as db:
             session, _ = self._identity(db, token)
-            tg = session.tg
-        return self.bot_revoke(tg, device_id)
+            return self._revoke(db, session.tg, device_id)
 
     def bot_revoke(self, tg, device_id):
         with self.sessions.begin() as db:
@@ -382,7 +410,8 @@ class DesktopAuth:
     def server_identity(self, token):
         with self.sessions.begin() as db:
             session, _ = self._identity(db, token)
-            return {"telegramId": str(session.tg), "embyUserId": session.emby_user_id}
+            return {"telegramId": str(session.tg), "embyUserId": session.emby_user_id,
+                    "authProvider": session.auth_provider}
 
     def watch_identity(self, token):
         with self.sessions.begin() as db:
@@ -395,7 +424,7 @@ class DesktopAuth:
         with self.sessions.begin() as db:
             session = db.get(DesktopSession, session_id)
             if session is not None:
-                self.account_lookup(db, session.tg)
+                self._session_account(db, session)
                 session = (db.query(DesktopSession).filter_by(id=session_id)
                            .populate_existing().with_for_update().one_or_none())
             self._live(db, session)

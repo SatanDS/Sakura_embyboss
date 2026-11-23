@@ -18,7 +18,7 @@ from bot.func_helper.emby_identity import lookup_user_from_auth_db
 from . import runtime
 from .avatars import avatar_cache, AvatarUnavailable
 from .danmaku import DanmakuError, fetch_danmaku
-from .service import PREFIX, TVError, canonical_url
+from .service import PREFIX, TVError, canonical_url, valid
 
 RESPONSE_CSP = "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"
 
@@ -105,7 +105,7 @@ async def invoke(method, *args):
 async def public_config():
     cfg, _, username = runtime.settings()
     return {"botUsername": username, "privacyVersion": cfg.privacy_version, "apiVersion": "v1",
-            "features": {"watchChat": True, "voiceChat": runtime.livekit() is not None}}
+            "features": {"watchChat": True, "voiceChat": runtime.livekit() is not None, "embyLogin": True}}
 
 
 @router.post("/auth/telegram/start")
@@ -114,6 +114,25 @@ async def start(request: Request):
     cfg, url, username = runtime.settings()
     limits.check((str(data.get("installationId", ""))[:64], "install-start"), 10)
     return await invoke("start", data, url, username)
+
+
+@router.post("/auth/emby/login")
+async def emby_login(request: Request):
+    data = await body(request)
+    runtime.settings()
+    peer = request.client.host if request.client else "unknown"
+    limits.check((peer, "emby-login"), 12)
+    username = data.get("username")
+    password = data.get("password")
+    installation = data.get("installationId")
+    if (not isinstance(username, str) or not 1 <= len(username) <= 128
+            or any(ord(char) < 32 for char in username)
+            or not isinstance(password, str) or not 1 <= len(password) <= 512):
+        raise TVError("INVALID_REQUEST", "Emby 登录信息格式无效", 400)
+    valid(installation, r"[A-Za-z0-9_-]{16,64}", "设备安装标识无效")
+    limits.check((username.casefold(), "emby-login-user"), 8)
+    emby_id = await runtime.authenticate_emby(username, password)
+    return await invoke("emby_login", emby_id, username, installation)
 
 
 @router.get("/auth/telegram/authorize")
@@ -174,6 +193,8 @@ async def session_info(request: Request):
 async def profile_avatar(request: Request):
     bearer = token(request)
     identity = await invoke("server_identity", bearer)
+    if identity.get("authProvider") != "telegram":
+        return Response(status_code=204)
     limits.check((identity["telegramId"], "avatar"), 30)
     try:
         image = await avatar_cache.get(identity["telegramId"])
@@ -280,7 +301,7 @@ async def server_authorize(request: Request):
     server_url = canonical_url(data.get("serverUrl"))
     allowed = {canonical_url(url) for url in cfg.server_urls}
     if server_url not in allowed or data.get("embyUserId") != identity["embyUserId"]:
-        raise TVError("SERVER_NOT_BOUND", "此服务器或 Emby 用户未绑定当前 Telegram 账号")
+        raise TVError("SERVER_NOT_BOUND", "此服务器或 Emby 用户未绑定当前账号")
     access_token = data.get("embyAccessToken")
     if not isinstance(access_token, str) or not 1 <= len(access_token) <= 4096 or any(ord(c) < 32 for c in access_token):
         raise TVError("INVALID_REQUEST", "Emby 凭据格式无效", 400)
@@ -288,11 +309,12 @@ async def server_authorize(request: Request):
     # the user's token at that configured origin; regional CDN DNS may send
     # the Bot to a different or unavailable edge than the desktop client.
     if await emby_identity(runtime.emby_origin(), access_token) != identity["embyUserId"]:
-        raise TVError("SERVER_NOT_BOUND", "Emby 令牌不属于当前 Telegram 绑定的账号")
+        raise TVError("SERVER_NOT_BOUND", "Emby 令牌不属于当前登录账号")
     # Recheck revocation and binding after the outbound request.
     if await invoke("server_identity", bearer) != identity:
         raise TVError("SERVER_NOT_BOUND", "账号绑定已改变，请重新登录")
-    return {**identity, "allowed": True, "bound": True, "serverUrl": server_url}
+    return {"telegramId": identity["telegramId"], "embyUserId": identity["embyUserId"],
+            "allowed": True, "bound": True, "serverUrl": server_url}
 
 
 @router.post("/providers/danmaku")

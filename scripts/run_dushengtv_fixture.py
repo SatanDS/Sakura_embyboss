@@ -26,6 +26,17 @@ def main():
     from unittest.mock import patch
     fixture.patches[1] = patch.object(fixture.m.api.runtime, "settings", return_value=(fixture.settings, base, "example_bot"))
     fixture.patches[1].start()
+    fixture.auth.account_lookup_by_emby = fixture.m.runtime.account_lookup_by_emby
+    with fixture.sessions.begin() as db:
+        db.add(fixture.m.LocalUser(embyid="emby-independent", name="independent", lv="b", ex=datetime(2099, 1, 1), expired=0))
+
+    async def fixture_authenticate(username, password):
+        accounts = {"bound-viewer": "emby-42", "independent": "emby-independent"}
+        if username not in accounts or password != "fixture":
+            raise fixture.m.service.TVError("INVALID_CREDENTIALS", "账号或密码错误", 401)
+        return accounts[username]
+
+    fixture.m.api.runtime.authenticate_emby = fixture_authenticate
     fixture.m.api.emby_identity = __import__("unittest.mock", fromlist=["AsyncMock"]).AsyncMock(return_value="emby-42")
     media_url = os.environ.get("DUSHENGTV_FIXTURE_EMBY")
     if media_url:
