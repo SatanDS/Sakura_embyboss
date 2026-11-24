@@ -5,14 +5,14 @@ from fastapi import FastAPI
 from .api import router
 from .requests_api import router as requests_router
 from .watch import WatchRooms
-from .watch_api import router as watch_router
+from .watch_api import close_voice_room, router as watch_router
 
 
 def create_app():
     app = FastAPI(title="DuShengTV API", docs_url=None, redoc_url=None, openapi_url=None)
     app.include_router(router)
     app.include_router(requests_router)
-    app.state.watch = WatchRooms()
+    app.state.watch = WatchRooms(close_voice=close_voice_room)
     app.include_router(watch_router)
 
     return app

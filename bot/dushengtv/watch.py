@@ -14,6 +14,7 @@ CODE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
 CHAT_HISTORY_LIMIT = 100
 CHAT_TEXT_LIMIT = 500
 CHAT_BYTES_LIMIT = 2000
+CHAT_CLIENT_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 
 def invalid(message="房间请求无效"):
@@ -67,6 +68,8 @@ class Room:
         self.broadcast_waiting = []
         self.chat_messages = deque(maxlen=CHAT_HISTORY_LIMIT)
         self.chat_next_id = 1
+        self.voice_name = f"dushengtv-{code}-{host.id}"
+        self.voice_config = None
 
     def anchor(self, state, now, target=None):
         if target is None:
@@ -118,10 +121,12 @@ class Room:
     def chat(self, member, data, now):
         client_id = data.get("clientMessageId")
         text = data.get("text")
-        if not isinstance(client_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", client_id):
+        if not isinstance(client_id, str) or not CHAT_CLIENT_ID.fullmatch(client_id):
             raise invalid("聊天消息标识无效")
         for previous in reversed(self.chat_messages):
             if previous["senderId"] == member.id and previous["clientMessageId"] == client_id:
+                if member.queue is not None and not member.queue.full():
+                    member.queue.put_nowait({"type": "chat.message", "message": previous})
                 return previous
         if not isinstance(text, str) or not text.strip() or len(text) > CHAT_TEXT_LIMIT:
             raise invalid("聊天消息长度无效")
@@ -207,11 +212,13 @@ class Room:
 
 
 class WatchRooms:
-    def __init__(self, clock=None):
+    def __init__(self, clock=None, close_voice=None):
         # Use a monotonic elapsed interval for playback while exposing epoch milliseconds.
         epoch = time.time() - time.monotonic()
         self.clock = clock or (lambda: int((epoch + time.monotonic()) * 1000))
         self.rooms, self.devices = {}, {}
+        self.close_voice = close_voice
+        self.voice_tasks = set()
 
     def room(self, code):
         room = self.rooms.get(code)
@@ -276,6 +283,8 @@ class WatchRooms:
         room.broadcast(now)
 
     def leave(self, room, member, reason="房主已解散房间"):
+        if self.rooms.get(room.code) is not room or room.members.get(member.device) is not member:
+            return
         if member.id == room.host:
             self.rooms.pop(room.code)
             for peer in room.members.values():
@@ -283,6 +292,10 @@ class WatchRooms:
                 if peer.queue is not None:
                     finish(peer.queue, reason)
                     peer.queue = None
+            if room.voice_config and self.close_voice:
+                task = asyncio.create_task(self.close_voice(room.voice_name, room.voice_config))
+                self.voice_tasks.add(task)
+                task.add_done_callback(self.voice_tasks.discard)
         else:
             if member.queue is not None:
                 finish(member.queue, "已离开房间")
@@ -309,3 +322,9 @@ class WatchRooms:
         while True:
             await asyncio.sleep(0.25)
             self.tick()
+
+    async def shutdown(self):
+        for room in list(self.rooms.values()):
+            host = next(peer for peer in room.members.values() if peer.id == room.host)
+            self.leave(room, host, "一起看服务正在关闭")
+        await asyncio.gather(*self.voice_tasks)

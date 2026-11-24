@@ -136,4 +136,5 @@ def livekit():
         url = "ws://" + url[7:]
     if not url.startswith(("ws://", "wss://")):
         return None
-    return {"url": url, "key": key, "secret": secret}
+    api_url = (getattr(cfg, "livekit_api_url", "") or os.getenv("TGBOT_LIVEKIT_API_URL", "")).strip()
+    return {"url": url, "api_url": api_url or "http" + url[2:], "key": key, "secret": secret}

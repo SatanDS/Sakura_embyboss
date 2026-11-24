@@ -2,18 +2,45 @@
 
 import asyncio
 import json
+import logging
 import time
 from contextlib import asynccontextmanager
 from datetime import timedelta
 
+import aiohttp
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 
 from .api import TVRoute, body, invoke, limits, token
 from .service import PREFIX, TVError
 from . import runtime
-from .watch import invalid
+from .watch import CHAT_CLIENT_ID, invalid
 
 SESSION_CHECK_SECONDS = 10
+VOICE_DELETE_DELAYS = (0, 1, 3, 7)
+
+
+async def close_voice_room(name, config):
+    # A closed control connection cannot relay the room-ended event to every caller.
+    from livekit import api
+
+    for delay in VOICE_DELETE_DELAYS:
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            async with api.LiveKitAPI(config.get("api_url") or config["url"], config["key"], config["secret"],
+                                      timeout=aiohttp.ClientTimeout(total=3)) as client:
+                await client.room.delete_room(api.DeleteRoomRequest(room=name))
+            return
+        except api.TwirpError as error:
+            if error.code == "not_found":
+                return
+            if error.status < 500 and error.status not in (408, 429):
+                break
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+            continue
+        except Exception:
+            break
+    logging.getLogger(__name__).warning("LiveKit 语音房间清理失败，请检查网关管理地址与签名配置")
 
 @asynccontextmanager
 async def watch_lifespan(app):
@@ -23,6 +50,7 @@ async def watch_lifespan(app):
     finally:
         ticker.cancel()
         await asyncio.gather(ticker, return_exceptions=True)
+        await app.state.watch.shutdown()
 
 
 router = APIRouter(prefix=PREFIX + "/watch/rooms", route_class=TVRoute, lifespan=watch_lifespan)
@@ -83,14 +111,15 @@ async def voice_token(code: str, request: Request):
                   .with_identity(member.id)
                   .with_name(member.name)
                   .with_ttl(timedelta(minutes=10))
-                  .with_grants(api.VideoGrants(room_join=True, room=f"dushengtv-{code}",
+                  .with_grants(api.VideoGrants(room_join=True, room=room.voice_name,
                                                can_publish=True, can_subscribe=True,
                                                can_publish_data=False,
                                                can_publish_sources=["microphone"])))
         signed = access.to_jwt()
     except ImportError:
         raise TVError("VOICE_NOT_CONFIGURED", "房间语音服务尚未安装", 503) from None
-    return {"url": config["url"], "room": f"dushengtv-{code}", "token": signed,
+    room.voice_config = config
+    return {"url": config["url"], "room": room.voice_name, "token": signed,
             "expiresAt": int(time.time()) + 600}
 
 
@@ -168,8 +197,13 @@ async def socket(ws: WebSocket, code: str):
                 else:
                     raise invalid()
             except TVError as err:
-                queue.put_nowait({"type": "chat.error" if data and data.get("type") == "chat.send" else "error",
-                                  "message": err.message, "code": err.code})
+                response = {"type": "error", "message": err.message, "code": err.code}
+                if data.get("type") == "chat.send":
+                    response["type"] = "chat.error"
+                    client_id = data.get("clientMessageId")
+                    if isinstance(client_id, str) and CHAT_CLIENT_ID.fullmatch(client_id):
+                        response["clientMessageId"] = client_id
+                queue.put_nowait(response)
 
     sender, receiver = asyncio.create_task(send()), asyncio.create_task(receive())
     try:

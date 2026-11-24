@@ -1,5 +1,6 @@
 """Offline TV authorization regressions. No Telegram or production config is read."""
 
+import asyncio
 import base64
 import hashlib
 import importlib.util
@@ -496,6 +497,11 @@ class DesktopTests(unittest.TestCase):
             self.assertEqual(chat["type"], "chat.message")
             self.assertEqual(chat["message"]["text"], "hello")
             self.assertEqual(self.client.get(base + "/chat", headers=h).json()["messages"][0]["text"], "hello")
+            for client_id, text in (("rejected", ""), ("invalid id", "ok")):
+                host_ws.send_json({"type": "chat.send", "clientMessageId": client_id, "text": text})
+                rejected = host_ws.receive_json()
+                self.assertEqual(rejected["type"], "chat.error")
+                self.assertEqual(rejected.get("clientMessageId"), client_id if client_id == "rejected" else None)
             host_ws.send_json({"type": "status", "status": "ready", "media": media})
             revision = host_ws.receive_json()["room"]["revision"]
             with self.client.websocket_connect(base + "/socket", headers=g) as guest_ws:
@@ -610,7 +616,9 @@ class DesktopTests(unittest.TestCase):
         self.assertEqual(first["message"]["senderId"], host_member.id)
         self.assertNotIn("telegramId", str(first))
         self.assertEqual(room.chat(host_member, {"type": "chat.send", "clientMessageId": "one", "text": "hello"}, 10001), first["message"])
+        self.assertEqual(host_member.queue.get_nowait(), first)
         self.assertEqual(guest_member.queue.get_nowait()["type"], "chat.message")
+        self.assertTrue(guest_member.queue.empty())
         self.assertEqual(room.chat_history(0), [first["message"]])
         with self.assertRaises(TVError):
             room.chat(host_member, {"type": "chat.send", "clientMessageId": "two", "text": "x" * 501}, 10002)
@@ -705,6 +713,63 @@ class DesktopTests(unittest.TestCase):
                 self.auth.revoke(auth, device)
                 self.assertEqual(ws.receive_json()["type"], "closed")
             self.assertFalse(self.client.app.state.watch.rooms)
+
+    def test_watch_voice_cleanup_follows_room_lifetime(self):
+        from bot.dushengtv import watch_api
+
+        path = self.m.service.PREFIX + "/watch/rooms"
+        h = {"Authorization": "Bearer " + self.login()["accessToken"]}
+        g = {"Authorization": "Bearer " + self.login(43, "another-installation-1234")["accessToken"]}
+        config = {"url": "wss://voice.test", "api_url": "http://127.0.0.1:7880",
+                  "key": "fixture", "secret": secrets.token_urlsafe(32)}
+        manager = self.client.app.state.watch
+        cleanup = manager.close_voice = AsyncMock()
+
+        def create():
+            code = self.client.post(path, json={"media": {"itemId": "item", "mediaSourceId": "v1"}}, headers=h).json()["code"]
+            return f"{path}/{code}"
+
+        with patch.object(watch_api.runtime, "livekit", return_value=config), self.client:
+            # Only rooms with a successfully issued voice token need an SFU request.
+            self.client.post(create() + "/leave", json={}, headers=h)
+            cleanup.assert_not_called()
+            base = create()
+            self.client.post(base + "/join", json={}, headers=g)
+            result = self.client.post(base + "/voice/token", json={}, headers=g).json()
+            self.assertEqual(result["url"], config["url"])
+            self.assertEqual(set(result), {"url", "room", "token", "expiresAt"})
+            self.client.post(base + "/leave", json={}, headers=g)
+            cleanup.assert_not_called()
+            self.assertEqual(self.client.post(base + "/leave", json={}, headers=h).status_code, 200)
+            self.assertEqual(self.client.post(base + "/leave", json={}, headers=h).status_code, 404)
+            cleanup.assert_awaited_once_with(result["room"], config)
+
+            base = create()
+            second = self.client.post(base + "/voice/token", json={}, headers=h).json()["room"]
+            room = manager.room(base.split("/")[-1])
+            next(iter(room.members.values())).offline_since = manager.clock() - 60000
+            self.client.portal.call(manager.tick)
+            cleanup.assert_called_with(second, config)
+
+            base = create()
+            on_shutdown = self.client.post(base + "/voice/token", json={}, headers=h).json()["room"]
+        cleanup.assert_awaited_with(on_shutdown, config)
+        self.assertEqual(cleanup.await_count, 3)
+        self.assertFalse(manager.voice_tasks)
+
+    def test_watch_voice_cleanup_retries_transient_and_accepts_absent_room(self):
+        from livekit import api
+        from livekit.api.room_service import RoomService
+        from bot.dushengtv import watch_api
+
+        config = {"url": "wss://voice.test", "api_url": "http://127.0.0.1:7880",
+                  "key": "fixture", "secret": secrets.token_urlsafe(32)}
+        errors = [TimeoutError(), api.TwirpError("unavailable", "", status=503),
+                  api.TwirpError("not_found", "", status=404)]
+        with patch.object(RoomService, "delete_room", new_callable=AsyncMock, side_effect=errors) as delete, \
+             patch.object(watch_api, "VOICE_DELETE_DELAYS", (0, 0, 0, 0)):
+            asyncio.run(watch_api.close_voice_room("fixture-room", config))
+            self.assertEqual([c.args[0].room for c in delete.await_args_list], ["fixture-room"] * 3)
 
     def test_bound_user_change_invalidates_existing_session(self):
         token = self.login()["accessToken"]

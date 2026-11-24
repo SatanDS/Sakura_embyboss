@@ -184,6 +184,8 @@ docker compose logs --tail=100 livekit
 
 LiveKit 证书目录由 `LIVEKIT_TURN_CERT_DIR` 指定，目录内需要有 `fullchain.pem` 和 `privkey.pem`。防火墙需要允许 `7881/tcp`、`3478/udp`、`5349/tcp` 和 `50000-50100/udp`。使用 Caddy 时导入 [LiveKit 站点模板](../caddy/dushengtv.caddyfile)；使用 Nginx 时执行 `nginx -t` 后重载 [TV 站点配置](../nginx/dushengtv.conf)。
 
+房主解散、掉线超时或登录资格撤销时，网关通过 LiveKit RoomService 主动断开该房的语音。网关和 LiveKit 使用上述同机 host 网络时，在 `.env` 设置 `TGBOT_LIVEKIT_API_URL=http://127.0.0.1:7880`。分开部署时填网关可达的 LiveKit HTTP(S) 地址。留空时沿用 `TGBOT_LIVEKIT_URL` 的 HTTP(S) 地址，要求此入口支持 RoomService 请求。客户端继续使用 `TGBOT_LIVEKIT_URL` 登录语音。
+
 桌面客户端不需要手动修改本地网络。UDP 被限制的网络会尝试 TCP 和 TURN/TLS 回退，服务器侧必须保留对应端口和有效证书。
 
 测试使用隔离 SQLite 与伪造 Telegram 传输，覆盖真实授权服务、HTTP 路由、签名、状态／PKCE、消费／过期、设备上限、刷新重放、绑定变化、白名单及端口路由隔离。Emby 4.9 回归使用真实临时 `Tokens_2`、`users.db` 与本机 HTTP 来源，验证令牌归属、禁用／撤销、错误归属和部署错误；不再将 `/Users/Me` 当作可用接口。正式上线仍需在独立域名完成一次真实 Bot 点击授权和 Emby 连接。MySQL 的每用户行锁负责串行设备登记；SQLite 测试不证明 MySQL 并发行为。
