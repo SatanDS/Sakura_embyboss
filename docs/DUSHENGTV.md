@@ -33,7 +33,7 @@ DNS A / AAAA 记录指向 Bot 服务器 IP，DNS 不指定端口。公网使用 
 }
 ```
 
-`server_urls` 是 TV 可连接的 Emby 地址白名单，未列入的地址会被拒绝。这里只列出当前 Bot 主 Emby 服务器的真实访问地址／线路别名，须共用同一套用户和登录凭据。Bot 从只读 Emby 认证数据库取得用户 token 的真实持有者，再使用现有顶层 `emby_url` 检查该账号及 token 是否仍可用，用户 ID 必须与 Telegram 绑定相符。这样服务端验证不会依赖公网线路的区域 DNS／CDN。请求只携带用户 token，不使用或下发 Emby 管理 API Key。验证成功后客户端继续使用原公网线路播放，不会收到来源地址。不同服务器如果使用不同用户 ID，需要另建绑定后才能开放。地址包含子路径时，填写完整基址。
+`server_urls` 是 TV 可连接的 Emby 地址白名单。这里只列出当前 Bot 主 Emby 服务器的真实访问地址／线路别名，须共用同一套用户和登录凭据。Bot 从只读 Emby 认证数据库取得媒体 token 的真实持有者，再通过顶层 `emby_url` 检查该账号及 token 是否仍可用。持有者必须与当前 TV 会话的 Emby 用户 ID 相同。媒体授权请求只携带用户 token，验证成功后客户端继续使用原公网线路播放。地址包含子路径时，填写完整基址。
 
 升级代码不会覆盖现有 `config.json` 的白名单；已有部署需在 `dushengtv.server_urls` 中补上 `https://www.dusheng.lol` 并重启 Bot。
 
@@ -102,14 +102,18 @@ services:
 
 DuShengTV 也支持 `POST /api/dushengtv/v1/auth/emby/login`，请求体包含
 `username`、`password` 和 `installationId`。网关会向配置的 Emby 服务验证凭据，
-不会保存或记录密码。账号必须存在于 Bot 的 `emby` 表或无 Telegram 账号使用的
-`emby2` 表，并且仍有有效权益。Telegram 绑定账号沿用原有账号键；`emby2` 账号
-使用稳定的负数内部键，因此设备、云端设置、一起看、求片和媒体归属仍沿用现有
-TV 会话协议。登录返回正常的访问令牌和刷新令牌，`/session` 返回
+不会保存或记录密码。直接在主 Emby 服务器开通并启用的用户可以用自己的账号登录，
+无需 Telegram 或 Bot 注册。首次登录时，网关按 Emby 验证返回的用户 ID 分配稳定的
+负数 TV 账号键，用来隔离设备、云端设置和一起看身份。已有 Telegram 绑定的账号保留
+原账号键，已有 `emby2` 记录的账号保留原负数键。Bot 管理的账号继续检查有效权益，
+同一个 Emby 用户 ID 出现多条绑定时拒绝登录。登录返回访问令牌和刷新令牌，`/session` 返回
 `authProvider: "emby"`，同时保留数字格式的 `user.telegramId` 兼容字段。
 
-该接口按来源地址和用户名限流。客户端只能通过配置的 HTTPS 网关发送凭据，并应在
-请求结束后立即丢弃密码。
+该接口按来源地址和用户名限流。客户端通过配置的 HTTPS 网关发送凭据，并在请求结束后丢弃密码。
+直接在 Emby 开通的账号每次续期时，网关使用现有服务端配置 `emby_api` 到主 Emby 复核账号状态。
+已删除或停用的账号无法续期，已签发的 TV 访问令牌最多有效 15 分钟。
+
+### Telegram 登录
 
 1. TV 用户同意设备信息用途后发起授权，客户端生成 state 与 PKCE S256。
 2. 系统浏览器打开独立 TV 授权页，展示与客户端一致的六位确认码。
@@ -134,22 +138,22 @@ TV 登出／撤销时立即清理画面中的服务器、媒体卡片、详情�
 | GET | `/auth/telegram/authorize?request=…` | 短期授权页，仅跳转 Bot |
 | POST | `/auth/telegram/poll` | challengeId、state、codeVerifier → pending / denied / unbound / authorized |
 | POST | `/auth/telegram/cancel` | 同上，撤销尚未消费的请求 |
-| GET | `/session` | TG 身份、绑定、设备状态 |
+| GET | `/session` | TV 账号身份、登录方式、设备状态 |
 | POST | `/session/refresh` | refreshToken、installationId → 旋转凭据 |
 | POST | `/session/logout` | 撤销会话 |
 | POST | `/devices/challenge` | 申请签名 nonce |
 | POST | `/devices/register` | 硬件哈希、公钥、签名与用途同意 |
 | POST | `/devices/heartbeat` | 验证登记公钥和 nonce |
 | GET / DELETE | `/devices` / `/devices/{id}` | 查看／撤销当前用户设备 |
-| GET / POST | `/settings/cloud` | 读取／保存当前 TG 账号的可迁移设置备份 |
+| GET / POST | `/settings/cloud` | 读取／保存当前 TV 账号的可迁移设置备份 |
 | POST | `/servers/authorize` | 白名单地址、Emby 用户 ID 与用户 token 对应校验 |
 | POST | `/watch/rooms` | 以当前影片、版本和位置创建一起看房间 |
 | POST | `/watch/rooms/{code}/join`、`/watch/rooms/{code}/leave` | 加入、退出或由房主解散 |
 | WebSocket | `/watch/rooms/{code}/socket` | 用 TV Bearer 连接，收发状态快照、成员就绪状态、播放操作和时钟消息 |
 
 `authProvider: telegram` 表示身份来自受信任的 Telegram Bot 更新，`authProvider: emby`
-表示身份来自 Emby 用户名密码验证。两者都由服务端按绑定和权益校验，客户端不能自报
-Telegram ID，也不声称使用 Telegram OIDC。身份确认与支付网页登录各用自己的协议和数据表。
+表示身份来自 Emby 用户名密码验证。网关根据受信任的登录结果确定账号归属，并验证设备。
+身份确认与支付网页登录各用自己的协议和数据表。
 
 账号云端设置的更新步骤与恢复行为见 [DUSHENGTV_CLOUD_SETTINGS.md](DUSHENGTV_CLOUD_SETTINGS.md)。
 

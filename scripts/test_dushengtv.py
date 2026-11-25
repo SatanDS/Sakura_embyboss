@@ -121,7 +121,9 @@ class DesktopTests(unittest.TestCase):
         self.now = datetime(2026, 10, 4)
         with self.sessions.begin() as db:
             db.add_all([self.m.User(tg=tg, embyid=f"emby-{tg}", name=f"viewer-{tg}", lv="b", ex=datetime(2099, 1, 1)) for tg in (42, 43)])
-        self.auth = self.m.service.DesktopAuth(self.sessions, self.m.runtime.account_lookup, now=lambda: self.now)
+        self.auth = self.m.service.DesktopAuth(self.sessions, self.m.runtime.account_lookup,
+                                               account_lookup_by_emby=self.m.runtime.account_lookup_by_emby,
+                                               now=lambda: self.now)
         self.installation = "test-installation-1234"
         self.private = Ed25519PrivateKey.generate()
         self.hardware = {"installationId": self.installation, "fingerprint": "a" * 64,
@@ -853,7 +855,6 @@ class DesktopTests(unittest.TestCase):
         self.assertIn("accessToken", restarted.refresh({"refreshToken": tokens["refreshToken"], "installationId": self.installation}))
 
     def test_emby_login_uses_existing_tg_binding_and_reports_provider(self):
-        self.auth.account_lookup_by_emby = self.m.runtime.account_lookup_by_emby
         telegram = self.login()["accessToken"]
         result = self.auth.emby_login("emby-42", "viewer", self.installation)
         self.assertEqual(self.auth.session(result["accessToken"])["authProvider"], "emby")
@@ -875,7 +876,6 @@ class DesktopTests(unittest.TestCase):
         with self.sessions.begin() as db:
             db.add(self.m.LocalUser(embyid=local_id, name="local-viewer", lv="b",
                                     ex=datetime(2099, 1, 1), expired=0))
-        self.auth.account_lookup_by_emby = self.m.runtime.account_lookup_by_emby
         result = self.auth.emby_login(local_id, "local-viewer", self.installation)
         session = self.auth.session(result["accessToken"])
         self.assertEqual(session["authProvider"], "emby")
@@ -901,7 +901,62 @@ class DesktopTests(unittest.TestCase):
         self.assertEqual(self.auth.cloud_settings(token)["settings"]["volume"], 13)
         self.assertTrue(self.auth.revoke(token, self.auth.devices(token)["devices"][0]["id"])["revoked"])
 
-    def test_emby_password_route_rejects_bad_credentials_unbound_accounts_and_limits_attempts(self):
+    def test_native_emby_devices_and_cloud_settings_belong_to_verified_origin_id(self):
+        # A managed account and both independent accounts use the same name.
+        name = "viewer-42"
+        def registered(emby_id, installation):
+            result = self.auth.emby_login(emby_id, name, installation)
+            token = result["accessToken"]
+            self.error("DEVICE_REQUIRED", self.auth.cloud_settings, token)
+            self.auth.register(token, self.registration(token, {**self.hardware, "installationId": installation}))
+            return result
+
+        first = registered("native-a", self.installation)
+        one = first["accessToken"]
+        two = registered("native-a", "native-second-desktop")["accessToken"]
+        other = registered("native-b", self.installation)["accessToken"]
+        owner = self.auth.server_identity(one)["telegramId"]
+        self.assertLess(int(owner), 0)
+        self.assertEqual(self.auth.watch_identity(two)["account"], owner)
+        self.assertNotEqual(self.auth.server_identity(other)["telegramId"], owner)
+        with self.sessions() as db:
+            self.assertEqual(db.query(self.m.User).count(), 2)
+            self.assertEqual(db.query(self.m.LocalUser).count(), 0)
+        self.auth.cloud_settings(one, {"schema": 1, "settings": {"volume": 15}})
+        self.assertEqual(self.auth.cloud_settings(two)["settings"], {"volume": 15})
+        self.assertFalse(self.auth.cloud_settings(other)["available"])
+        devices = self.auth.devices(two)["devices"]
+        self.assertEqual({d["installationId"] for d in devices}, {self.installation, "native-second-desktop"})
+        device = next(d["id"] for d in devices if d["installationId"] == self.installation)
+        self.error("DEVICE_NOT_FOUND", self.auth.revoke, other, device)
+        self.auth.revoke(two, device)
+        self.error("TOKEN_EXPIRED", self.auth.session, one)
+        response = self.client.post(self.m.service.PREFIX + "/session/refresh",
+                                    json={"refreshToken": first["refreshToken"], "installationId": self.installation})
+        self.assertEqual(response.status_code, 401, response.text)
+        self.assertEqual(self.auth.cloud_settings(two)["settings"], {"volume": 15})
+
+    def test_native_emby_and_bot_entitlement_changes_require_new_session(self):
+        emby_id = "independent"
+        native = self.auth.emby_login(emby_id, "viewer", self.installation)
+        with self.sessions.begin() as db:
+            db.add(self.m.LocalUser(embyid=emby_id, name="viewer", lv="b", ex=datetime(2099, 1, 1), expired=1))
+        self.error("ACCOUNT_DISABLED", self.auth.emby_login, emby_id, "viewer", self.installation)
+        with self.sessions.begin() as db:
+            db.get(self.m.LocalUser, emby_id).expired = 0
+        self.error("BOT_UNBOUND", self.auth.session, native["accessToken"])
+        managed = self.auth.emby_login(emby_id, "viewer", self.installation)
+        with self.sessions.begin() as db:
+            db.get(self.m.User, 42).embyid = emby_id
+        self.error("BOT_UNBOUND", self.auth.emby_login, emby_id, "viewer", self.installation)
+        self.error("BOT_UNBOUND", self.auth.session, managed["accessToken"])
+        with self.sessions.begin() as db:
+            db.get(self.m.User, 42).embyid = None
+            db.delete(db.get(self.m.LocalUser, emby_id))
+        self.error("BOT_UNBOUND", self.auth.session, managed["accessToken"])
+        self.error("BOT_UNBOUND", self.auth.refresh, {**managed, "installationId": self.installation})
+
+    def test_emby_password_route_rejects_bad_credentials_ambiguous_accounts_and_limits_attempts(self):
         path = self.m.service.PREFIX + "/auth/emby/login"
         payload = {"username": "viewer", "password": "wrong", "installationId": self.installation}
         malformed = self.client.post(path, json={"username": "viewer", "password": "wrong", "installationId": "short"})
@@ -913,12 +968,14 @@ class DesktopTests(unittest.TestCase):
         self.assertEqual(response.status_code, 401)
         self.m.api.limits.buckets.clear()
         with patch.object(self.m.api.runtime, "authenticate_emby", new=AsyncMock(return_value="emby-42")):
-            self.auth.account_lookup_by_emby = lambda db, emby_id: (_ for _ in ()).throw(self.m.service.TVError("BOT_UNBOUND", "unbound"))
+            with self.sessions.begin() as db:
+                db.get(self.m.User, 43).embyid = "emby-42"
             response = self.client.post(path, json={**payload, "password": "correct"})
         self.assertEqual(response.status_code, 403)
         self.m.api.limits.buckets.clear()
         with patch.object(self.m.api.runtime, "authenticate_emby", new=AsyncMock(return_value="emby-42")):
-            self.auth.account_lookup_by_emby = lambda db, emby_id: {"tg": 42, "embyUserId": emby_id, "displayName": "Viewer"}
+            with self.sessions.begin() as db:
+                db.get(self.m.User, 43).embyid = "emby-43"
             responses = [self.client.post(path, json={**payload, "password": "correct"}) for _ in range(9)]
         self.assertTrue(all(response.status_code == 200 for response in responses[:8]))
         self.assertEqual(responses[-1].status_code, 429)
@@ -1082,7 +1139,6 @@ class DesktopTests(unittest.TestCase):
             worker.join(timeout=5)
 
     def test_emby_password_gateway_authenticates_at_configured_origin(self):
-        self.auth.account_lookup_by_emby = self.m.runtime.account_lookup_by_emby
         route = self.m.service.PREFIX + "/auth/emby/login"
         data = {"username": "viewer", "password": "None", "installationId": self.installation}
         with self.emby49_origin() as state:
@@ -1093,6 +1149,52 @@ class DesktopTests(unittest.TestCase):
                 state.status = status
                 self.assertEqual(self.client.post(route, json=data).status_code, expected)
             self.assertEqual(state.requests, [("/emby/Users/AuthenticateByName", None, {"Username": "viewer", "Pw": "None"})] * 5)
+
+    def test_native_emby_password_login_and_refresh_follow_origin_account_state(self):
+        prefix = self.m.service.PREFIX
+        with self.emby49_origin() as state:
+            with self.sessions.begin() as db:
+                db.get(self.m.User, 42).embyid = None
+            data = {"username": "viewer-42", "password": "fixture", "installationId": self.installation}
+            state.users[state.owner]["Policy"]["IsDisabled"] = True
+            self.assertEqual(self.client.post(prefix + "/auth/emby/login", json=data).status_code, 403)
+            state.users[state.owner]["Policy"]["IsDisabled"] = False
+            login = self.client.post(prefix + "/auth/emby/login", json=data)
+            self.assertEqual(login.status_code, 200, login.text)
+            self.assertNotIn("origin-secret", login.text)
+            token = login.json()["accessToken"]
+            session = self.auth.session(token)
+            self.assertEqual(session["authProvider"], "emby")
+            self.assertLess(int(session["user"]["telegramId"]), 0)
+            self.auth.register(token, self.registration(token))
+            identity = self.auth.server_identity(token)
+            self.assertEqual(identity["embyUserId"], state.owner)
+            auth = self.client.post(prefix + "/servers/authorize", headers={"Authorization": "Bearer " + token},
+                                    json={"serverUrl": "https://emby.test", "embyAccessToken": "user-token",
+                                          "embyUserId": state.owner})
+            self.assertEqual(auth.status_code, 200, auth.text)
+            watch = self.auth.watch_identity(token)["session"]
+            self.now += timedelta(seconds=login.json()["expiresIn"] + 1)
+            self.error("TOKEN_EXPIRED", self.auth.check_watch_session, watch)
+            refresh = {"installationId": self.installation, "refreshToken": login.json()["refreshToken"]}
+            route = prefix + "/session/refresh"
+            malformed = self.client.post(route, json={**refresh, "installationId": {}})
+            self.assertEqual(malformed.status_code, 400, malformed.text)
+            state.status = 503
+            unavailable = self.client.post(route, json=refresh)
+            self.assertEqual(unavailable.status_code, 503, unavailable.text)
+            state.status = 200
+            state.users[state.owner]["Policy"]["IsDisabled"] = True
+            disabled = self.client.post(route, json=refresh)
+            self.assertEqual(disabled.status_code, 403, disabled.text)
+            state.users[state.owner]["Policy"]["IsDisabled"] = False
+            renewed = self.client.post(route, json=refresh)
+            self.assertEqual(renewed.status_code, 200, renewed.text)
+            self.auth.check_watch_session(watch)
+            self.assertEqual(self.auth.server_identity(renewed.json()["accessToken"]), identity)
+            state.status = 404
+            deleted = self.client.post(route, json={**refresh, "refreshToken": renewed.json()["refreshToken"]})
+            self.assertEqual(deleted.status_code, 403, deleted.text)
 
     def test_public_alias_verifies_emby49_token_owner_at_bot_origin(self):
         with self.emby49_origin() as state:
@@ -1273,6 +1375,23 @@ class DesktopTests(unittest.TestCase):
             db.add(self.m.LocalUser(embyid="emby-local", name="local", lv="b", ex=datetime(2099, 1, 1), expired=0))
         with patch.object(bot, "config", config), patch.object(sql, "Session", self.sessions, create=True):
             requests_api.permission(identity)
+
+    def test_requests_permission_for_native_emby_uses_standard_account_policy(self):
+        from bot.dushengtv import requests_api
+        import bot
+        import bot.sql_helper as sql
+        result = self.auth.emby_login("native-only", "viewer-42", self.installation)
+        token = result["accessToken"]
+        self.auth.register(token, self.registration(token))
+        identity = self.auth.server_identity(token)
+        config = SimpleNamespace(moviepilot=SimpleNamespace(status=False, douban_status=True, url="http://mp", lv="b"),
+                                 dushengtv=SimpleNamespace(requests_enabled=True), admins=[], owner=99)
+        with patch.object(bot, "config", config), patch.object(sql, "Session", self.sessions, create=True):
+            requests_api.permission(identity)
+            config.moviepilot.lv = "a"
+            self.error("REQUESTS_FORBIDDEN", requests_api.permission, identity)
+            config.dushengtv.requests_enabled = False
+            self.error("REQUESTS_NOT_CONFIGURED", requests_api.permission, identity)
 
     def test_translation_cloud_settings_exclude_keys_and_unsafe_endpoints(self):
         from bot.dushengtv.cloud_settings import validate_cloud_settings

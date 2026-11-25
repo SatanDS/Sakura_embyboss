@@ -212,7 +212,11 @@ async def profile_avatar(request: Request):
 
 @router.post("/session/refresh")
 async def refresh(request: Request):
-    return await invoke("refresh", await body(request))
+    data = await body(request)
+    native_id = await invoke("native_refresh_account", data)
+    if native_id is not None:
+        await runtime.verify_native_emby_user(native_id)
+    return await invoke("refresh", data, native_id)
 
 
 @router.post("/session/logout")

@@ -60,7 +60,7 @@ class DesktopSession(Base):
     emby_user_id = Column(String(255), nullable=False)
     display_name = Column(String(128), nullable=False)
     username = Column(String(64), nullable=False)
-    # This records which client-facing login method established the session.
+    # emby_native distinguishes sessions established without a managed account.
     auth_provider = Column(String(16), nullable=False, default="telegram", server_default="telegram")
     device_id = Column(String(32), nullable=True, index=True)
     access_hash = Column(String(64), nullable=False, unique=True)
@@ -69,6 +69,10 @@ class DesktopSession(Base):
     revoked_at = Column(DateTime, nullable=True)
     nonce_hash = Column(String(64), nullable=True)
     nonce_expires_at = Column(DateTime, nullable=True)
+
+    @property
+    def public_auth_provider(self):
+        return "emby" if self.auth_provider == "emby_native" else self.auth_provider
 
 
 class RefreshToken(Base):

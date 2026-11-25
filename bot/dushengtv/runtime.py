@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+from urllib.parse import quote
 
 import aiohttp
 
@@ -29,30 +30,39 @@ def account_lookup(db, tg):
 
 
 def account_lookup_by_emby(db, emby_id):
-    """Resolve both Telegram-bound and legacy Emby2 users for TV sessions."""
+    """Use Bot entitlements where present and a stable TV owner otherwise."""
     from bot.sql_helper.sql_emby import Emby
     from bot.sql_helper.sql_emby2 import Emby2
     from bot.payments.entitlements import china_now
 
     tg_rows = db.query(Emby).filter_by(embyid=str(emby_id)).with_for_update().all()
     local_rows = db.query(Emby2).filter_by(embyid=str(emby_id)).with_for_update().all()
-    if len(tg_rows) + len(local_rows) != 1:
-        raise TVError("BOT_UNBOUND", "没有找到唯一的 Emby 账号绑定")
+    if len(tg_rows) + len(local_rows) > 1:
+        raise TVError("BOT_UNBOUND", "此 Emby 账号有多条绑定记录，请联系管理员")
     if tg_rows:
         row = tg_rows[0]
         account = account_lookup(db, row.tg)
         return {**account, "tg": row.tg, "displayName": row.name or "Emby 用户"}
-    row = local_rows[0]
-    allowed = row.lv in {"a", "b"} and not row.expired and row.ex and row.ex > china_now()
-    if not allowed:
+    row = local_rows[0] if local_rows else None
+    if row is not None and not (row.lv in {"a", "b"} and not row.expired and row.ex and row.ex > china_now()):
         raise TVError("ACCOUNT_DISABLED", "Emby 账号已停用或到期")
-    # The Emby2 row is locked above. Keep the mapping after sessions expire.
-    owner = db.query(EmbyOwner).filter_by(emby_user_id=row.embyid).with_for_update().one_or_none()
-    if owner is None:
-        owner = EmbyOwner(emby_user_id=row.embyid)
-        db.add(owner)
-        db.flush()
-    return {"embyUserId": str(row.embyid), "tg": -owner.id, "displayName": row.name or "Emby 用户"}
+    owner_id = db.query(EmbyOwner.id).filter_by(emby_user_id=emby_id)
+    if owner_id.scalar() is None:
+        # Two devices can be the first to log in before any Bot row exists.
+        if db.bind.dialect.name == "sqlite":
+            from sqlalchemy.dialects.sqlite import insert
+            statement = insert(EmbyOwner).values(emby_user_id=emby_id).on_conflict_do_nothing()
+        else:
+            from sqlalchemy.dialects.mysql import insert
+            statement = insert(EmbyOwner).values(emby_user_id=emby_id)
+            statement = statement.on_duplicate_key_update(id=EmbyOwner.id)
+        db.execute(statement)
+    account = {"embyUserId": str(emby_id), "tg": -owner_id.with_for_update().one()[0]}
+    if row is None:
+        account["nativeEmby"] = True
+    else:
+        account["displayName"] = row.name or "Emby 用户"
+    return account
 
 
 def settings():
@@ -75,6 +85,15 @@ def service():
                        max_devices=cfg.max_devices, consent_version=cfg.privacy_version)
 
 
+async def _emby_json(response):
+    payload = bytearray()
+    async for chunk in response.content.iter_chunked(8192):
+        payload.extend(chunk)
+        if len(payload) > 65536:
+            raise ValueError("oversized Emby response")
+    return json.loads(payload)
+
+
 async def authenticate_emby(username, password):
     """Only the configured origin receives the submitted credentials."""
     origin = emby_origin()
@@ -90,18 +109,37 @@ async def authenticate_emby(username, password):
                     raise TVError("RATE_LIMITED", "Emby 登录尝试过于频繁，请稍后再试", 429)
                 if response.status != 200:
                     raise unavailable
-                payload = bytearray()
-                async for chunk in response.content.iter_chunked(8192):
-                    payload.extend(chunk)
-                    if len(payload) > 65536:
-                        raise unavailable
-                data = json.loads(payload)
+                data = await _emby_json(response)
                 user = data.get("User") if isinstance(data, dict) else None
                 if not isinstance(user, dict) or not isinstance(user.get("Id"), str) or not user["Id"] or not data.get("AccessToken"):
                     raise unavailable
                 if user.get("Policy", {}).get("IsDisabled"):
                     raise TVError("ACCOUNT_DISABLED", "Emby 账号已停用", 403)
                 return user["Id"]
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+        raise unavailable from None
+
+
+async def verify_native_emby_user(emby_id):
+    """Check the original account before extending its TV access."""
+    from bot import config
+
+    unavailable = TVError("EMBY_UNAVAILABLE", "暂时无法确认 Emby 账号状态，请稍后重试", 503)
+    if not config.emby_api or emby_id in {".", ".."}:
+        raise unavailable
+    url = f"{emby_origin()}/Users/{quote(emby_id, safe='')}"
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10), trust_env=False) as client:
+            async with client.get(url, headers={"X-Emby-Token": config.emby_api}, allow_redirects=False) as response:
+                if response.status == 404:
+                    raise TVError("ACCOUNT_DISABLED", "Emby 账号已删除或不可用")
+                if response.status != 200:
+                    raise unavailable
+                user = await _emby_json(response)
+                if not isinstance(user, dict) or user.get("Id") != emby_id or not isinstance(user.get("Policy"), dict):
+                    raise unavailable
+                if user["Policy"].get("IsDisabled"):
+                    raise TVError("ACCOUNT_DISABLED", "Emby 账号已停用")
     except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
         raise unavailable from None
 

@@ -164,18 +164,18 @@ class DesktopAuth:
             session = DesktopSession(id=uuid4().hex, tg=account["tg"], installation_id=installation_id,
                                      emby_user_id=account["embyUserId"],
                                      display_name=str(account.get("displayName") or username)[:128],
-                                     username=username[:64], auth_provider="emby",
+                                     username=username[:64], auth_provider="emby_native" if account.get("nativeEmby") else "emby",
                                      expires_at=self.now() + timedelta(seconds=SESSION_SECONDS))
             db.add(session)
             result = self._tokens(db, session)
             return {**result, "status": "authorized", "bound": True, "state": "", "provider": "emby"}
 
     def _session_account(self, db, session):
-        if session.auth_provider == "emby":
+        if session.public_auth_provider == "emby":
             if not self.account_lookup_by_emby:
                 raise TVError("BOT_UNBOUND", "Emby 账号绑定已改变，请重新登录")
             account = self.account_lookup_by_emby(db, session.emby_user_id)
-            if account["tg"] != session.tg:
+            if account["tg"] != session.tg or bool(account.get("nativeEmby")) != (session.auth_provider == "emby_native"):
                 raise TVError("BOT_UNBOUND", "Emby 账号绑定已改变，请重新登录")
             return account
         return self.account_lookup(db, session.tg)
@@ -204,7 +204,7 @@ class DesktopAuth:
 
     def _identity(self, db, token, *, require_device=True):
         if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9_-]{43}", token):
-            raise TVError("TOKEN_EXPIRED", "请先登录 Telegram", 401)
+            raise TVError("TOKEN_EXPIRED", "请先登录 DuShengTV", 401)
         session = db.query(DesktopSession).filter_by(access_hash=digest(token)).one_or_none()
         if session is None:
             raise TVError("TOKEN_EXPIRED", "登录已过期，请重新登录", 401)
@@ -219,7 +219,7 @@ class DesktopAuth:
     def session(self, token):
         with self.sessions.begin() as db:
             session, device = self._identity(db, token, require_device=False)
-            return {"authProvider": session.auth_provider, "bound": True, "allowed": True, "watchRooms": device is not None,
+            return {"authProvider": session.public_auth_provider, "bound": True, "allowed": True, "watchRooms": device is not None,
                     "user": {"telegramId": str(session.tg), "displayName": session.display_name, "username": session.username},
                     "device": {"installationId": session.installation_id, "allowed": device is not None},
                     "maxDevices": self.max_devices}
@@ -265,7 +265,19 @@ class DesktopAuth:
             row = db.query(CloudSettings).filter_by(tg=session.tg).populate_existing().one_or_none()
             return self._cloud_result(row)
 
-    def refresh(self, data):
+    def native_refresh_account(self, data):
+        """Resolve the account to check on Emby without holding rotation locks."""
+        token = valid(data.get("refreshToken"), r"[A-Za-z0-9_-]{43}")
+        installation_id = valid(data.get("installationId"), r"[A-Za-z0-9_-]{16,64}", "设备安装标识无效")
+        with self.sessions.begin() as db:
+            return (db.query(DesktopSession.emby_user_id)
+                    .join(RefreshToken, RefreshToken.session_id == DesktopSession.id)
+                    .filter(RefreshToken.token_hash == digest(token), RefreshToken.used_at.is_(None),
+                            DesktopSession.installation_id == installation_id,
+                            DesktopSession.auth_provider == "emby_native", DesktopSession.revoked_at.is_(None),
+                            DesktopSession.expires_at > self.now()).scalar())
+
+    def refresh(self, data, verified_emby_id=None):
         token = valid(data.get("refreshToken"), r"[A-Za-z0-9_-]{43}")
         replay = False
         with self.sessions.begin() as db:
@@ -286,10 +298,12 @@ class DesktopAuth:
                 replay = True
             else:
                 self._live(db, session)
+                if session.auth_provider == "emby_native" and verified_emby_id != session.emby_user_id:
+                    raise TVError("EMBY_UNAVAILABLE", "暂时无法确认 Emby 账号状态，请稍后重试", 503)
                 saved.used_at = self.now()
                 result = self._tokens(db, session)
         if replay:
-            raise TVError("TOKEN_REPLAYED", "登录凭据已使用，请重新进行 Telegram 授权", 401)
+            raise TVError("TOKEN_REPLAYED", "登录凭据已使用，请重新登录 DuShengTV", 401)
         return result
 
     def logout(self, token):
@@ -410,8 +424,11 @@ class DesktopAuth:
     def server_identity(self, token):
         with self.sessions.begin() as db:
             session, _ = self._identity(db, token)
-            return {"telegramId": str(session.tg), "embyUserId": session.emby_user_id,
-                    "authProvider": session.auth_provider}
+            identity = {"telegramId": str(session.tg), "embyUserId": session.emby_user_id,
+                        "authProvider": session.public_auth_provider}
+            if session.auth_provider == "emby_native":
+                identity["nativeEmby"] = True
+            return identity
 
     def watch_identity(self, token):
         with self.sessions.begin() as db:
@@ -428,3 +445,5 @@ class DesktopAuth:
                 session = (db.query(DesktopSession).filter_by(id=session_id)
                            .populate_existing().with_for_update().one_or_none())
             self._live(db, session)
+            if session.auth_provider == "emby_native" and session.access_expires_at <= self.now():
+                raise TVError("TOKEN_EXPIRED", "登录令牌已过期", 401)

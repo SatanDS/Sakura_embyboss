@@ -22,6 +22,10 @@ def permission(identity):
     cfg = config.moviepilot
     if not getattr(config.dushengtv, "requests_enabled", True) or not (cfg.status or cfg.douban_status) or not cfg.url:
         raise TVError("REQUESTS_NOT_CONFIGURED", "管理员尚未启用求片服务", 503)
+    if identity.get("nativeEmby"):
+        if cfg.lv == "a":
+            raise TVError("REQUESTS_FORBIDDEN", "当前账号没有求片权限", 403)
+        return
     tg = int(identity["telegramId"])
     with Session() as db:
         if identity.get("authProvider") == "emby" and tg < 0:
