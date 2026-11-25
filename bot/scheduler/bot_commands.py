@@ -1,105 +1,75 @@
-"""
-bot_commands - 初始化设置命令
-"""
-import asyncio
+"""按当前权限更新 Telegram 命令菜单。"""
+
 from bot import owner, admins, group, LOGGER, user_p, admin_p, owner_p, bot
 from pyrogram.types import BotCommandScopeChatMember, BotCommandScopeChat, BotCommandScopeAllPrivateChats, \
     BotCommandScopeAllGroupChats
 
 
-# 定义一个类，用来封装命令列表和设置命令的逻辑
 class BotCommands:
     user_p = user_p
     admin_p = admin_p
     owner_p = owner_p
     client = bot
 
-    # 定义一个方法，用来设置命令
+    @staticmethod
+    def _commands_for(uid):
+        if uid == owner:
+            return owner_p
+        if uid in admins:
+            return admin_p
+        return user_p
+
+    @staticmethod
+    async def _set_commands(client, commands, scope):
+        target = (f"{type(scope).__name__} chat_id={getattr(scope, 'chat_id', None)} "
+                  f"user_id={getattr(scope, 'user_id', None)}")
+        try:
+            if await client.set_bot_commands(commands, scope=scope):
+                return True
+            LOGGER.error(f"命令菜单更新失败：{target}，Telegram 未确认成功")
+        except Exception as exc:
+            LOGGER.error(f"命令菜单更新失败：{target}，{type(exc).__name__}")
+        return False
+
     @staticmethod
     async def set_commands(client):
-        try:
-            try:
-                await client.delete_bot_commands(scope=BotCommandScopeAllGroupChats())  # 删除所有群聊指令
-            except:
-                pass
-            try:
-                await client.delete_bot_commands(scope=BotCommandScopeAllPrivateChats())  # 删除所有私聊命令
-            except:
-                pass
-            try:
-                await client.set_bot_commands(user_p, scope=BotCommandScopeAllPrivateChats())  # 所有私聊命令
-            except:
-                pass
-            try:
-                await client.set_bot_commands(user_p, scope=BotCommandScopeAllGroupChats())  # 所有群聊命令
-            except:
-                pass
+        targets = [(user_p, BotCommandScopeAllPrivateChats()),
+                   (user_p, BotCommandScopeAllGroupChats())]
+        for uid in dict.fromkeys([*admins, owner]):
+            commands = BotCommands._commands_for(uid)
+            targets.append((commands, BotCommandScopeChat(chat_id=uid)))
+            for chat_id in group:
+                targets.append((commands, BotCommandScopeChatMember(chat_id=chat_id, user_id=uid)))
 
-            # 私聊
-            for admin_id in admins:
-                try:
-                    await client.set_bot_commands(admin_p, scope=BotCommandScopeChat(chat_id=admin_id))
-                except:
-                    pass
-            try:
-                await client.set_bot_commands(owner_p, scope=BotCommandScopeChat(chat_id=owner))
-            except:
-                pass
-            # 群组
-            for i in group:
-                for admin_id in admins:
-                    try:
-                        await client.set_bot_commands(admin_p,
-                                                      scope=BotCommandScopeChatMember(chat_id=i, user_id=admin_id))
-                    except:
-                        pass
-                try:
-                    await client.set_bot_commands(owner_p,
-                                                  scope=BotCommandScopeChatMember(chat_id=i, user_id=owner))
-                except:
-                    pass
+        failures = 0
+        for commands, scope in targets:
+            if not await BotCommands._set_commands(client, commands, scope):
+                failures += 1
+        if failures:
+            LOGGER.warning(f"命令菜单初始化有 {failures} 项失败；私聊 /start 可重试当前用户菜单")
+        else:
             LOGGER.info("————初始化 命令显示 done————")
-        except ConnectionError as e:
-            LOGGER.error(f'命令初始化错误：{e}')
+        return failures == 0
 
-    # 提权时及时改变命令列表显示
+    @staticmethod
+    async def refresh_private_commands(client, uid):
+        return await BotCommands._set_commands(
+            client, BotCommands._commands_for(uid), BotCommandScopeChat(chat_id=uid))
+
+    @staticmethod
+    async def refresh_user_commands(client, uid):
+        success = await BotCommands.refresh_private_commands(client, uid)
+        for chat_id in group:
+            if not await BotCommands._set_commands(
+                    client, BotCommands._commands_for(uid),
+                    BotCommandScopeChatMember(chat_id=chat_id, user_id=uid)):
+                success = False
+        return success
+
     @staticmethod
     async def pro_commands(client, uid):
-        try:
-            try:
-                await client.set_bot_commands(admin_p, scope=BotCommandScopeChat(chat_id=uid))
-            except:
-                pass
-            for i in group:
-                try:
-                    await client.set_bot_commands(admin_p, scope=BotCommandScopeChatMember(chat_id=i, user_id=uid))
-                except:
-                    pass
-        except Exception as e:
-            LOGGER.error(f'提权命令列表设置失败：{e}')
+        return await BotCommands.refresh_user_commands(client, uid)
 
-    # 降权时及时改变命令列表显示
     @staticmethod
     async def rev_commands(client, uid):
-        try:
-            try:
-                await client.set_bot_commands(user_p, scope=BotCommandScopeChat(chat_id=uid))
-            except:
-                pass
-            for i in group:
-                try:
-                    await client.set_bot_commands(user_p, scope=BotCommandScopeChatMember(chat_id=i, user_id=uid))
-                except:
-                    pass
-        except Exception as e:
-            LOGGER.error(f'降权命令列表设置失败：{e}')
-
-
-""" 笔记
-@staticmethod 
-静态方法
-
-lamba 匿名函数
-类属性可以用来存储类的常量或者默认值，比如 class A: foo = 5。
-实例属性可以用来存储实例的状态或者特征，比如 def __init__(self, name, age): self.name = name  self.age = age
-"""
+        return await BotCommands.refresh_user_commands(client, uid)

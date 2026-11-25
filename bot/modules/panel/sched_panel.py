@@ -13,9 +13,8 @@ from bot.func_helper.scheduler import scheduler
 from bot.scheduler import *
 
 
-# 初始化命令 开机检查重启
+# 开机检查重启
 loop = asyncio.get_event_loop()
-loop.call_later(5, lambda: loop.create_task(BotCommands.set_commands(client=bot)))
 loop.call_later(5, lambda: loop.create_task(check_restart()))
 loop.call_later(8, lambda: loop.create_task(warmup_peer_cache()))
 
