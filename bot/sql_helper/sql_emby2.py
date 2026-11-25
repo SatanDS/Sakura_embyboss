@@ -1,5 +1,7 @@
 from bot.sql_helper import Base, Session
-from sqlalchemy import Column, String, DateTime, Integer
+from datetime import datetime, timedelta
+import re
+from sqlalchemy import Column, String, DateTime, Integer, func
 from sqlalchemy import or_
 
 
@@ -28,6 +30,34 @@ def sql_add_emby2(embyid, name, cr, ex, pwd='5210', pwd2='1234', lv='b', expired
             session.commit()
         except:
             pass
+
+
+def sql_import_existing_emby2(embyid, name, days):
+    """Register a verified existing account; preserve any prior Bot identity."""
+    from bot.sql_helper.sql_emby import Emby
+
+    if not isinstance(embyid, str) or not re.fullmatch(r'[0-9a-f]{32}', embyid):
+        raise ValueError('Invalid canonical Emby ID')
+    if not isinstance(name, str) or not name.strip() or len(name) > 128:
+        raise ValueError('Invalid Emby name')
+    if not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= 3650:
+        raise ValueError('Invalid subscription days')
+    with Session() as session:
+        session.connection(execution_options={'isolation_level': 'SERIALIZABLE'})
+        # Lock both identity ranges so concurrent imports cannot create a second owner.
+        for model in (Emby, Emby2):
+            matches = session.query(model).filter(or_(
+                model.name == name,
+                func.lower(func.replace(model.embyid, '-', '')) == embyid,
+            )).with_for_update().all()
+            if matches:
+                return None
+        now = datetime.now().replace(microsecond=0)
+        expires = now + timedelta(days=days)
+        session.add(Emby2(embyid=embyid, name=name, pwd=None, pwd2=None,
+                          lv='b', cr=now, ex=expires, expired=0))
+        session.commit()
+        return expires
 
 
 def sql_get_emby2(name):

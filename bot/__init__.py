@@ -106,6 +106,7 @@ admin_p = user_p + [
     BotCommand("sync_favorites", "同步收藏记录 [管理]"),
     BotCommand("embyadmin", "开启emby控制台权限 [管理]"),
     BotCommand("ucr", "私聊创建非tg的emby用户 [管理]"),
+    BotCommand("uimport", "私聊导入已有Emby账号 [管理]"),
     BotCommand("uinfo", "查询指定用户名 [管理]"),
     BotCommand("urm", "删除指定用户名 [管理]"),
     BotCommand("userip", "查询指定用户播放过的设备&ip [管理]"),

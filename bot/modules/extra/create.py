@@ -1,7 +1,7 @@
 import asyncio
 from datetime import datetime
 
-from pyrogram import filters
+from pyrogram import filters, enums
 from pyrogram.types import CallbackQuery
 
 from bot import bot, prefixes, LOGGER, owner, bot_photo, schedall, config
@@ -10,7 +10,7 @@ from bot.func_helper.filters import admins_on_filter
 from bot.func_helper.fix_bottons import uinfo_ikb, uinfo_delete_confirm_ikb, close_it_ikb
 from bot.func_helper.msg_utils import sendMessage, editMessage, sendPhoto, callAnswer
 from bot.sql_helper.sql_emby import sql_get_emby, sql_update_emby, Emby
-from bot.sql_helper.sql_emby2 import sql_get_emby2, sql_delete_emby2, sql_add_emby2, sql_update_emby2
+from bot.sql_helper.sql_emby2 import sql_get_emby2, sql_delete_emby2, sql_add_emby2, sql_update_emby2, sql_import_existing_emby2
 from bot.sql_helper.sql_emby2 import Emby2
 
 
@@ -51,6 +51,46 @@ async def login_account(_, msg):
                                        f"®️ 管理员 {msg.from_user.first_name} - `{msg.from_user.id}` 已经创建了一个非tg绑定用户 #{name} 有效期**{days}**天")
             LOGGER.info(
                 f"【创建非tg账户】：管理员 {msg.from_user.first_name}[{msg.from_user.id}] - 建立了账户 {name}，有效期{days}天 ")
+
+
+@bot.on_message(filters.command('uimport', prefixes) & admins_on_filter & filters.private)
+async def import_existing_account(_, msg):
+    try:
+        if len(msg.command) != 3:
+            raise ValueError
+        name = msg.command[1].strip()
+        days = int(msg.command[2])
+        if not name or len(name) > 128 or not 1 <= days <= 3650:
+            raise ValueError
+    except (IndexError, TypeError, ValueError):
+        return await sendMessage(msg, '用法：/uimport 用户名 天数（1–3650）\n例如：/uimport 俞 365\n导入后账号纳入 Bot 订阅管理，到期可能停用原 Emby 账号。')
+
+    reply = await msg.reply('正在核对现有 Emby 账号……')
+    try:
+        success, users = await emby.users()
+        if not success or not isinstance(users, list):
+            return await reply.edit('读取 Emby 用户失败，未导入，请稍后重试。')
+        matches = [user for user in users if isinstance(user, dict) and user.get('Name') == name]
+        if len(matches) != 1:
+            return await reply.edit('没有找到唯一的同名 Emby 账号，未导入；请核对 Emby 后台的完整用户名。')
+        user = matches[0]
+        if not isinstance(user.get('Policy'), dict) or user['Policy'].get('IsDisabled') is not False:
+            return await reply.edit('账号已停用或状态无法确认，未导入；请先在 Emby 后台核对状态。')
+        expires = sql_import_existing_emby2(user.get('Id'), user['Name'], days)
+        if expires is None:
+            return await reply.edit('该用户名或 Emby 用户 ID 已登记到 Bot，未覆盖原记录。请用 /uinfo 查询已有账号。')
+    except Exception as error:
+        LOGGER.error(f'【导入已有Emby账号】失败：{type(error).__name__}')
+        return await reply.edit('导入未完成，请检查 Bot 日志后重试；原 Emby 账号未修改。')
+
+    return await reply.edit(
+        f'已导入现有账号：{name}\n'
+        f'到期时间：{expires:%Y-%m-%d %H:%M:%S}\n'
+        '原账号、密码和观看记录保持原样，无需绑定 Telegram。\n'
+        f'需要白名单线路时，再发送：/prouser {name}\n'
+        '注意：到期后 Bot 可能停用整个 Emby 账号，请提前续期。',
+        parse_mode=enums.ParseMode.DISABLED,
+    )
 
 
 # 删除指定用户名账号命令
