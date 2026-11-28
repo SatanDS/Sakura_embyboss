@@ -77,6 +77,48 @@ class NormalUserListTests(unittest.IsolatedAsyncioTestCase):
         get_users.assert_awaited_once_with(866296028)
         self.assertIn('<a href="tg://user?id=866296028">rr1245</a>', text)
         self.assertIn("到期: <code>2026-10-08 04:03:44</code>", text)
+
+    async def test_non_telegram_emby2_accounts_are_loaded_and_rendered(self):
+        native = SimpleNamespace(
+            embyid="ucr-emby-id",
+            name="ucr-user",
+            ex=datetime(2026, 12, 31, 23, 59, 59),
+            lv="b",
+            expired=0,
+        )
+        with patch.object(view_user, "get_all_emby", return_value=[]), \
+                patch.object(view_user, "get_all_emby2", return_value=[native]) as get_all_emby2:
+            users = await view_user._load_users(
+                object(), view_user.Emby.lv == "b", "普通用户列表",
+                secondary_condition=view_user.Emby2.lv == "b",
+            )
+
+        self.assertEqual(users, [native])
+        get_all_emby2.assert_called_once()
+        text = await view_user.create_normaluser_text(users, page=1)
+        self.assertIn("TGID: <code>未设置</code>", text)
+        self.assertIn("TG用户名: <code>未设置</code>", text)
+        self.assertIn("Emby用户名: ucr-user", text)
+
+    async def test_non_telegram_emby2_whitelist_is_visible(self):
+        native = SimpleNamespace(
+            embyid="ucr-whitelist-id",
+            name="ucr-whitelist",
+            ex=datetime(2026, 12, 31, 23, 59, 59),
+            lv="a",
+            expired=0,
+        )
+        call = self.callback("whitelist")
+        with patch.object(view_user, "get_all_emby", return_value=[]):
+            with patch.object(view_user, "get_all_emby2", return_value=[native]) as get_all_emby2:
+                with patch.object(view_user.bot, "get_users", new=AsyncMock()):
+                    with patch.object(view_user, "callAnswer", new=AsyncMock()):
+                        await view_user.list_whitelist(None, call)
+
+        get_all_emby2.assert_called_once()
+        text = call.message.reply_text.await_args.kwargs["text"]
+        self.assertIn("Emby用户名: ucr-whitelist", text)
+        self.assertIn("TGID: <code>未设置</code>", text)
     async def test_telegram_username_is_cached_and_missing_username_is_safe(self):
         first = SimpleNamespace(tg=1001, name="one", ex=None)
         second = SimpleNamespace(tg=1001, name="one", ex=None)
@@ -107,6 +149,7 @@ class NormalUserListTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(callback=callback_name):
                 call = self.callback(callback_name)
                 with patch.object(view_user, "get_all_emby", return_value=users), \
+                        patch.object(view_user, "get_all_emby2", return_value=[]), \
                         patch.object(view_user.bot, "get_users", new=AsyncMock(
                             return_value=SimpleNamespace(username="test_viewer"))), \
                         patch.object(view_user, "callAnswer", new=AsyncMock()) as answer:
@@ -136,6 +179,7 @@ class NormalUserListTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(callback=callback_name):
                 call = self.callback(callback_name, media=None)
                 with patch.object(view_user, "get_all_emby", return_value=users), \
+                        patch.object(view_user, "get_all_emby2", return_value=[]), \
                         patch.object(view_user.bot, "get_users", new=AsyncMock(
                             return_value=SimpleNamespace(username="test_viewer"))), \
                         patch.object(view_user, "callAnswer", new=AsyncMock()) as answer:
@@ -186,6 +230,7 @@ class NormalUserListTests(unittest.IsolatedAsyncioTestCase):
     async def test_empty_list_callback_still_opens_text_panel(self):
         call = self.callback()
         with patch.object(view_user, "get_all_emby", return_value=[]), \
+                patch.object(view_user, "get_all_emby2", return_value=[]), \
                 patch.object(view_user, "callAnswer", new=AsyncMock()) as answer:
             await view_user.list_normaluser(None, call)
         self.assertIn("暂无普通用户。", call.message.reply_text.await_args.kwargs["text"])
@@ -198,6 +243,7 @@ class NormalUserListTests(unittest.IsolatedAsyncioTestCase):
                 call = self.callback()
                 query = {"side_effect": failure} if isinstance(failure, Exception) else {"return_value": failure}
                 with patch.object(view_user, "get_all_emby", **query), \
+                        patch.object(view_user, "get_all_emby2", return_value=[]), \
                         patch.object(view_user, "callAnswer", new=AsyncMock()) as answer:
                     await view_user.list_normaluser(None, call)
                 call.message.reply_text.assert_not_awaited()
@@ -210,6 +256,7 @@ class NormalUserListTests(unittest.IsolatedAsyncioTestCase):
         call = self.callback()
         call.message.reply_text.side_effect = RuntimeError("Telegram unavailable")
         with patch.object(view_user, "get_all_emby", return_value=[]), \
+                patch.object(view_user, "get_all_emby2", return_value=[]), \
                 patch.object(view_user, "callAnswer", new=AsyncMock()) as answer:
             await view_user.list_normaluser(None, call)
         answer.assert_awaited_once()
@@ -220,6 +267,7 @@ class NormalUserListTests(unittest.IsolatedAsyncioTestCase):
         call = self.callback("normaluser:1", media=None)
         call.message.edit_text.side_effect = MessageNotModified()
         with patch.object(view_user, "get_all_emby", return_value=[]), \
+                patch.object(view_user, "get_all_emby2", return_value=[]), \
                 patch.object(view_user, "callAnswer", new=AsyncMock()) as answer:
             await view_user.normaluser_page(None, call)
         call.message.edit_text.assert_awaited_once()

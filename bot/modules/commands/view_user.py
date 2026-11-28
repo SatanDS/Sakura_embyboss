@@ -7,6 +7,7 @@ from bot.func_helper.filters import admins_on_filter
 from bot.func_helper.msg_utils import editMessage
 from bot.func_helper.fix_bottons import whitelist_page_ikb, normaluser_page_ikb,devices_page_ikb 
 from bot.sql_helper.sql_emby import get_all_emby, Emby
+from bot.sql_helper.sql_emby2 import get_all_emby2, Emby2
 from bot.func_helper.msg_utils import callAnswer
 import asyncio
 import time
@@ -77,10 +78,22 @@ def _active_whitelist_filter():
     )
 
 
-async def _load_users(call, condition, label):
+def _active_whitelist_filter_emby2():
+    return and_(
+        Emby2.lv == 'a',
+        Emby2.expired == 0,
+        Emby2.ex.isnot(None),
+        Emby2.ex > datetime.now(),
+    )
+
+
+async def _load_users(call, condition, label, secondary_condition=None):
     """Load a list for the admin panel and surface database failures."""
     try:
         users = get_all_emby(condition)
+        if users is not None and secondary_condition is not None:
+            secondary_users = get_all_emby2(secondary_condition)
+            users = None if secondary_users is None else list(users) + list(secondary_users)
     except Exception:
         LOGGER.exception("用户列表查询失败: {}", label)
         await callAnswer(call, f"⚠️ {label}加载失败，请稍后重试", True)
@@ -176,8 +189,8 @@ async def _edit_user_list(call, text, keyboard, label):
     return True
 
 
-async def _show_user_list(call, condition, label, requested_page=1):
-    users = await _load_users(call, condition, label)
+async def _show_user_list(call, condition, label, requested_page=1, secondary_condition=None):
+    users = await _load_users(call, condition, label, secondary_condition)
     if users is None:
         return
     try:
@@ -201,24 +214,28 @@ async def _show_user_list(call, condition, label, requested_page=1):
 
 @bot.on_callback_query(filters.regex('^whitelist$') & admins_on_filter)
 async def list_whitelist(_, call):
-    await _show_user_list(call, _active_whitelist_filter(), '白名单列表')
+    await _show_user_list(call, _active_whitelist_filter(), '白名单列表',
+                          secondary_condition=_active_whitelist_filter_emby2())
 
 
 @bot.on_callback_query(filters.regex('^normaluser$') & admins_on_filter)
 async def list_normaluser(_, call):
-    await _show_user_list(call, Emby.lv == 'b', '普通用户列表')
+    await _show_user_list(call, Emby.lv == 'b', '普通用户列表',
+                          secondary_condition=Emby2.lv == 'b')
 
 
 @bot.on_callback_query(filters.regex('^whitelist:') & admins_on_filter)
 async def whitelist_page(_, call):
     await _show_user_list(call, _active_whitelist_filter(), '白名单列表',
-                          call.data.split(':', 1)[1])
+                          call.data.split(':', 1)[1],
+                          secondary_condition=_active_whitelist_filter_emby2())
 
 
 @bot.on_callback_query(filters.regex('^normaluser:') & admins_on_filter)
 async def normaluser_page(_, call):
     await _show_user_list(call, Emby.lv == 'b', '普通用户列表',
-                          call.data.split(':', 1)[1])
+                          call.data.split(':', 1)[1],
+                          secondary_condition=Emby2.lv == 'b')
 
 
 async def _create_user_text(users, page, title, empty_text):
